@@ -295,4 +295,4 @@ export type ResourceStatus = 'available' | 'allocated' | 'in_transit' | 'deploye
 
 export type PredictionType = 'severity' | 'spread' | 'duration' | 'impact'
 
-export type UserRole = 'admin' | 'responder' | 'analyst' | 'viewer'
+export type UserRole = 'admin' | 'ngo' | 'victim' | 'donor' | 'volunteer'

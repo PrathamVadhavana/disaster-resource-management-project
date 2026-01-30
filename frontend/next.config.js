@@ -1,9 +1,16 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'standalone',  // Add this line
+  output: 'standalone',
   images: {
-    domains: ['images.unsplash.com', 'api.mapbox.com'],
     remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'images.unsplash.com',
+      },
+      {
+        protocol: 'https',
+        hostname: 'api.mapbox.com',
+      },
       {
         protocol: 'https',
         hostname: '**.supabase.co',
