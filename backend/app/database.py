@@ -6,12 +6,17 @@ from typing import AsyncGenerator
 
 # Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+supabase_key = os.getenv("SUPABASE_KEY")  # Public Anon Key
+supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY") # Secret Service Role Key
 
-if not supabase_url or not supabase_key:
+if not supabase_url or not supabase_key or not supabase_service_key:
     raise ValueError("Missing Supabase credentials in environment variables")
 
+# Client for public operations (respects RLS)
 supabase: Client = create_client(supabase_url, supabase_key)
+
+# Client for admin operations (bypasses RLS)
+supabase_admin: Client = create_client(supabase_url, supabase_service_key)
 
 # SQLAlchemy setup for direct database access if needed
 DATABASE_URL = os.getenv(

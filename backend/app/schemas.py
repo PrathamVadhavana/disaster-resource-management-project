@@ -208,6 +208,15 @@ class AllocationResponse(BaseModel):
     unmet_needs: List[Dict[str, Any]]
 
 
+
+class UserRole(str, Enum):
+    VICTIM = "victim"
+    NGO = "ngo"
+    DONOR = "donor"
+    VOLUNTEER = "volunteer"
+    ADMIN = "admin"
+
+
 class UserLogin(BaseModel):
     email: str
     password: str
@@ -217,6 +226,7 @@ class UserRegister(BaseModel):
     email: str
     password: str = Field(..., min_length=8)
     full_name: Optional[str] = None
+    role: UserRole = UserRole.VICTIM
 
 
 class Token(BaseModel):

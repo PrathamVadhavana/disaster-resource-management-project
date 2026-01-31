@@ -12,13 +12,14 @@ security = HTTPBearer()
 async def register(user: UserRegister):
     """Register a new user"""
     try:
-        # Create auth user
+        # 1. Create auth user
         auth_response = supabase.auth.sign_up({
             "email": user.email,
             "password": user.password,
             "options": {
                 "data": {
-                    "full_name": user.full_name
+                    "full_name": user.full_name,
+                    "role": user.role
                 }
             }
         })
@@ -26,15 +27,26 @@ async def register(user: UserRegister):
         if not auth_response.user:
             raise HTTPException(status_code=400, detail="Registration failed")
         
-        # Create user profile
+        # 2. Create user profile using ADMIN client (bypasses RLS)
         profile_data = {
             "id": auth_response.user.id,
             "email": user.email,
             "full_name": user.full_name,
-            "role": "viewer"
+            "role": user.role
         }
         
-        supabase.table("users").insert(profile_data).execute()
+        try:
+            # Using table("profiles") instead of "users" and supabase_admin
+            from app.database import supabase_admin
+            supabase_admin.table("profiles").insert(profile_data).execute()
+        except Exception as db_error:
+            # If profile creation fails, we should ideally rollback user creation 
+            # or have a retry mechanism. For now, we log and return error.
+            print(f"Database Error: {str(db_error)}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"User created but profile creation failed: {str(db_error)}"
+            )
         
         return Token(
             access_token=auth_response.session.access_token,
@@ -43,8 +55,11 @@ async def register(user: UserRegister):
             email=user.email
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Registration Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
 
 
 @router.post("/login", response_model=Token)
