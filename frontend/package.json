@@ -28,7 +28,8 @@
         "react-leaflet": "latest",
         "recharts": "latest",
         "tailwind-merge": "latest",
-        "zod": "latest"
+        "zod": "latest",
+        "zustand": "^5.0.11"
     },
     "devDependencies": {
         "@tanstack/react-query-devtools": "latest",
