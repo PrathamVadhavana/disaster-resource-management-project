@@ -4,6 +4,7 @@ import './globals.css'
 import { AuthProvider } from '@/lib/auth-provider'
 import { QueryProvider } from '@/lib/query-provider'
 import { ThemeProvider } from '@/components/theme-provider'
+import 'react-phone-number-input/style.css' // Global import for Phone Input
 
 const spaceGrotesk = Space_Grotesk({
   subsets: ['latin'],

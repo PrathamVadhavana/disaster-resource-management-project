@@ -220,6 +220,7 @@ export interface Database {
           phone: string | null
           organization: string | null
           metadata: Json | null
+          is_profile_completed: boolean
         }
         Insert: {
           id: string
@@ -231,6 +232,7 @@ export interface Database {
           phone?: string | null
           organization?: string | null
           metadata?: Json | null
+          is_profile_completed?: boolean
         }
         Update: {
           id?: string
@@ -242,6 +244,7 @@ export interface Database {
           phone?: string | null
           organization?: string | null
           metadata?: Json | null
+          is_profile_completed?: boolean
         }
       }
     }

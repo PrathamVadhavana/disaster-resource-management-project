@@ -2,7 +2,15 @@ import AuthForm from '@/components/auth/AuthForm';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 
-export default function LoginPage() {
+// Define props for the page
+interface LoginPageProps {
+    searchParams: Promise<{ [key: string]: string | string[] | undefined }>
+}
+
+export default async function LoginPage({ searchParams }: LoginPageProps) {
+    const params = await searchParams;
+    const initialView = params.view === 'signup' ? 'signup' : 'login';
+
     return (
         <div className="min-h-screen bg-white dark:bg-slate-950 flex flex-col items-center justify-center p-4 relative overflow-hidden">
             {/* Dynamic Background */}
@@ -24,7 +32,7 @@ export default function LoginPage() {
                     <p className="text-slate-600 dark:text-slate-400 font-medium">Disaster Relief Coordination Platform</p>
                 </div>
 
-                <AuthForm initialView="login" />
+                <AuthForm initialView={initialView as 'login' | 'signup'} />
             </div>
         </div>
     );

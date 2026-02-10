@@ -2,12 +2,13 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
-import { User, Session, AuthError, SupabaseClient } from '@supabase/supabase-js'
+import { User, Session, AuthError } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/client'
 import { Database } from '@/types/supabase'
 
 type UserProfile = Database['public']['Tables']['users']['Row']
 type UserProfileUpdate = Database['public']['Tables']['users']['Update']
+type UserProfileInsert = Database['public']['Tables']['users']['Insert']
 type UserRole = Database['public']['Enums']['user_role']
 
 interface AuthContextType {
@@ -30,9 +31,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const router = useRouter()
 
-  // FIX: Explicitly cast the client to include the Database generic.
-  // This resolves the "parameter of type never" errors by linking the client to your schema.
-  const supabase = createClient() as SupabaseClient<Database>
+  const supabase = createClient()
 
   useEffect(() => {
     // Get initial session
@@ -61,48 +60,68 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
 
     return () => subscription.unsubscribe()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const loadProfile = async (currentUser: User) => {
     try {
-      let { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', currentUser.id)
-        .maybeSingle()
+      // Retry loop — the DB trigger may take a moment to create the profile row
+      let profileData: UserProfile | null = null
+      let attempts = 0
+      const maxAttempts = 5
 
-      if (error) throw error
+      while (!profileData && attempts < maxAttempts) {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', currentUser.id)
+          .maybeSingle()
 
-      if (!data) {
-        console.warn('Profile missing for user, attempting auto-creation...')
+        if (error) {
+          console.error('Error fetching profile:', error)
+          break
+        }
 
-        // Safely extract metadata with fallback
+        if (data) {
+          profileData = data as UserProfile
+        } else {
+          // Profile not yet created by trigger — wait and retry
+          await new Promise(resolve => setTimeout(resolve, 1000))
+          attempts++
+        }
+      }
+
+      // If still no profile after retries, create one as fallback
+      if (!profileData) {
+        console.warn('Profile missing after retries, creating fallback...')
         const metadata = currentUser.user_metadata || {}
-        // Cast to any to bypass strict enum checks during auto-creation if mismatched
-        const role = (metadata.role || 'victim')
+        const role = (metadata.role as UserRole) || 'victim'
 
-        const now = new Date().toISOString()
-
-        // Use 'as any' to bypass the stubborn 'never' type error. 
-        // We know this table exists and the schema is correct.
-        const { error: insertError } = await (supabase.from('users') as any).upsert({
+        const insertData: UserProfileInsert = {
           id: currentUser.id,
           email: currentUser.email!,
           role: role,
-          full_name: metadata.full_name || null,
-          updated_at: now
-        })
+          full_name: (metadata.full_name as string) || null,
+          updated_at: new Date().toISOString(),
+        }
+
+        // Cast needed: Supabase SDK resolves Insert type to 'never' due to generic chain issue
+        const { error: insertError } = await (supabase.from('users') as any)
+          .upsert(insertData)
 
         if (insertError) {
           console.error('Failed to auto-create profile:', insertError)
         } else {
-          // Retry fetch
-          const retry = await supabase.from('users').select('*').eq('id', currentUser.id).maybeSingle()
-          data = retry.data
+          const { data: retryData } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', currentUser.id)
+            .maybeSingle()
+          profileData = retryData as UserProfile | null
         }
       }
 
-      setProfile(data)
+      setProfile(profileData)
     } catch (error) {
       console.error('Error loading profile:', error)
     } finally {
@@ -111,19 +130,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
+    const { data: authData, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     })
-    if (!error) {
-      router.push('/dashboard')
+    if (!error && authData.user) {
+      // Check profile completion to decide redirect target
+      const { data: profileRow } = await supabase
+        .from('users')
+        .select('is_profile_completed')
+        .eq('id', authData.user.id)
+        .maybeSingle()
+
+      const profileResult = profileRow as { is_profile_completed: boolean } | null
+      if (profileResult?.is_profile_completed) {
+        router.push('/dashboard')
+      } else {
+        router.push('/onboarding')
+      }
       router.refresh()
     }
     return { error }
   }
 
   const signUp = async (email: string, password: string, fullName?: string) => {
-    const { data, error } = await supabase.auth.signUp({
+    const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -133,16 +164,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
     })
 
-    if (!error && data.user) {
-      // Create user profile
-      // Using 'as any' to bypass type errors for guaranteed build
-      await (supabase.from('users') as any).insert({
-        id: data.user.id,
-        email: data.user.email!,
-        full_name: fullName || null,
-        role: 'victim',
-      })
-    }
+    // Don't manually insert into users table — the DB trigger handles profile creation
+    // after the user verifies their email and completes auth.
 
     return { error }
   }
@@ -156,12 +179,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const updateProfile = async (updates: UserProfileUpdate) => {
     if (!user) return
 
+    // Cast needed: Supabase SDK resolves Update type to 'never' due to generic chain issue
     const { error } = await (supabase.from('users') as any)
       .update(updates)
       .eq('id', user.id)
 
     if (!error) {
-      // Safely merge updates into profile state
       setProfile((prev) => (prev ? { ...prev, ...(updates as UserProfile) } : null))
     }
   }
