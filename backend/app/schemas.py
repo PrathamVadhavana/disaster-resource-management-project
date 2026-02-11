@@ -151,9 +151,9 @@ class PredictionResponse(BaseModel):
     location_id: str
     prediction_type: PredictionType
     confidence_score: float
-    predicted_severity: Optional[DisasterSeverity]
-    predicted_start_date: Optional[datetime]
-    predicted_casualties: Optional[int]
+    predicted_severity: Optional[DisasterSeverity] = None
+    predicted_start_date: Optional[datetime] = None
+    predicted_casualties: Optional[int] = None
     model_version: str
     created_at: datetime
 

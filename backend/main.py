@@ -12,7 +12,7 @@ load_dotenv()
 from app.routers import disasters, predictions, resources, auth
 from app.services.ml_service import MLService
 from app.database import init_db
-from app.dependencies import ml_service as global_ml_service
+import app.dependencies as dependencies
 
 # Custom JSON encoder to handle datetime objects
 class DateTimeEncoder(json.JSONEncoder):
@@ -39,7 +39,9 @@ async def lifespan(app: FastAPI):
     # Load ML models
     ml_service = MLService()
     await ml_service.load_models()
-    global_ml_service = ml_service  # Set the global reference
+    # Set the global reference in the dependencies module so FastAPI
+    # dependency injection can access the initialized ML service.
+    dependencies.ml_service = ml_service
     print("✅ ML models loaded successfully")
 
     yield
