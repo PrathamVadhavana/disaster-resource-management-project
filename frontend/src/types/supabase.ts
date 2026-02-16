@@ -247,6 +247,65 @@ export interface Database {
           is_profile_completed?: boolean
         }
       }
+      resource_requests: {
+        Row: {
+          id: string
+          victim_id: string
+          resource_type: string
+          quantity: number
+          description: string | null
+          priority: string
+          latitude: number | null
+          longitude: number | null
+          address_text: string | null
+          status: string
+          assigned_to: string | null
+          assigned_role: string | null
+          estimated_delivery: string | null
+          attachments: string[]
+          rejection_reason: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          victim_id: string
+          resource_type: string
+          quantity?: number
+          description?: string | null
+          priority?: string
+          latitude?: number | null
+          longitude?: number | null
+          address_text?: string | null
+          status?: string
+          assigned_to?: string | null
+          assigned_role?: string | null
+          estimated_delivery?: string | null
+          attachments?: string[]
+          rejection_reason?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          victim_id?: string
+          resource_type?: string
+          quantity?: number
+          description?: string | null
+          priority?: string
+          latitude?: number | null
+          longitude?: number | null
+          address_text?: string | null
+          status?: string
+          assigned_to?: string | null
+          assigned_role?: string | null
+          estimated_delivery?: string | null
+          attachments?: string[]
+          rejection_reason?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+      }
     }
     Views: {
       [_ in never]: never

@@ -16,7 +16,7 @@
         "@tanstack/react-query": "latest",
         "class-variance-authority": "latest",
         "clsx": "latest",
-        "date-fns": "latest",
+        "date-fns": "^4.1.0",
         "framer-motion": "latest",
         "leaflet": "latest",
         "libphonenumber-js": "^1.12.36",

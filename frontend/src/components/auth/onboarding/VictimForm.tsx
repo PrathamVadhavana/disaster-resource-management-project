@@ -41,7 +41,7 @@ export function VictimForm({ userId }: { userId: string }) {
             // 2. Mark profile as completed
             await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
 
-            router.push('/dashboard');
+            router.push('/victim');
             router.refresh();
         } catch (error) {
             console.error(error);

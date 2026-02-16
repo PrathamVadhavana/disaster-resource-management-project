@@ -234,3 +234,143 @@ class Token(BaseModel):
     token_type: str
     user_id: str
     email: str
+
+
+# ============================================================
+# Victim Module Schemas
+# ============================================================
+
+class VictimResourceType(str, Enum):
+    FOOD = "Food"
+    WATER = "Water"
+    MEDICAL = "Medical"
+    SHELTER = "Shelter"
+    CLOTHING = "Clothing"
+    FINANCIAL_AID = "Financial Aid"
+    EVACUATION = "Evacuation"
+    VOLUNTEERS = "Volunteers"
+    CUSTOM = "Custom"
+    MULTIPLE = "Multiple"
+
+
+class RequestPriority(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class RequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+
+
+class ResourceItem(BaseModel):
+    resource_type: str
+    quantity: int = Field(default=1, ge=1)
+    custom_name: Optional[str] = None
+
+
+class ResourceRequestCreate(BaseModel):
+    resource_type: Optional[VictimResourceType] = None  # primary type (auto-set from items)
+    quantity: int = Field(default=1, ge=1)
+    items: List[ResourceItem] = Field(default_factory=list)
+    description: Optional[str] = None
+    priority: RequestPriority = RequestPriority.MEDIUM
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    address_text: Optional[str] = None
+    attachments: Optional[List[str]] = Field(default_factory=list)
+
+
+class ResourceRequestUpdate(BaseModel):
+    resource_type: Optional[VictimResourceType] = None
+    quantity: Optional[int] = Field(None, ge=1)
+    items: Optional[List[ResourceItem]] = None
+    description: Optional[str] = None
+    priority: Optional[RequestPriority] = None
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    address_text: Optional[str] = None
+    attachments: Optional[List[str]] = None
+
+
+class ResourceRequestResponse(BaseModel):
+    id: str
+    victim_id: str
+    resource_type: str
+    quantity: int
+    items: Optional[List[Dict]] = Field(default_factory=list)
+    description: Optional[str] = None
+    priority: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    address_text: Optional[str] = None
+    status: str
+    assigned_to: Optional[str] = None
+    assigned_role: Optional[str] = None
+    estimated_delivery: Optional[datetime] = None
+    attachments: Optional[List[str]] = Field(default_factory=list)
+    rejection_reason: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class ResourceRequestListResponse(BaseModel):
+    requests: List[ResourceRequestResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class DashboardStats(BaseModel):
+    total_requests: int = 0
+    pending: int = 0
+    approved: int = 0
+    assigned: int = 0
+    in_progress: int = 0
+    completed: int = 0
+    rejected: int = 0
+    by_type: Dict[str, int] = Field(default_factory=dict)
+    by_priority: Dict[str, int] = Field(default_factory=dict)
+
+
+class VictimProfileResponse(BaseModel):
+    id: str
+    email: str
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    role: str
+    current_status: Optional[str] = None
+    needs: Optional[List[str]] = None
+    medical_needs: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_long: Optional[float] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class VictimProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    current_status: Optional[str] = None
+    needs: Optional[List[str]] = None
+    medical_needs: Optional[str] = None
+    location_lat: Optional[float] = Field(None, ge=-90, le=90)
+    location_long: Optional[float] = Field(None, ge=-180, le=180)

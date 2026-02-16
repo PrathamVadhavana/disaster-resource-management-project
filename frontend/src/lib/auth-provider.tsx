@@ -6,6 +6,17 @@ import { User, Session, AuthError } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/client'
 import { Database } from '@/types/supabase'
 
+/** Map a user's role to their dashboard path */
+function getRoleDashboardPath(role?: string | null): string {
+  switch (role) {
+    case 'victim': return '/victim'
+    case 'admin': return '/admin'
+    // future: case 'donor': return '/donor'
+    // future: case 'ngo': return '/ngo'
+    default: return '/dashboard'
+  }
+}
+
 type UserProfile = Database['public']['Tables']['users']['Row']
 type UserProfileUpdate = Database['public']['Tables']['users']['Update']
 type UserProfileInsert = Database['public']['Tables']['users']['Insert']
@@ -138,13 +149,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Check profile completion to decide redirect target
       const { data: profileRow } = await supabase
         .from('users')
-        .select('is_profile_completed')
+        .select('is_profile_completed, role')
         .eq('id', authData.user.id)
         .maybeSingle()
 
-      const profileResult = profileRow as { is_profile_completed: boolean } | null
+      const profileResult = profileRow as { is_profile_completed: boolean; role?: string } | null
       if (profileResult?.is_profile_completed) {
-        router.push('/dashboard')
+        router.push(getRoleDashboardPath(profileResult.role))
       } else {
         router.push('/onboarding')
       }

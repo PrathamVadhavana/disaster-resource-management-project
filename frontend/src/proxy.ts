@@ -44,8 +44,12 @@ export async function proxy(request: NextRequest) {
         path.startsWith('/api') ||
         path.includes('.')
     ) {
-        // Optional: Redirect authenticated users away from auth pages
+        // Redirect authenticated users away from auth pages to their role-specific dashboard
         if (user && (path.startsWith('/login') || path.startsWith('/signup'))) {
+            const role = user.user_metadata?.role
+            if (role === 'victim') {
+                return NextResponse.redirect(new URL('/victim', request.url))
+            }
             return NextResponse.redirect(new URL('/dashboard', request.url))
         }
         return response
@@ -64,14 +68,27 @@ export async function proxy(request: NextRequest) {
         return NextResponse.redirect(new URL('/onboarding', request.url))
     }
 
-    // If user has a role but tries to go to onboarding, redirect to dashboard
+    // If user has a role but tries to go to onboarding, redirect to role-specific dashboard
     if (role && path === '/onboarding') {
+        if (role === 'victim') {
+            return NextResponse.redirect(new URL('/victim', request.url))
+        }
         return NextResponse.redirect(new URL('/dashboard', request.url))
     }
 
     // 3. Admin Route Protection
     if (path.startsWith('/admin') && role !== 'admin') {
         return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+
+    // 4. Victim Route Protection — only victims can access /victim routes
+    if (path.startsWith('/victim') && role !== 'victim') {
+        return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+
+    // 5. If victim tries to access /dashboard, redirect to /victim
+    if (path.startsWith('/dashboard') && role === 'victim') {
+        return NextResponse.redirect(new URL('/victim', request.url))
     }
 
     return response

@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.routers import disasters, predictions, resources, auth
+from app.routers import disasters, predictions, resources, auth, victim, victim_profile
 from app.services.ml_service import MLService
 from app.database import init_db
 from app.dependencies import ml_service as global_ml_service
@@ -98,17 +98,27 @@ app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(disasters.router, prefix="/api/disasters", tags=["Disasters"])
 app.include_router(predictions.router, prefix="/api/predictions", tags=["Predictions"])
 app.include_router(resources.router, prefix="/api/resources", tags=["Resources"])
+app.include_router(victim.router, prefix="/api/victim", tags=["Victim Requests"])
+app.include_router(victim_profile.router, prefix="/api/victim", tags=["Victim Profile"])
 
 
 # Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    # Don't include exception details to avoid datetime serialization issues
+    import traceback
+    # Let HTTPExceptions pass through with their real detail
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+    # Log unexpected errors with full traceback
+    print(f"❌ UNHANDLED ERROR: {type(exc).__name__}: {exc}")
+    traceback.print_exc()
     return JSONResponse(
         status_code=500,
         content={
-            "message": "An unexpected error occurred",
-            "detail": "Internal server error"
+            "detail": str(exc) or "Internal server error"
         },
     )
 
