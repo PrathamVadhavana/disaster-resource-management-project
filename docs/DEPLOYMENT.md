@@ -255,20 +255,18 @@ jobs:
           cd frontend
           npm test
       
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
       
       - name: Install backend dependencies
         run: |
           cd backend
-          pip install -r requirements.txt
+          uv sync --frozen
       
       - name: Run backend tests
         run: |
           cd backend
-          pytest
+          uv run pytest
 
   deploy-frontend:
     needs: test
@@ -303,7 +301,7 @@ jobs:
    npm install --save @sentry/nextjs
    
    # Backend
-   pip install sentry-sdk[fastapi]
+   uv add sentry-sdk[fastapi]
    ```
 
 2. **Configure Sentry**

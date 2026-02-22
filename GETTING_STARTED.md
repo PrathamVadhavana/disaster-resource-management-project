@@ -13,7 +13,7 @@ Step-by-step guide to set up and run the Disaster Resource Management System on 
 | Node.js | 20+ | `node --version` |
 | npm | 9+ | `npm --version` |
 | Python | 3.11+ | `python --version` |
-| pip | 23+ | `pip --version` |
+| uv | 0.4+ | `uv --version` |
 | Supabase account | Free tier | [supabase.com](https://supabase.com) |
 | Docker *(optional)* | 24+ | `docker --version` |
 
@@ -117,9 +117,15 @@ Docker handles installation automatically. Jump to Step 5, Option A.
 ### Option B: Manual
 
 ```bash
-# Backend
+# Install uv (if not installed)
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# macOS / Linux
+# curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Backend — install dependencies via uv
 cd backend
-pip install -r requirements.txt
+uv sync          # creates .venv and installs all deps from uv.lock
 
 # Frontend
 cd ../frontend
@@ -143,7 +149,7 @@ This starts the frontend, backend, and Redis in one go.
 **Terminal 1 — Backend:**
 ```bash
 cd backend
-uvicorn main:app --reload
+uv run uvicorn main:app --reload
 ```
 
 You should see:
@@ -243,8 +249,8 @@ These enhance functionality but are **not required**:
 - Check that `backend/models/` contains `.pkl` files. If missing, run:
   ```bash
   cd backend
-  python scripts/generate_training_data.py
-  python -m app.services.training.train_all
+  uv run python scripts/generate_training_data.py
+  uv run python -m app.services.training.train_all
   ```
 
 **Database connection errors**

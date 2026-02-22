@@ -158,10 +158,14 @@ docker-compose up
 
 **Option B — Manual:**
 ```bash
+# Install uv (one-time)
+# Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# macOS / Linux: curl -LsSf https://astral.sh/uv/install.sh | sh
+
 # Terminal 1: Backend
 cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
+uv sync              # creates .venv and installs all deps
+uv run uvicorn main:app --reload
 
 # Terminal 2: Frontend
 cd frontend
@@ -333,7 +337,8 @@ disaster-resource-management/
 │   ├── tests/                       # Unit & integration tests
 │   ├── Dockerfile
 │   ├── main.py                      # Entry point with lifespan events
-│   └── requirements.txt
+│   ├── pyproject.toml               # Project metadata & deps (uv)
+│   └── uv.lock                      # Reproducible lock file
 │
 ├── database/                          # SQL migrations
 │   ├── schema.sql                   # Core tables (Phase 1)
