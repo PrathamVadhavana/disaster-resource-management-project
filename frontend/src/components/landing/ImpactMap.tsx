@@ -1,8 +1,40 @@
 'use client';
 
-import { motion } from 'framer-motion';
+import { useEffect, useState } from 'react';
+
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+interface Incident {
+    id: string;
+    title: string;
+    severity: string;
+}
+
+function severityType(severity: string): 'critical' | 'warning' | 'safe' {
+    if (severity === 'critical' || severity === 'high') return 'critical';
+    if (severity === 'medium') return 'warning';
+    return 'safe';
+}
+
+function posFromId(id: string, idx: number) {
+    const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+    const x = 12 + ((hash * 41 + idx * 19) % 70);
+    const y = 12 + ((hash * 59 + idx * 29) % 65);
+    return { x: `${x}%`, y: `${y}%` };
+}
 
 export default function ImpactMap() {
+    const [incidents, setIncidents] = useState<Incident[]>([]);
+
+    useEffect(() => {
+        fetch(`${API}/api/admin/recent-incidents`)
+            .then(r => r.ok ? r.json() : [])
+            .then(setIncidents)
+            .catch(() => setIncidents([]));
+    }, []);
+
+    const critCount = incidents.filter(i => severityType(i.severity) === 'critical').length;
+
     return (
         <div className="relative w-full h-[500px] bg-slate-800/50 rounded-3xl overflow-hidden border border-slate-700 backdrop-blur-sm group">
             {/* Abstract Map Background */}
@@ -22,18 +54,26 @@ export default function ImpactMap() {
                 </p>
             </div>
 
-            {/* Pulsing Hotspots */}
-            <Hotspot x="20%" y="30%" type="critical" />
-            <Hotspot x="50%" y="50%" type="warning" />
-            <Hotspot x="70%" y="20%" type="safe" />
-            <Hotspot x="40%" y="80%" type="critical" />
+            {/* Pulsing Hotspots — driven by real active incidents */}
+            {incidents.length > 0 ? (
+                incidents.slice(0, 5).map((inc, i) => {
+                    const pos = posFromId(inc.id, i);
+                    return <Hotspot key={inc.id} x={pos.x} y={pos.y} type={severityType(inc.severity)} />;
+                })
+            ) : (
+                <Hotspot x="50%" y="50%" type="safe" />
+            )}
 
             {/* Overlay Card */}
             <div className="absolute top-4 left-4 bg-slate-900/90 backdrop-blur p-4 rounded-xl border border-slate-700 max-w-xs z-10">
                 <h3 className="text-white font-bold text-sm mb-1">Active Relief Zones</h3>
                 <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                    Critical Aid Required
+                    <span className={`w-2 h-2 rounded-full ${critCount > 0 ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'}`} />
+                    {critCount > 0
+                        ? `${critCount} zone${critCount > 1 ? 's' : ''} — Critical Aid Required`
+                        : incidents.length > 0
+                            ? `${incidents.length} active zone${incidents.length > 1 ? 's' : ''} monitored`
+                            : 'No active incidents'}
                 </div>
             </div>
         </div>

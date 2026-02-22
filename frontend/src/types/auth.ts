@@ -29,3 +29,15 @@ export const ngoDetailsSchema = z.object({
     operating_sectors: z.array(z.string()).min(1, "Select at least one sector"),
     website: z.string().url().optional().or(z.literal('')),
 });
+
+export const donorDetailsSchema = z.object({
+    donor_type: z.enum(['individual', 'corporate', 'foundation', 'government']),
+    preferred_causes: z.array(z.string()).min(1, "Select at least one cause"),
+    tax_id: z.string().optional(),
+});
+
+export const volunteerDetailsSchema = z.object({
+    skills: z.array(z.string()).min(1, "Select at least one skill"),
+    availability_status: z.enum(['available', 'busy', 'on_deployment', 'inactive']),
+    certifications: z.array(z.string()).optional(),
+});

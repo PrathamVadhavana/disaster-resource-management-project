@@ -11,11 +11,13 @@ from app.schemas import (
     DisasterSeverity,
     DisasterType
 )
+from app.core.helpers import serialize_disaster, serialize_datetime_fields
+from app.core.cache import cache_get, cache_set, cache_invalidate_pattern, CACHE_TTL_SHORT
 
 router = APIRouter()
 
 
-@router.get("/", response_model=List[Disaster])
+@router.get("/")
 async def get_disasters(
     status: Optional[DisasterStatus] = None,
     severity: Optional[DisasterSeverity] = None,
@@ -25,7 +27,13 @@ async def get_disasters(
 ):
     """Get all disasters with optional filtering"""
     try:
-        query = supabase.table("disasters").select("*")
+        # Build a deterministic cache key from the query params
+        cache_key = f"disasters:list:{status}:{severity}:{type}:{limit}:{offset}"
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        query = supabase.table("disasters").select("*, locations(latitude, longitude, name, city, country)")
 
         if status:
             query = query.eq("status", status.value)
@@ -38,19 +46,9 @@ async def get_disasters(
 
         response = query.execute()
 
-        # Manually convert datetime objects to strings for JSON serialization
-        disasters_data = []
-        for disaster in response.data:
-            if isinstance(disaster.get('created_at'), datetime):
-                disaster['created_at'] = disaster['created_at'].isoformat()
-            if isinstance(disaster.get('updated_at'), datetime):
-                disaster['updated_at'] = disaster['updated_at'].isoformat()
-            if isinstance(disaster.get('start_date'), datetime):
-                disaster['start_date'] = disaster['start_date'].isoformat()
-            if disaster.get('end_date') and isinstance(disaster['end_date'], datetime):
-                disaster['end_date'] = disaster['end_date'].isoformat()
-            disasters_data.append(disaster)
+        disasters_data = [serialize_disaster(d) for d in response.data]
 
+        await cache_set(cache_key, disasters_data, CACHE_TTL_SHORT)
         return disasters_data
 
     except Exception as e:
@@ -66,18 +64,7 @@ async def get_disaster(disaster_id: str):
         if not response.data:
             raise HTTPException(status_code=404, detail="Disaster not found")
 
-        # Manually convert datetime objects to strings for JSON serialization
-        disaster_data = response.data
-        if isinstance(disaster_data.get('created_at'), datetime):
-            disaster_data['created_at'] = disaster_data['created_at'].isoformat()
-        if isinstance(disaster_data.get('updated_at'), datetime):
-            disaster_data['updated_at'] = disaster_data['updated_at'].isoformat()
-        if isinstance(disaster_data.get('start_date'), datetime):
-            disaster_data['start_date'] = disaster_data['start_date'].isoformat()
-        if disaster_data.get('end_date') and isinstance(disaster_data['end_date'], datetime):
-            disaster_data['end_date'] = disaster_data['end_date'].isoformat()
-
-        return disaster_data
+        return serialize_datetime_fields(response.data)
 
     except Exception as e:
         if "not found" in str(e).lower():
@@ -89,7 +76,6 @@ async def get_disaster(disaster_id: str):
 async def create_disaster(disaster_data: Dict[str, Any]):
     """Create a new disaster record"""
     try:
-        # Manually create the disaster dict without Pydantic validation
         disaster_dict = dict(disaster_data)
         disaster_dict["status"] = "active"
 
@@ -98,7 +84,8 @@ async def create_disaster(disaster_data: Dict[str, Any]):
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to create disaster")
 
-        # Return just the ID to avoid datetime serialization issues
+        await cache_invalidate_pattern("disasters:*")
+
         disaster_id = response.data[0]["id"]
         return {
             "id": disaster_id,
@@ -106,14 +93,10 @@ async def create_disaster(disaster_data: Dict[str, Any]):
             "status": "created"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"DEBUG: Disaster creation failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "error": "Failed to create disaster",
-            "message": str(e)
-        }
+        raise HTTPException(status_code=500, detail=f"Failed to create disaster: {e}")
 
 
 @router.patch("/{disaster_id}", response_model=Disaster)
@@ -132,18 +115,8 @@ async def update_disaster(disaster_id: str, disaster_update: DisasterUpdate):
         if not response.data:
             raise HTTPException(status_code=404, detail="Disaster not found")
 
-        # Manually convert datetime objects to strings for JSON serialization
-        disaster_data = response.data[0]
-        if isinstance(disaster_data.get('created_at'), datetime):
-            disaster_data['created_at'] = disaster_data['created_at'].isoformat()
-        if isinstance(disaster_data.get('updated_at'), datetime):
-            disaster_data['updated_at'] = disaster_data['updated_at'].isoformat()
-        if isinstance(disaster_data.get('start_date'), datetime):
-            disaster_data['start_date'] = disaster_data['start_date'].isoformat()
-        if disaster_data.get('end_date') and isinstance(disaster_data['end_date'], datetime):
-            disaster_data['end_date'] = disaster_data['end_date'].isoformat()
-
-        return disaster_data
+        await cache_invalidate_pattern("disasters:*")
+        return serialize_datetime_fields(response.data[0])
 
     except Exception as e:
         if "not found" in str(e).lower():

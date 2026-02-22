@@ -16,7 +16,7 @@ from app.schemas import (
     DashboardStats,
     RequestStatus,
 )
-
+from app.services.nlp_service import classify_request, extract_urgency_signals, escalate_priority
 router = APIRouter()
 security = HTTPBearer()
 
@@ -90,12 +90,46 @@ async def create_resource_request(
         total_qty = request_data.quantity
         primary_type = request_data.resource_type.value if request_data.resource_type else "Custom"
 
+    # ── NLP Triage: auto-classify description before saving ─────────
+    nlp_classification = None
+    urgency_signals = []
+    final_priority = request_data.priority.value
+
+    if request_data.description:
+        try:
+            classification = classify_request(
+                description=request_data.description,
+                user_priority=request_data.priority.value,
+                user_resource_type=primary_type,
+            )
+            nlp_classification = classification.to_dict()
+            urgency_signals = classification.urgency_signals
+
+            # Auto-escalate priority if urgency signals warrant it
+            if classification.priority_was_escalated:
+                final_priority = classification.recommended_priority
+                print(f"⚠️  NLP escalated priority: {request_data.priority.value} → {final_priority}")
+
+            # Auto-detect resource type if user didn't specify
+            if primary_type == "Custom" and classification.resource_types:
+                primary_type = classification.resource_types[0] if len(classification.resource_types) == 1 else "Multiple"
+
+            # Use NLP quantity estimate if user left default
+            if total_qty == 1 and classification.estimated_quantity > 1:
+                total_qty = classification.estimated_quantity
+
+            print(f"🧠 NLP Classification: types={classification.resource_types}, "
+                  f"priority={classification.recommended_priority} (conf={classification.confidence:.2f}), "
+                  f"signals={[s['label'] for s in urgency_signals]}")
+        except Exception as e:
+            print(f"⚠️  NLP classification failed (non-blocking): {e}")
+
     insert_data = {
         "victim_id": victim_id,
         "resource_type": primary_type,
         "quantity": total_qty,
         "items": items_list,
-        "priority": request_data.priority.value,
+        "priority": final_priority,
         "status": "pending",
         "attachments": request_data.attachments or [],
     }
@@ -107,6 +141,14 @@ async def create_resource_request(
         insert_data["longitude"] = request_data.longitude
     if request_data.address_text:
         insert_data["address_text"] = request_data.address_text
+
+    # Store NLP metadata (columns may not exist yet — handled gracefully)
+    if nlp_classification:
+        insert_data["nlp_classification"] = nlp_classification
+    if urgency_signals:
+        insert_data["urgency_signals"] = urgency_signals
+    if nlp_classification:
+        insert_data["ai_confidence"] = nlp_classification.get("confidence", 0)
 
     try:
         print(f"📦 INSERT DATA: {json.dumps(insert_data, default=str)}")

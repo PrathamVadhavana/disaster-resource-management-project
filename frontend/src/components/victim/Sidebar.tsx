@@ -16,12 +16,14 @@ import {
     Zap,
     Sun,
     Moon,
+    Sparkles,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 
 const navItems = [
     { href: '/victim', label: 'Overview', icon: LayoutDashboard },
     { href: '/victim/requests', label: 'My Requests', icon: ListOrdered },
+    { href: '/victim/requests/chatbot', label: 'AI Assist', icon: Sparkles },
     { href: '/victim/requests/new', label: 'New Request', icon: PlusCircle },
     { href: '/victim/profile', label: 'Profile', icon: UserCircle },
 ]
@@ -41,10 +43,12 @@ export function VictimSidebar() {
         if (href === '/victim') return pathname === '/victim'
         // Exact match for /victim/requests/new to prevent overlap with /victim/requests
         if (href === '/victim/requests/new') return pathname === '/victim/requests/new'
-        // For /victim/requests — match list + detail pages but NOT /new
+        // Exact match for chatbot
+        if (href === '/victim/requests/chatbot') return pathname === '/victim/requests/chatbot'
+        // For /victim/requests — match list + detail pages but NOT /new or /chatbot
         if (href === '/victim/requests') {
             return pathname === '/victim/requests' ||
-                (pathname?.startsWith('/victim/requests/') && !pathname?.startsWith('/victim/requests/new'))
+                (pathname?.startsWith('/victim/requests/') && !pathname?.startsWith('/victim/requests/new') && !pathname?.startsWith('/victim/requests/chatbot'))
         }
         return pathname === href
     }
@@ -148,6 +152,9 @@ export function VictimSidebar() {
                                 <span>{item.label}</span>
                                 {item.href === '/victim/requests/new' && (
                                     <span className="ml-auto w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                                )}
+                                {item.href === '/victim/requests/chatbot' && (
+                                    <span className="ml-auto px-1.5 py-0.5 rounded text-[9px] font-bold bg-gradient-to-r from-amber-500 to-orange-500 text-white">AI</span>
                                 )}
                             </Link>
                         )

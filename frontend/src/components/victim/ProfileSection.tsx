@@ -40,8 +40,8 @@ export function ProfileSection() {
             setStatus(profile.current_status || 'safe')
             setNeeds(profile.needs || [])
             setMedical(profile.medical_needs || '')
-            setLocationLat(profile.location_lat)
-            setLocationLong(profile.location_long)
+            setLocationLat(profile.location_lat ?? null)
+            setLocationLong(profile.location_long ?? null)
         }
     }, [profile])
 

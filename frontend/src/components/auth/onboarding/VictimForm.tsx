@@ -28,25 +28,38 @@ export function VictimForm({ userId }: { userId: string }) {
     const onSubmit = async (data: VictimFormData) => {
         setLoading(true);
         try {
-            // 1. Insert details (Cast to any to bypass missing type defs)
-            const { error } = await (supabase.from('victim_details') as any).insert({
+            // 0. Ensure users row exists (FK parent for victim_details)
+            const { error: upsertErr } = await (supabase.from('users') as any)
+                .upsert({ id: userId, email: (await supabase.auth.getUser()).data.user?.email ?? '', role: 'victim' }, { onConflict: 'id' });
+            if (upsertErr) console.warn('users upsert warning:', upsertErr.message);
+
+            // 1. Insert victim details
+            const { error } = await (supabase.from('victim_details') as any).upsert({
                 id: userId,
                 current_status: data.current_status,
-                needs: data.needs, // Ensure this matches DB array type
+                needs: data.needs,
                 medical_needs: data.medical_needs || null
-            });
+            }, { onConflict: 'id' });
 
-            if (error) throw error;
+            if (error) {
+                console.error('victim_details insert error:', error);
+                throw error;
+            }
 
             // 2. Mark profile as completed
             await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
 
-            router.push('/victim');
-            router.refresh();
-        } catch (error) {
-            console.error(error);
-            alert('Failed to save details');
-        } finally {
+            // 3. Set role in user_metadata so middleware routes correctly
+            await supabase.auth.updateUser({ data: { role: 'victim' } });
+
+            // 4. Refresh the session so the JWT cookie contains the new role
+            await supabase.auth.refreshSession();
+
+            // 5. Hard redirect — ensures middleware reads the fresh JWT cookie
+            window.location.href = '/victim';
+        } catch (error: any) {
+            console.error('Onboarding submit error:', error);
+            alert('Failed to save details: ' + (error?.message || 'Unknown error'));
             setLoading(false);
         }
     };

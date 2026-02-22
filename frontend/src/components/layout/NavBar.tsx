@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
@@ -9,12 +9,25 @@ import { ThemeToggle } from '@/components/ThemeToggle';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 
+const ROLE_DASHBOARD: Record<string, string> = {
+    victim: '/victim',
+    ngo: '/ngo',
+    donor: '/donor',
+    volunteer: '/volunteer',
+    admin: '/admin',
+};
+
 export default function NavBar() {
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [isScrolled, setIsScrolled] = useState(false);
     const supabase = createClient();
     const router = useRouter();
+
+    const dashboardHref = useMemo(() => {
+        const role = user?.user_metadata?.role as string | undefined;
+        return ROLE_DASHBOARD[role ?? ''] ?? '/victim';
+    }, [user]);
 
     useEffect(() => {
         // Check initial session
@@ -82,7 +95,7 @@ export default function NavBar() {
                         <div className="w-20 h-8 rounded-full bg-slate-200 dark:bg-slate-800 animate-pulse" />
                     ) : user ? (
                         <>
-                            <Link href="/dashboard" className="hidden sm:flex items-center gap-2 px-4 py-2 text-sm font-semibold text-slate-700 hover:text-blue-600 dark:text-slate-300 dark:hover:text-blue-400 transition-colors">
+                            <Link href={dashboardHref} className="hidden sm:flex items-center gap-2 px-4 py-2 text-sm font-semibold text-slate-700 hover:text-blue-600 dark:text-slate-300 dark:hover:text-blue-400 transition-colors">
                                 <LayoutDashboard className="w-4 h-4" />
                                 Dashboard
                             </Link>

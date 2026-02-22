@@ -1,4 +1,5 @@
 import { VictimSidebar } from '@/components/victim/Sidebar'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 
 export default function VictimLayout({
     children,
@@ -10,7 +11,7 @@ export default function VictimLayout({
             <VictimSidebar />
             <main className="flex-1 lg:ml-0">
                 <div className="pt-20 lg:pt-8 pb-8 px-4 sm:px-6 lg:px-8 max-w-5xl mx-auto">
-                    {children}
+                    <ErrorBoundary>{children}</ErrorBoundary>
                 </div>
             </main>
         </div>

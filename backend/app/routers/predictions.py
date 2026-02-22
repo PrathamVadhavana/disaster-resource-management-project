@@ -39,8 +39,14 @@ async def create_prediction(
         if prediction_input.prediction_type == PredictionType.SEVERITY:
             prediction_data["predicted_severity"] = ml_result.get('predicted_severity')
         
+        if prediction_input.prediction_type == PredictionType.SPREAD:
+            prediction_data["predicted_area_km2"] = ml_result.get('predicted_area_km2')
+            prediction_data["ci_lower_km2"] = ml_result.get('ci_lower_km2')
+            prediction_data["ci_upper_km2"] = ml_result.get('ci_upper_km2')
+
         if prediction_input.prediction_type == PredictionType.IMPACT:
             prediction_data["predicted_casualties"] = ml_result.get('predicted_casualties')
+            prediction_data["predicted_damage_usd"] = ml_result.get('predicted_damage_usd')
         
         # Save to database
         response = supabase.table("predictions").insert(prediction_data).execute()
@@ -127,8 +133,14 @@ async def create_batch_predictions(
             if pred_input.prediction_type == PredictionType.SEVERITY:
                 prediction_data["predicted_severity"] = ml_result.get('predicted_severity')
             
+            if pred_input.prediction_type == PredictionType.SPREAD:
+                prediction_data["predicted_area_km2"] = ml_result.get('predicted_area_km2')
+                prediction_data["ci_lower_km2"] = ml_result.get('ci_lower_km2')
+                prediction_data["ci_upper_km2"] = ml_result.get('ci_upper_km2')
+
             if pred_input.prediction_type == PredictionType.IMPACT:
                 prediction_data["predicted_casualties"] = ml_result.get('predicted_casualties')
+                prediction_data["predicted_damage_usd"] = ml_result.get('predicted_damage_usd')
             
             results.append(prediction_data)
         

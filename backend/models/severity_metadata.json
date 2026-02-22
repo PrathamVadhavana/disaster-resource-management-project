@@ -1,0 +1,73 @@
+{
+  "model_type": "RandomForestClassifier",
+  "smote": true,
+  "n_estimators": 500,
+  "train_samples": 6396,
+  "test_samples": 1599,
+  "features": [
+    "temperature",
+    "wind_speed",
+    "humidity",
+    "pressure",
+    "wind_humidity_idx",
+    "pressure_drop",
+    "temp_deviation",
+    "dtype_earthquake",
+    "dtype_flood",
+    "dtype_hurricane",
+    "dtype_tornado",
+    "dtype_wildfire",
+    "dtype_tsunami",
+    "dtype_drought",
+    "dtype_landslide",
+    "dtype_volcano"
+  ],
+  "target_names": [
+    "low",
+    "medium",
+    "high",
+    "critical"
+  ],
+  "f1_weighted": 0.8461,
+  "f1_macro": 0.7325,
+  "classification_report": {
+    "low": {
+      "precision": 0.9243697478991597,
+      "recall": 0.8902877697841727,
+      "f1-score": 0.9070087036188731,
+      "support": 1112.0
+    },
+    "medium": {
+      "precision": 0.6221590909090909,
+      "recall": 0.6697247706422018,
+      "f1-score": 0.6450662739322534,
+      "support": 327.0
+    },
+    "high": {
+      "precision": 0.8132530120481928,
+      "recall": 0.8940397350993378,
+      "f1-score": 0.8517350157728707,
+      "support": 151.0
+    },
+    "critical": {
+      "precision": 0.5,
+      "recall": 0.5555555555555556,
+      "f1-score": 0.5263157894736842,
+      "support": 9.0
+    },
+    "accuracy": 0.8436522826766729,
+    "macro avg": {
+      "precision": 0.7149454627141109,
+      "recall": 0.7524019577703169,
+      "f1-score": 0.7325314456994203,
+      "support": 1599.0
+    },
+    "weighted avg": {
+      "precision": 0.8496850451597345,
+      "recall": 0.8436522826766729,
+      "f1-score": 0.8460782861081928,
+      "support": 1599.0
+    }
+  },
+  "train_time_sec": 4.88
+}

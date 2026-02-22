@@ -4,8 +4,9 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getResourceRequests, type ResourceRequest, type RequestFilters } from '@/lib/api/victim'
 import { StatusBadge, PriorityBadge, ResourceTypeIcon } from './StatusBadge'
+import { UrgencyTags, ConfidenceBadge } from './UrgencyTags'
 import { cn } from '@/lib/utils'
-import { Search, Filter, ChevronLeft, ChevronRight, Loader2, Plus, X } from 'lucide-react'
+import { Search, Filter, ChevronLeft, ChevronRight, Loader2, Plus, X, Sparkles } from 'lucide-react'
 import Link from 'next/link'
 import { formatDistanceToNow } from 'date-fns'
 
@@ -68,13 +69,22 @@ export function RequestList() {
                     <h1 className="text-2xl font-bold text-slate-900 dark:text-white">My Requests</h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">{data?.total ?? 0} total requests</p>
                 </div>
-                <Link
-                    href="/victim/requests/new"
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-red-500 to-orange-600 text-white text-sm font-semibold shadow-lg shadow-red-500/20 hover:shadow-red-500/30 hover:brightness-110 transition-all"
-                >
-                    <Plus className="w-4 h-4" />
-                    New Request
-                </Link>
+                <div className="flex items-center gap-2">
+                    <Link
+                        href="/victim/requests/chatbot"
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 text-white text-sm font-semibold shadow-lg shadow-amber-500/20 hover:shadow-amber-500/30 hover:brightness-110 transition-all"
+                    >
+                        <Sparkles className="w-4 h-4" />
+                        AI Assist
+                    </Link>
+                    <Link
+                        href="/victim/requests/new"
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-red-500 to-orange-600 text-white text-sm font-semibold shadow-lg shadow-red-500/20 hover:shadow-red-500/30 hover:brightness-110 transition-all"
+                    >
+                        <Plus className="w-4 h-4" />
+                        New Request
+                    </Link>
+                </div>
             </div>
 
             {/* Search + Filter toggle */}
@@ -188,10 +198,19 @@ export function RequestList() {
                                     </div>
                                     <div className="flex items-center gap-3 mt-2">
                                         <PriorityBadge priority={req.priority} />
+                                        {(req as any).ai_confidence != null && (
+                                            <ConfidenceBadge confidence={(req as any).ai_confidence} />
+                                        )}
                                         <span suppressHydrationWarning className="text-xs text-slate-400">
                                             {formatDistanceToNow(new Date(req.created_at), { addSuffix: true })}
                                         </span>
                                     </div>
+                                    {/* Urgency signal tags */}
+                                    {(req as any).urgency_signals?.length > 0 && (
+                                        <div className="mt-2">
+                                            <UrgencyTags signals={(req as any).urgency_signals} max={3} />
+                                        </div>
+                                    )}
                                     {req.description && (
                                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 line-clamp-1">
                                             {req.description}

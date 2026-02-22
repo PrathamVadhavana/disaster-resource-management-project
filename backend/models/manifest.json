@@ -1,0 +1,31 @@
+{
+  "version": "20260221_195729",
+  "trained_at": "2026-02-21T19:57:29.495665+00:00",
+  "total_train_time_sec": 26.19,
+  "models": {
+    "severity": {
+      "file": "severity_model.pkl",
+      "f1_weighted": 0.8461
+    },
+    "spread": {
+      "file": "spread_model.pkl",
+      "r2": 0.9401,
+      "mae": 10.6458
+    },
+    "impact": {
+      "file": "impact_model.pkl",
+      "metrics": {
+        "casualties": {
+          "mae": 67.8998,
+          "rmse": 144.6302,
+          "r2": 0.5531
+        },
+        "economic_damage_million_usd": {
+          "mae": 0.2338,
+          "rmse": 0.781,
+          "r2": 0.3767
+        }
+      }
+    }
+  }
+}

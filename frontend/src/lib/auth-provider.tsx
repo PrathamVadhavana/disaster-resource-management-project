@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { User, Session, AuthError } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/client'
@@ -10,10 +10,11 @@ import { Database } from '@/types/supabase'
 function getRoleDashboardPath(role?: string | null): string {
   switch (role) {
     case 'victim': return '/victim'
+    case 'ngo': return '/ngo'
+    case 'donor': return '/donor'
+    case 'volunteer': return '/volunteer'
     case 'admin': return '/admin'
-    // future: case 'donor': return '/donor'
-    // future: case 'ngo': return '/ngo'
-    default: return '/dashboard'
+    default: return '/onboarding'
   }
 }
 
@@ -40,13 +41,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
+  const loadingRef = useRef(true)
   const router = useRouter()
 
   const supabase = createClient()
 
+  // Keep ref in sync
+  useEffect(() => { loadingRef.current = loading }, [loading])
+
   useEffect(() => {
+    let mounted = true
+
+    // Hard safety timeout — never block the app longer than 5 seconds
+    const safetyTimer = setTimeout(() => {
+      if (mounted && loadingRef.current) {
+        console.warn('AuthProvider: safety timeout reached, forcing loading=false')
+        setLoading(false)
+      }
+    }, 5000)
+
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!mounted) return
       setSession(session)
       setUser(session?.user ?? null)
       if (session?.user) {
@@ -60,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!mounted) return
       setSession(session)
       setUser(session?.user ?? null)
       if (session?.user) {
@@ -70,65 +87,60 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     })
 
-    return () => subscription.unsubscribe()
+    return () => {
+      mounted = false
+      clearTimeout(safetyTimer)
+      subscription.unsubscribe()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /** Race a promise against a timeout — returns null on timeout */
+  const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T | null> =>
+    Promise.race([
+      promise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+    ])
+
   const loadProfile = async (currentUser: User) => {
     try {
-      // Retry loop — the DB trigger may take a moment to create the profile row
       let profileData: UserProfile | null = null
-      let attempts = 0
-      const maxAttempts = 5
 
-      while (!profileData && attempts < maxAttempts) {
-        const { data, error } = await supabase
-          .from('users')
-          .select('*')
-          .eq('id', currentUser.id)
-          .maybeSingle()
+      // 1. Try fetching the profile (3-second max)
+      const fetchResult = await withTimeout(
+        Promise.resolve(supabase.from('users').select('*').eq('id', currentUser.id).maybeSingle()),
+        3000,
+      )
 
-        if (error) {
-          console.error('Error fetching profile:', error)
-          break
-        }
-
-        if (data) {
-          profileData = data as UserProfile
-        } else {
-          // Profile not yet created by trigger — wait and retry
-          await new Promise(resolve => setTimeout(resolve, 1000))
-          attempts++
-        }
+      if (fetchResult && !('error' in fetchResult && fetchResult.error) && fetchResult.data) {
+        profileData = fetchResult.data as UserProfile
       }
 
-      // If still no profile after retries, create one as fallback
+      // 2. If no profile, single upsert fallback (2-second max)
       if (!profileData) {
-        console.warn('Profile missing after retries, creating fallback...')
         const metadata = currentUser.user_metadata || {}
         const role = (metadata.role as UserRole) || 'victim'
-
         const insertData: UserProfileInsert = {
           id: currentUser.id,
           email: currentUser.email!,
-          role: role,
+          role,
           full_name: (metadata.full_name as string) || null,
           updated_at: new Date().toISOString(),
         }
 
-        // Cast needed: Supabase SDK resolves Insert type to 'never' due to generic chain issue
-        const { error: insertError } = await (supabase.from('users') as any)
-          .upsert(insertData)
+        const upsertResult = await withTimeout(
+          Promise.resolve((supabase.from('users') as any).upsert(insertData)),
+          2000,
+        )
 
-        if (insertError) {
-          console.error('Failed to auto-create profile:', insertError)
-        } else {
-          const { data: retryData } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', currentUser.id)
-            .maybeSingle()
-          profileData = retryData as UserProfile | null
+        if (upsertResult && !(upsertResult as any).error) {
+          const refetch = await withTimeout(
+            Promise.resolve(supabase.from('users').select('*').eq('id', currentUser.id).maybeSingle()),
+            2000,
+          )
+          if (refetch && refetch.data) {
+            profileData = refetch.data as UserProfile | null
+          }
         }
       }
 
@@ -147,16 +159,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })
     if (!error && authData.user) {
       // Check profile completion to decide redirect target
-      const { data: profileRow } = await supabase
-        .from('users')
-        .select('is_profile_completed, role')
-        .eq('id', authData.user.id)
-        .maybeSingle()
+      try {
+        const { data: profileRow } = await supabase
+          .from('users')
+          .select('is_profile_completed, role')
+          .eq('id', authData.user.id)
+          .maybeSingle()
 
-      const profileResult = profileRow as { is_profile_completed: boolean; role?: string } | null
-      if (profileResult?.is_profile_completed) {
-        router.push(getRoleDashboardPath(profileResult.role))
-      } else {
+        const profileResult = profileRow as { is_profile_completed: boolean; role?: string } | null
+        if (profileResult?.is_profile_completed) {
+          router.push(getRoleDashboardPath(profileResult.role))
+        } else {
+          router.push('/onboarding')
+        }
+      } catch {
+        // Table may not exist — send to onboarding
         router.push('/onboarding')
       }
       router.refresh()
@@ -164,13 +181,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error }
   }
 
-  const signUp = async (email: string, password: string, fullName?: string) => {
+  const signUp = async (email: string, password: string, fullName?: string, role?: string) => {
     const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         data: {
           full_name: fullName,
+          ...(role && { role }),
         },
       },
     })

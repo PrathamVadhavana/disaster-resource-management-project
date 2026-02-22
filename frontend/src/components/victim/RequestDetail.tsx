@@ -3,8 +3,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getResourceRequest, deleteResourceRequest, type ResourceRequest } from '@/lib/api/victim'
 import { StatusBadge, PriorityBadge, ResourceTypeIcon } from './StatusBadge'
+import { UrgencyTags, ConfidenceBadge } from './UrgencyTags'
 import { cn } from '@/lib/utils'
-import { ArrowLeft, Edit3, Trash2, Loader2, MapPin, Calendar, User, Package } from 'lucide-react'
+import { ArrowLeft, Edit3, Trash2, Loader2, MapPin, Calendar, User, Package, Brain } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { format } from 'date-fns'
@@ -210,6 +211,57 @@ export function RequestDetail({ requestId }: { requestId: string }) {
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5">
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-white mb-2">Description</h3>
                     <p className="text-sm text-slate-600 dark:text-slate-400 whitespace-pre-wrap">{request.description}</p>
+                </div>
+            )}
+
+            {/* NLP Classification & Urgency Signals (Phase 3) */}
+            {(request.urgency_signals?.length || request.ai_confidence != null) && (
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+                    <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center gap-2">
+                        <Brain className="w-4 h-4 text-amber-500" />
+                        <h2 className="font-semibold text-slate-900 dark:text-white">AI Triage Analysis</h2>
+                        {request.ai_confidence != null && (
+                            <ConfidenceBadge confidence={request.ai_confidence} />
+                        )}
+                        {request.nlp_overridden && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                                Overridden
+                            </span>
+                        )}
+                    </div>
+                    <div className="p-5 space-y-3">
+                        {request.nlp_classification && (
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-white/[0.03]">
+                                    <span className="text-slate-500 dark:text-slate-400">Detected Types</span>
+                                    <p className="font-semibold text-slate-900 dark:text-white mt-0.5">
+                                        {request.nlp_classification.resource_types?.join(', ') || 'N/A'}
+                                    </p>
+                                </div>
+                                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-white/[0.03]">
+                                    <span className="text-slate-500 dark:text-slate-400">Recommended Priority</span>
+                                    <p className="font-semibold text-slate-900 dark:text-white mt-0.5 capitalize">
+                                        {request.nlp_classification.recommended_priority || 'N/A'}
+                                        {request.nlp_classification.priority_was_escalated && (
+                                            <span className="ml-1 text-red-500">↑ escalated</span>
+                                        )}
+                                    </p>
+                                </div>
+                                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-white/[0.03]">
+                                    <span className="text-slate-500 dark:text-slate-400">Est. Quantity</span>
+                                    <p className="font-semibold text-slate-900 dark:text-white mt-0.5">
+                                        {request.nlp_classification.estimated_quantity || 'N/A'}
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+                        {request.urgency_signals && request.urgency_signals.length > 0 && (
+                            <div>
+                                <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Urgency Signals</p>
+                                <UrgencyTags signals={request.urgency_signals} max={10} />
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 

@@ -1,292 +1,259 @@
-# Disaster Management System - Project Summary
+# Getting Started
 
-## 📋 What's Included
+Step-by-step guide to set up and run the Disaster Resource Management System on your local machine.
 
-This is a complete, production-ready disaster management system built with:
-- **Frontend**: Next.js 14 + TypeScript + Tailwind CSS
-- **Backend**: FastAPI + Python
-- **Database**: Supabase (PostgreSQL with PostGIS)
-- **AI/ML**: Scikit-learn for predictions
-- **Real-time**: Supabase Realtime for live updates
+**Time required:** ~10 minutes
 
-## 🗂️ Project Structure
+---
 
+## Prerequisites
+
+| Requirement | Version | Check |
+|-------------|---------|-------|
+| Node.js | 20+ | `node --version` |
+| npm | 9+ | `npm --version` |
+| Python | 3.11+ | `python --version` |
+| pip | 23+ | `pip --version` |
+| Supabase account | Free tier | [supabase.com](https://supabase.com) |
+| Docker *(optional)* | 24+ | `docker --version` |
+
+---
+
+## Step 1 — Create a Supabase Project
+
+1. Go to [supabase.com](https://supabase.com) and sign in (or create a free account)
+2. Click **New Project**, choose a name, set a **database password** (save it — you'll need it), and select a region
+3. Wait ~2 minutes for provisioning to complete
+
+### Collect your credentials
+
+Go to **Settings → API** and copy these three values:
+
+| Credential | Where to find it |
+|------------|-----------------|
+| **Project URL** | `https://xxxxx.supabase.co` |
+| **Anon (public) Key** | Under "Project API keys" → `anon` `public` |
+| **Service Role Key** | Under "Project API keys" → `service_role` `secret` |
+
+Also note your **database password** from project creation.
+
+---
+
+## Step 2 — Run Database Setup
+
+Open the **Supabase SQL Editor** (left sidebar → SQL Editor).
+
+### 2a. Auth & Users (REQUIRED — do this first)
+
+Copy the entire contents of **`database/COMPLETE_SETUP.sql`** into the SQL Editor and click **Run**.
+
+This creates the `users` table, role-based extension tables (`victim_details`, `ngo_details`, etc.), auth triggers, RLS policies, and backfills profiles for any existing users. It is safe to run multiple times.
+
+### 2b. Application Tables
+
+Then run these scripts **in order**:
+
+| # | File | Purpose |
+|:-:|------|---------|
+| 1 | `database/schema.sql` | Core tables: locations, disasters, resources, predictions *(skip if COMPLETE_SETUP already created users)* |
+| 2 | `database/phase2_allocation_engine.sql` | Resource consumption log for forecasting |
+| 3 | `database/phase3_nlp_triage.sql` | NLP training feedback table |
+| 4 | `database/create_resource_requests.sql` | Victim resource requests, available_resources |
+| 5 | `database/phase4_realtime_ingestion.sql` | External data sources, ingested events, weather/satellite observations, alerts |
+| 6 | `database/phase5_ai_coordinator.sql` | Situation reports, NL query log, anomaly alerts, outcome tracking, evaluations |
+| 7 | `database/seed_available_resources.sql` | *(Optional)* Sample resource inventory data |
+
+**Tip:** Open each `.sql` file, copy the entire contents, paste into the SQL Editor, and click **Run**.
+
+> **If you only want signup/login/onboarding to work**, step 2a alone is enough. The other scripts add the disaster management tables.
+
+---
+
+## Step 3 — Configure Environment Variables
+
+### Backend
+
+Create `backend/.env` (copy from `backend/.env.example`):
+
+```env
+# Required — Supabase
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-public-key
+SUPABASE_SERVICE_KEY=your-service-role-key
+SUPABASE_DB_PASSWORD=your-database-password
+DATABASE_URL=postgresql+asyncpg://postgres:your-database-password@db.your-project.supabase.co:5432/postgres
+
+# Required — App
+ALLOWED_ORIGINS=http://localhost:3000
+DEBUG=true
+
+# Optional — Free-tier API keys (features work without them)
+# OPENWEATHERMAP_API_KEY=         # Weather ingestion (https://openweathermap.org/api)
+# FIRMS_API_KEY=                  # NASA fire data (https://firms.modaps.eosdis.nasa.gov)
+# SENDGRID_API_KEY=               # Email alerts (https://sendgrid.com)
+# SENDGRID_FROM_EMAIL=alerts@yourdomain.com
 ```
-disaster-management-system/
-├── frontend/                    # Next.js application
-│   ├── src/
-│   │   ├── app/                # Pages and routing
-│   │   ├── components/         # React components
-│   │   │   ├── map/           # Interactive disaster map
-│   │   │   ├── dashboard/     # Dashboard components
-│   │   │   └── ui/            # Base UI components
-│   │   ├── lib/               # Utilities and config
-│   │   │   ├── supabase.ts    # Supabase client
-│   │   │   ├── auth-provider.tsx
-│   │   │   └── query-provider.tsx
-│   │   ├── hooks/             # Custom React hooks
-│   │   └── types/             # TypeScript definitions
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── tailwind.config.ts
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── backend/                     # FastAPI application
-│   ├── app/
-│   │   ├── routers/           # API endpoints
-│   │   │   ├── disasters.py   # Disaster CRUD
-│   │   │   ├── predictions.py # ML predictions
-│   │   │   ├── resources.py   # Resource allocation
-│   │   │   └── auth.py        # Authentication
-│   │   ├── services/          # Business logic
-│   │   │   └── ml_service.py  # ML model service
-│   │   ├── database.py        # DB configuration
-│   │   └── schemas.py         # Pydantic models
-│   ├── models/                # ML model files (.pkl)
-│   ├── tests/                 # Test files
-│   ├── main.py                # App entry point
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── database/
-│   └── schema.sql             # Complete DB schema
-│
-├── docs/
-│   ├── API.md                 # API documentation
-│   ├── DEPLOYMENT.md          # Deployment guide
-│   └── DEVELOPMENT.md         # Dev guide
-│
-├── docker-compose.yml         # Development setup
-└── README.md                  # Main documentation
+
+### Frontend
+
+Create `frontend/.env.local` (copy from `frontend/.env.example`):
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-public-key
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
-## 🚀 Quick Start (5 Minutes)
+> **Note:** Maps use Leaflet + OpenStreetMap — no Mapbox token needed.
 
-### 1. Setup Supabase (2 minutes)
+---
 
-1. Go to [supabase.com](https://supabase.com) and create account
-2. Create new project (takes ~2 minutes to provision)
-3. Copy Project URL and anon key from Settings > API
-4. Go to SQL Editor and run the entire `database/schema.sql` file
+## Step 4 — Install Dependencies
 
-### 2. Configure Environment (1 minute)
+### Option A: Docker (skip to Step 5)
 
-**Frontend:**
+Docker handles installation automatically. Jump to Step 5, Option A.
+
+### Option B: Manual
+
 ```bash
-cd frontend
-cp .env.example .env.local
-# Edit .env.local with your Supabase credentials
-```
-
-**Backend:**
-```bash
+# Backend
 cd backend
-cp .env.example .env
-# Edit .env with your Supabase credentials
+pip install -r requirements.txt
+
+# Frontend
+cd ../frontend
+npm install
 ```
 
-### 3. Install & Run (2 minutes)
+---
 
-**Option A: Docker (Recommended)**
+## Step 5 — Start the Application
+
+### Option A: Docker (one command)
+
 ```bash
 docker-compose up
 ```
 
-**Option B: Manual**
+This starts the frontend, backend, and Redis in one go.
 
-Terminal 1:
-```bash
-cd frontend
-npm install
-npm run dev
-```
+### Option B: Manual (two terminals)
 
-Terminal 2:
+**Terminal 1 — Backend:**
 ```bash
 cd backend
-pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
-### 4. Access Application
-
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8000
-- API Docs: http://localhost:8000/docs
-
-## ✅ What Works Out of the Box
-
-### Frontend Features
-✅ Complete authentication system (login/register)
-✅ Interactive disaster map with real-time updates
-✅ Responsive dashboard layout
-✅ Real-time data synchronization
-✅ Dark/light theme support
-✅ Type-safe development with TypeScript
-✅ Beautiful UI with Tailwind CSS
-
-### Backend Features
-✅ Complete REST API with all CRUD operations
-✅ ML prediction endpoints (severity, spread, impact)
-✅ Resource allocation algorithm
-✅ Authentication with JWT tokens
-✅ Real-time subscriptions via Supabase
-✅ Auto-generated API documentation
-✅ Error handling and validation
-
-### Database Features
-✅ Complete schema with all tables
-✅ Row-level security policies
-✅ Geospatial support with PostGIS
-✅ Real-time subscriptions enabled
-✅ Automated backups
-✅ Sample data for testing
-
-## 🎯 Core Functionalities
-
-### 1. Disaster Management
-- Create, read, update, delete disasters
-- Real-time updates on map
-- Filter by severity, status, type
-- Track affected population and casualties
-- Estimate economic damage
-
-### 2. AI Predictions
-- **Severity Prediction**: Predict disaster severity based on environmental factors
-- **Spread Prediction**: Estimate how far disaster will spread
-- **Impact Prediction**: Forecast casualties and economic damage
-- Confidence scores for all predictions
-- Batch prediction support
-
-### 3. Resource Allocation
-- Track available resources (food, water, medical, etc.)
-- Intelligent allocation algorithm
-- Priority-based distribution
-- Real-time status updates (available, allocated, deployed)
-- Optimization scoring
-
-### 4. Real-time Features
-- Live disaster updates on map
-- WebSocket-based notifications
-- Automatic UI synchronization
-- Multi-user collaboration support
-
-### 5. Authentication & Authorization
-- Secure registration and login
-- Role-based access control (admin, responder, analyst, viewer)
-- JWT token management
-- Protected routes
-- Session management
-
-## 📊 Data Models
-
-### Disasters
-- Type (earthquake, flood, hurricane, etc.)
-- Severity (low, medium, high, critical)
-- Status (predicted, active, monitoring, resolved)
-- Location with coordinates
-- Affected population and casualties
-- Estimated damage
-
-### Resources
-- Type (food, water, medical, shelter, etc.)
-- Quantity and unit
-- Status (available, allocated, in_transit, deployed)
-- Priority (1-10)
-- Location and disaster assignment
-
-### Predictions
-- Type (severity, spread, duration, impact)
-- Confidence score
-- Model version
-- Feature data
-- Predicted outcomes
-
-### Locations
-- Geographic coordinates (latitude/longitude)
-- Address details (city, state, country)
-- Population data
-- Area in square kilometers
-- Type (city, region, shelter, hospital, warehouse)
-
-## 🔧 Customization Guide
-
-### Add New Disaster Type
-
-1. Update enum in `database/schema.sql`:
-```sql
-ALTER TYPE disaster_type ADD VALUE 'volcano';
+You should see:
+```
+🚀 Starting Disaster Management API...
+✅ ML models loaded successfully
+✅ Ingestion orchestrator started
+✅ Anomaly detection started
+✅ Sitrep cron scheduled
 ```
 
-2. Update TypeScript types in `frontend/src/types/supabase.ts`
-3. Add icon/color in map component
+**Terminal 2 — Frontend:**
+```bash
+cd frontend
+npm run dev
+```
 
-### Add New ML Model
+---
 
-1. Train model and save to `backend/models/`
-2. Add loading logic to `ml_service.py`
-3. Create prediction endpoint in `predictions.py`
-4. Update schemas if needed
+## Step 6 — Verify Everything Works
 
-### Add New Resource Type
+| Service | URL | Expected |
+|---------|-----|----------|
+| Frontend | http://localhost:3000 | Landing page with hero section |
+| Backend API | http://localhost:8000 | `{"message": "Disaster Management API", "status": "operational"}` |
+| Health check | http://localhost:8000/health | `{"status": "healthy", "ml_models_loaded": true}` |
+| Swagger docs | http://localhost:8000/docs | Interactive API documentation |
 
-1. Update enum in database schema
-2. Update TypeScript types
-3. Add to allocation algorithm
-4. Update UI forms
+---
 
-## 📚 Next Steps
+## What Works Out of the Box
 
-### Immediate (Can do now)
-1. ✅ Explore the interactive map
-2. ✅ Create test disasters
-3. ✅ Run predictions
-4. ✅ Test resource allocation
-5. ✅ Try real-time updates (open in 2 tabs)
+### Phase 1 — Core Platform
+- Register and login with email/password
+- Create, view, update, and delete disaster records
+- Interactive Leaflet map with live disaster markers
+- Run ML predictions (severity, spread, impact)
+- Manage resource inventory
+- Role-based dashboards (Admin, Victim, NGO, Coordinator)
 
-### Short-term (1-2 days)
-1. 📝 Customize UI colors and branding
-2. 🎨 Add your logo
-3. 🗺️ Integrate with real weather APIs
-4. 📱 Test on mobile devices
-5. 🧪 Train ML models with real data
+### Phase 2 — Resource Allocation
+- LP-optimized allocation engine (maximizes coverage, minimizes distance)
+- Resource shortfall forecasting (predict demand vs supply)
 
-### Medium-term (1-2 weeks)
-1. 🚀 Deploy to production (see DEPLOYMENT.md)
-2. 📧 Add email notifications
-3. 📊 Build analytics dashboard
-4. 👥 Implement admin panel
-5. 📱 Create mobile app
+### Phase 3 — NLP Triage & Chatbot
+- Submit resource requests in plain text — auto-classified to type + priority
+- AI chatbot walks victims through a guided intake conversation
+- Coordinators can override and correct NLP results (training feedback)
 
-### Long-term (1+ month)
-1. 🤖 Advanced ML models (deep learning)
-2. 🌐 Multi-language support
-3. 📡 IoT sensor integration
-4. 🛰️ Satellite imagery analysis
-5. 🚁 Drone coordination system
+### Phase 4 — Data Ingestion
+- Background orchestrator polls external feeds (weather, GDACS, USGS, FIRMS)
+- Ingested events shown in dashboard with alert notifications
+- Works without API keys: GDACS and USGS feeds are free and keyless
 
-## 🎓 Learning Resources
+### Phase 5 — AI Coordinator Dashboard
+- Generate situation reports (daily cron or on-demand)
+- Ask questions in natural language ("How many active disasters?")
+- Anomaly detection runs in background (Isolation Forest)
+- Track prediction outcomes vs actual results
+- Model accuracy evaluation reports
 
-### Frontend
-- [Next.js Documentation](https://nextjs.org/docs)
-- [React Query Guide](https://tanstack.com/query/latest)
-- [Tailwind CSS](https://tailwindcss.com/docs)
+---
 
-### Backend
-- [FastAPI Tutorial](https://fastapi.tiangolo.com/tutorial/)
-- [Pydantic Documentation](https://docs.pydantic.dev/)
-- [Scikit-learn User Guide](https://scikit-learn.org/stable/user_guide.html)
+## Role-Based Dashboards
 
-### Database
-- [Supabase Docs](https://supabase.com/docs)
-- [PostgreSQL Tutorial](https://www.postgresqltutorial.com/)
-- [PostGIS Introduction](https://postgis.net/workshops/postgis-intro/)
+| Role | Dashboard Path | Capabilities |
+|------|---------------|-------------|
+| **Admin** | `/admin/live-map` | Full system access, live monitoring |
+| **Coordinator** | `/dashboard/coordinator` | Sitreps, NL queries, anomalies, outcome tracking |
+| **NGO / Donor** | `/ngo/inventory`, `/ngo/requests` | Manage resource inventory, review victim requests |
+| **Victim** | `/victim` | Submit requests, use chatbot, track request status |
 
-## 🐛 Troubleshooting
+---
+
+## Optional API Keys (All Free)
+
+These enhance functionality but are **not required**:
+
+| Key | Free Tier | What You Get | Signup |
+|-----|-----------|-------------|--------|
+| `OPENWEATHERMAP_API_KEY` | 1,000 calls/day | Real weather data for predictions | [openweathermap.org](https://openweathermap.org/api) |
+| `FIRMS_API_KEY` | Unlimited | NASA satellite fire hotspot data | [firms.modaps.eosdis.nasa.gov](https://firms.modaps.eosdis.nasa.gov/api/area/) |
+| `SENDGRID_API_KEY` | 100 emails/day | Email delivery for critical alerts | [sendgrid.com](https://sendgrid.com) |
+
+**Without these keys:** Weather/FIRMS polling is silently skipped, alerts are stored in the database (visible on dashboard) but no emails are sent. All other features work normally.
+
+---
+
+## Troubleshooting
+
+### Backend won't start
+
+**"Missing Supabase credentials"**
+- Ensure `backend/.env` exists and has `SUPABASE_URL`, `SUPABASE_KEY`, and `SUPABASE_SERVICE_KEY` set to real values (not the placeholder text)
+
+**"ML models loaded" doesn't appear**
+- Check that `backend/models/` contains `.pkl` files. If missing, run:
+  ```bash
+  cd backend
+  python scripts/generate_training_data.py
+  python -m app.services.training.train_all
+  ```
+
+**Database connection errors**
+- Verify `DATABASE_URL` uses the correct password and host (`db.your-project.supabase.co`, not `your-project.supabase.co`)
+- Ensure `+asyncpg` is in the URL prefix: `postgresql+asyncpg://...`
 
 ### Frontend won't start
+
+**Module not found errors**
 ```bash
 cd frontend
 rm -rf node_modules .next
@@ -294,65 +261,48 @@ npm install
 npm run dev
 ```
 
-### Backend errors
-```bash
-cd backend
-pip install --upgrade pip
-pip install -r requirements.txt --force-reinstall
-```
+**Blank page / API errors**
+- Verify `frontend/.env.local` has the correct Supabase URL and anon key
+- Confirm backend is running on port 8000
 
-### Database connection issues
-- Verify Supabase URL and keys in .env
-- Check if Supabase project is active
-- Ensure schema.sql was executed successfully
+### Real-time updates not working
+- In Supabase Dashboard → **Database → Replication**, enable realtime for the tables you need
+- Check browser console for WebSocket connection errors
 
-### Real-time not working
-- Enable Realtime in Supabase Dashboard > Database > Replication
-- Check browser console for WebSocket errors
-- Verify RLS policies allow subscriptions
-
-## 💡 Pro Tips
-
-1. **Use the API Documentation**: Visit `http://localhost:8000/docs` for interactive API testing
-2. **Enable Hot Reload**: Both frontend and backend support hot reload for faster development
-3. **Check Supabase Logs**: Use Supabase Dashboard > Logs for debugging
-4. **Use React DevTools**: Install browser extension for debugging React components
-5. **Database Migrations**: Always test migrations on development database first
-
-## 🤝 Support & Community
-
-- 📖 Read the documentation in `/docs`
-- 🐛 Report issues on GitHub
-- 💬 Join community Discord/Slack
-- 📧 Email: support@disaster-management.com
-
-## 🎉 Success Checklist
-
-Once you have these working, you're ready to customize:
-- [ ] Can login/register users
-- [ ] Can create and view disasters on map
-- [ ] Real-time updates working (test with 2 browser tabs)
-- [ ] Can run ML predictions
-- [ ] Can allocate resources
-- [ ] API documentation accessible
-- [ ] All tests passing
-
-## 🚀 Ready to Deploy?
-
-When you're ready for production:
-1. Read `docs/DEPLOYMENT.md`
-2. Configure production environment variables
-3. Set up monitoring and logging
-4. Deploy frontend to Vercel
-5. Deploy backend to Railway/Fly.io
-6. Configure custom domains
-7. Enable SSL certificates
-8. Set up automated backups
+### Docker issues
+- Ensure Docker Desktop is running
+- Try `docker-compose down -v` then `docker-compose up --build`
 
 ---
 
-**You now have a complete, production-ready disaster management system!**
+## Verification Checklist
 
-Need help? Check the detailed documentation in the `/docs` folder or contact support.
+Once setup is complete, confirm each feature:
 
-Good luck and happy building! 🎊
+- [ ] Can register a new user and login
+- [ ] Landing page loads at `localhost:3000`
+- [ ] Backend health check returns `ml_models_loaded: true`
+- [ ] Can create a disaster from the dashboard
+- [ ] Disaster appears on the map
+- [ ] Can run a prediction (severity/spread/impact)
+- [ ] Can submit a victim resource request
+- [ ] Chatbot responds at `/victim/requests/chatbot`
+- [ ] Swagger docs load at `localhost:8000/docs`
+- [ ] Can generate a situation report from coordinator dashboard
+
+---
+
+## What's Next
+
+| Goal | Action |
+|------|--------|
+| Explore the API | Visit http://localhost:8000/docs and try endpoints interactively |
+| Test real-time | Open the app in two browser tabs and create a disaster — both tabs update live |
+| Add API keys | Sign up for free keys and add to `backend/.env` for weather/fire/email features |
+| Deploy | Read [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production deployment guide |
+| Retrain models | `POST /api/ml/retrain` to trigger model retraining with new data |
+| Customize | Modify components in `frontend/src/components/`, add new routers in `backend/app/routers/` |
+
+---
+
+**You're all set. Happy building!**

@@ -1,10 +1,54 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { MapPin, Navigation } from 'lucide-react';
+import { MapPin, Navigation, AlertTriangle } from 'lucide-react';
 import Image from 'next/image';
+import { useEffect, useState } from 'react';
+
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+interface Incident {
+    id: string;
+    title: string;
+    type: string;
+    severity: string;
+    description: string;
+    created_at: string;
+    location_name: string;
+    latitude: number | null;
+    longitude: number | null;
+}
+
+/* Map severity to color */
+function severityColor(severity: string) {
+    switch (severity) {
+        case 'critical': return 'bg-red-500';
+        case 'high': return 'bg-orange-500';
+        case 'medium': return 'bg-blue-500';
+        default: return 'bg-emerald-500';
+    }
+}
+
+/* Deterministic position from incident id (avoids overlap) */
+function posFromId(id: string, idx: number) {
+    const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+    const x = 15 + ((hash * 37 + idx * 23) % 65);   // 15-80%
+    const y = 15 + ((hash * 53 + idx * 31) % 55);    // 15-70%
+    return { x: `${x}%`, y: `${y}%` };
+}
 
 export default function MapPreviewCard() {
+    const [incidents, setIncidents] = useState<Incident[]>([]);
+
+    useEffect(() => {
+        fetch(`${API}/api/admin/recent-incidents`)
+            .then(r => r.ok ? r.json() : [])
+            .then(setIncidents)
+            .catch(() => setIncidents([]));
+    }, []);
+
+    const latest = incidents[0];
+
     return (
         <div className="relative w-full h-[500px] rounded-3xl overflow-hidden shadow-2xl border border-slate-700 group">
             {/* Background Static Map */}
@@ -24,11 +68,25 @@ export default function MapPreviewCard() {
                 style={{ backgroundImage: 'radial-gradient(circle, #3b82f6 1px, transparent 1px)', backgroundSize: '30px 30px' }}
             />
 
-            {/* Pulsing Hotspots - Simulating Real-time Data */}
-            <Hotspot x="30%" y="40%" label="Food Supply" color="bg-emerald-500" delay={0} />
-            <Hotspot x="60%" y="25%" label="Medical Aid" color="bg-blue-500" delay={1} />
-            <Hotspot x="45%" y="70%" label="Rescue Team" color="bg-red-500" delay={2} />
-            <Hotspot x="75%" y="60%" label="Shelter Setup" color="bg-orange-500" delay={1.5} />
+            {/* Pulsing Hotspots — driven by real active incidents */}
+            {incidents.length > 0 ? (
+                incidents.slice(0, 5).map((inc, i) => {
+                    const pos = posFromId(inc.id, i);
+                    return (
+                        <Hotspot
+                            key={inc.id}
+                            x={pos.x}
+                            y={pos.y}
+                            label={inc.title}
+                            color={severityColor(inc.severity)}
+                            delay={i * 0.5}
+                        />
+                    );
+                })
+            ) : (
+                /* No incidents — show a single "all clear" dot */
+                <Hotspot x="50%" y="45%" label="No active incidents" color="bg-emerald-500" delay={0} />
+            )}
 
             {/* Floating UI Elements */}
             <div className="absolute top-6 left-6 right-6 flex items-start justify-between">
@@ -39,7 +97,11 @@ export default function MapPreviewCard() {
                     </div>
                     <div>
                         <p className="text-xs text-slate-400 uppercase tracking-wider font-bold">Live Operations</p>
-                        <p className="text-white font-mono text-sm">Zone B-4 Active</p>
+                        <p className="text-white font-mono text-sm">
+                            {incidents.length > 0
+                                ? `${incidents.length} active incident${incidents.length > 1 ? 's' : ''}`
+                                : 'All clear'}
+                        </p>
                     </div>
                 </div>
 
@@ -49,13 +111,26 @@ export default function MapPreviewCard() {
             </div>
 
             <div className="absolute bottom-6 left-6 right-6">
-                <div className="glass p-4 rounded-2xl border-l-4 border-blue-500">
-                    <div className="flex items-center gap-3 mb-2">
-                        <MapPin className="w-4 h-4 text-blue-400" />
-                        <span className="text-xs font-bold text-blue-400 uppercase">Latest Incident</span>
+                {latest ? (
+                    <div className="glass p-4 rounded-2xl border-l-4 border-blue-500">
+                        <div className="flex items-center gap-3 mb-2">
+                            <MapPin className="w-4 h-4 text-blue-400" />
+                            <span className="text-xs font-bold text-blue-400 uppercase">Latest Incident</span>
+                        </div>
+                        <p className="text-white font-medium text-sm line-clamp-2">
+                            {latest.title}{latest.location_name && latest.location_name !== 'Unknown' ? ` — ${latest.location_name}` : ''}
+                            {latest.description ? `. ${latest.description.slice(0, 120)}` : ''}
+                        </p>
                     </div>
-                    <p className="text-white font-medium text-sm">Flash Flood reported in Sector 9. Allocating nearest response units.</p>
-                </div>
+                ) : (
+                    <div className="glass p-4 rounded-2xl border-l-4 border-emerald-500">
+                        <div className="flex items-center gap-3 mb-2">
+                            <AlertTriangle className="w-4 h-4 text-emerald-400" />
+                            <span className="text-xs font-bold text-emerald-400 uppercase">Status</span>
+                        </div>
+                        <p className="text-white font-medium text-sm">No active incidents at this time. Monitoring continues.</p>
+                    </div>
+                )}
             </div>
         </div>
     );

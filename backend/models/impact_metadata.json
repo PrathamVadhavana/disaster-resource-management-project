@@ -1,0 +1,42 @@
+{
+  "model_type": "XGBRegressor (multi-output)",
+  "n_estimators": 300,
+  "train_samples": 4800,
+  "test_samples": 1200,
+  "features": [
+    "severity_score",
+    "affected_population",
+    "gdp_per_capita",
+    "infrastructure_density",
+    "dtype_earthquake",
+    "dtype_flood",
+    "dtype_hurricane",
+    "dtype_tornado",
+    "dtype_wildfire",
+    "dtype_tsunami",
+    "dtype_drought",
+    "dtype_landslide",
+    "dtype_volcano"
+  ],
+  "targets": [
+    "casualties",
+    "economic_damage_million_usd"
+  ],
+  "metrics": {
+    "casualties": {
+      "mae": 67.8998,
+      "rmse": 144.6302,
+      "r2": 0.5531
+    },
+    "economic_damage_million_usd": {
+      "mae": 0.2338,
+      "rmse": 0.781,
+      "r2": 0.3767
+    }
+  },
+  "cv_metrics": {
+    "loo_cv_mae_casualties": 67.43,
+    "loo_cv_mae_damage": 0.24
+  },
+  "train_time_sec": 0.52
+}

@@ -1,16 +1,21 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.database import supabase
 from app.schemas import UserLogin, UserRegister, Token
+
+try:
+    from app.middleware.rate_limit import limiter
+except ImportError:
+    limiter = None
 
 router = APIRouter()
 security = HTTPBearer()
 
 
 @router.post("/register", response_model=Token)
-async def register(user: UserRegister):
-    """Register a new user"""
+async def register(request: Request, user: UserRegister):
+    """Register a new user (rate-limited: 5/minute)"""
     try:
         # 1. Create auth user
         auth_response = supabase.auth.sign_up({
@@ -63,8 +68,8 @@ async def register(user: UserRegister):
 
 
 @router.post("/login", response_model=Token)
-async def login(credentials: UserLogin):
-    """Login user and return access token"""
+async def login(request: Request, credentials: UserLogin):
+    """Login user and return access token (rate-limited: 10/minute)"""
     try:
         auth_response = supabase.auth.sign_in_with_password({
             "email": credentials.email,

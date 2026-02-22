@@ -135,7 +135,9 @@ class PredictionInput(BaseModel):
         if prediction_type == PredictionType.SEVERITY:
             required = ['temperature', 'humidity', 'wind_speed', 'pressure']
         elif prediction_type == PredictionType.SPREAD:
-            required = ['current_area', 'wind_direction', 'terrain_type']
+            required = ['current_area', 'wind_speed', 'terrain_type']
+        elif prediction_type == PredictionType.IMPACT:
+            required = ['severity_score', 'affected_population']
         else:
             required = []
         
@@ -151,9 +153,13 @@ class PredictionResponse(BaseModel):
     location_id: str
     prediction_type: PredictionType
     confidence_score: float
-    predicted_severity: Optional[DisasterSeverity]
-    predicted_start_date: Optional[datetime]
-    predicted_casualties: Optional[int]
+    predicted_severity: Optional[DisasterSeverity] = None
+    predicted_start_date: Optional[datetime] = None
+    predicted_casualties: Optional[int] = None
+    predicted_area_km2: Optional[float] = None
+    ci_lower_km2: Optional[float] = None
+    ci_upper_km2: Optional[float] = None
+    predicted_damage_usd: Optional[float] = None
     model_version: str
     created_at: datetime
 
@@ -193,12 +199,36 @@ class Resource(ResourceBase):
         from_attributes = True
 
 
+class PriorityWeightsSchema(BaseModel):
+    """Tunable weights for the allocation objective function."""
+    urgency_weight: float = Field(1.0, ge=0, description="Weight for urgency score")
+    distance_weight: float = Field(0.3, ge=0, description="Penalty weight for delivery distance")
+    expiry_weight: float = Field(0.2, ge=0, description="Bonus weight for soon-to-expire resources")
+    coverage_weight: float = Field(1.0, ge=0, description="Weight for overall coverage")
+
+
 class AllocationRequest(BaseModel):
     disaster_id: str
     required_resources: List[Dict[str, Any]] = Field(
         ...,
         description="List of required resources with type, quantity, and priority"
     )
+    priority_weights: Optional[PriorityWeightsSchema] = Field(
+        None,
+        description="Optional objective-function weights (defaults used when omitted)"
+    )
+    max_distance_km: float = Field(
+        500.0, gt=0,
+        description="Maximum delivery distance in km — resources further away are excluded"
+    )
+
+
+class OptimizationScoreBreakdown(BaseModel):
+    """Detailed breakdown of the optimisation result."""
+    coverage_pct: float = Field(0, description="Percentage of requirements met (0-100)")
+    unmet_needs: List[Dict[str, Any]] = Field(default_factory=list)
+    estimated_delivery_km: float = Field(0, description="Total delivery distance across all allocations (km)")
+    solver_status: str = Field("not_solved", description="LP solver exit status")
 
 
 class AllocationResponse(BaseModel):
@@ -206,6 +236,28 @@ class AllocationResponse(BaseModel):
     allocations: List[Dict[str, Any]]
     optimization_score: float
     unmet_needs: List[Dict[str, Any]]
+    score_breakdown: Optional[OptimizationScoreBreakdown] = None
+
+
+# ============================================================
+# Forecast Schemas
+# ============================================================
+
+class ForecastItemSchema(BaseModel):
+    resource_type: str
+    forecast_hour: int = Field(..., description="Hours from now")
+    predicted_demand: float
+    predicted_supply: float
+    shortfall: float = Field(..., description="Positive = deficit, negative = surplus")
+    confidence_lower: float = 0.0
+    confidence_upper: float = 0.0
+
+
+class ForecastResponse(BaseModel):
+    generated_at: datetime
+    horizon_hours: int = 72
+    method: str = Field("linear", description="Forecasting method used (linear | prophet)")
+    items: List[ForecastItemSchema] = Field(default_factory=list)
 
 
 

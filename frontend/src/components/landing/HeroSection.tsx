@@ -1,11 +1,27 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { ArrowRight, ShieldCheck, HeartHandshake } from 'lucide-react';
 import MapPreviewCard from './MapPreviewCard';
 
+function formatNumber(n: number): string {
+    if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k+`;
+    return String(n);
+}
+
 export default function HeroSection() {
+    const [stats, setStats] = useState({ lives_impacted: 0, avg_response_minutes: 0, total_ngos: 0, total_volunteers: 0 });
+
+    useEffect(() => {
+        const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        fetch(`${API}/api/admin/platform-stats`)
+            .then(r => r.json())
+            .then(data => setStats(data))
+            .catch(() => {}); // keep zeros on failure
+    }, []);
+
     return (
         <section className="relative min-h-[95vh] flex items-center justify-center px-6 overflow-hidden pt-20">
             {/* Cinematic Background */}
@@ -59,18 +75,18 @@ export default function HeroSection() {
 
                     <div className="flex items-center justify-center lg:justify-start gap-8 pt-8 border-t border-slate-200 dark:border-slate-800/50">
                         <div>
-                            <p className="text-3xl font-bold text-slate-900 dark:text-white">12k+</p>
+                            <p className="text-3xl font-bold text-slate-900 dark:text-white">{formatNumber(stats.lives_impacted) || '—'}</p>
                             <p className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mt-1">Lives Impacted</p>
                         </div>
                         <div className="w-px h-12 bg-slate-200 dark:bg-slate-800" />
                         <div>
-                            <p className="text-3xl font-bold text-slate-900 dark:text-white">45min</p>
+                            <p className="text-3xl font-bold text-slate-900 dark:text-white">{stats.avg_response_minutes ? `${stats.avg_response_minutes}min` : '—'}</p>
                             <p className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mt-1">Avg Response</p>
                         </div>
                         <div className="w-px h-12 bg-slate-200 dark:bg-slate-800" />
                         <div>
-                            <p className="text-3xl font-bold text-slate-900 dark:text-white">Top 1%</p>
-                            <p className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mt-1">NGO Efficiency</p>
+                            <p className="text-3xl font-bold text-slate-900 dark:text-white">{formatNumber(stats.total_volunteers + stats.total_ngos) || '—'}</p>
+                            <p className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 font-bold mt-1">Responders</p>
                         </div>
                     </div>
                 </div>

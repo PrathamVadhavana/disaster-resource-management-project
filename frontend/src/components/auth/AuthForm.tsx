@@ -28,7 +28,10 @@ const signUpSchema = z.object({
         .regex(/[0-9]/, 'Password must contain at least one number')
         .regex(/[^A-Za-z0-9]/, 'Password must contain at least one special character'),
     fullName: z.string().min(2, 'Full name is required'),
-    role: z.nativeEnum(UserRole).optional(),
+    role: z.nativeEnum(UserRole, { required_error: 'Please select a role' }).refine(
+        (val) => val !== UserRole.ADMIN,
+        { message: 'Invalid role selection' }
+    ),
 });
 
 const otpSchema = z.object({
@@ -116,7 +119,7 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
                 options: {
                     data: {
                         full_name: data.fullName,
-                        ...(data.role && { role: data.role }),
+                        role: data.role,
                     },
                 },
             });
@@ -391,7 +394,7 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
 
                     <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                            I am joining as a... <span className="text-slate-500 font-normal">(Optional)</span>
+                            I am joining as a... <span className="text-red-500">*</span>
                         </label>
                         <div className="grid grid-cols-2 gap-3">
                             {[

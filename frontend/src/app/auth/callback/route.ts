@@ -34,25 +34,42 @@ export async function GET(request: Request) {
             // Otherwise, check profile completion to decide redirect target
             let redirectPath = '/onboarding'
 
-            // Retry loop — the DB trigger may take a moment to create the profile row
+            // Try to check profile status — may fail if table doesn't exist
             let attempts = 0
-            const maxAttempts = 5
+            const maxAttempts = 3
             while (attempts < maxAttempts) {
-                const { data: profile } = await supabase
-                    .from('users')
-                    .select('is_profile_completed')
-                    .eq('id', sessionData.user.id)
-                    .maybeSingle()
+                try {
+                    const { data: profile, error: profileError } = await supabase
+                        .from('users')
+                        .select('is_profile_completed, role')
+                        .eq('id', sessionData.user.id)
+                        .maybeSingle()
 
-                const profileRow = profile as { is_profile_completed: boolean } | null
+                    if (profileError) break // Table may not exist
 
-                if (profileRow) {
-                    redirectPath = profileRow.is_profile_completed ? '/dashboard' : '/onboarding'
+                    const profileRow = profile as { is_profile_completed: boolean; role?: string } | null
+
+                    if (profileRow) {
+                        if (profileRow.is_profile_completed) {
+                            switch (profileRow.role) {
+                                case 'victim': redirectPath = '/victim'; break
+                                case 'ngo': redirectPath = '/ngo'; break
+                                case 'donor': redirectPath = '/donor'; break
+                                case 'volunteer': redirectPath = '/volunteer'; break
+                                case 'admin': redirectPath = '/admin'; break
+                                default: redirectPath = '/onboarding'
+                            }
+                        }
+                        break
+                    }
+                } catch {
                     break
                 }
 
                 // Profile not yet created by trigger — wait and retry
-                await new Promise(resolve => setTimeout(resolve, 1000))
+                if (attempts < maxAttempts - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 800))
+                }
                 attempts++
             }
 

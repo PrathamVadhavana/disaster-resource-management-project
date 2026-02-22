@@ -1,22 +1,64 @@
+import logging
 import os
 from supabase import create_client, Client
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from typing import AsyncGenerator
 
-# Supabase client
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_KEY")  # Public Anon Key
-supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY") # Secret Service Role Key
+logger = logging.getLogger(__name__)
 
-if not supabase_url or not supabase_key or not supabase_service_key:
-    raise ValueError("Missing Supabase credentials in environment variables")
+# ── Supabase clients (lazy-initialised) ──────────────────────────────────────
+_supabase: Client | None = None
+_supabase_admin: Client | None = None
 
-# Client for public operations (respects RLS)
-supabase: Client = create_client(supabase_url, supabase_key)
 
-# Client for admin operations (bypasses RLS)
-supabase_admin: Client = create_client(supabase_url, supabase_service_key)
+def _get_supabase_credentials():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    service_key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not url or not key or not service_key:
+        raise RuntimeError(
+            "Missing Supabase credentials – set SUPABASE_URL, SUPABASE_KEY, "
+            "and SUPABASE_SERVICE_KEY environment variables."
+        )
+    return url, key, service_key
+
+
+def _init_supabase() -> None:
+    global _supabase, _supabase_admin
+    url, key, service_key = _get_supabase_credentials()
+    _supabase = create_client(url, key)
+    _supabase_admin = create_client(url, service_key)
+
+
+class _LazySupabase:
+    """Descriptor that initialises the Supabase clients on first access."""
+
+    def __init__(self, admin: bool = False):
+        self._admin = admin
+
+    def __get__(self, obj, objtype=None) -> Client:
+        if _supabase is None:
+            _init_supabase()
+        return _supabase_admin if self._admin else _supabase  # type: ignore[return-value]
+
+
+class _SupabaseAccessor:
+    supabase = _LazySupabase(admin=False)
+    supabase_admin = _LazySupabase(admin=True)
+
+
+_accessor = _SupabaseAccessor()
+
+
+# Public module-level names kept for backward-compat imports
+# Usage:  ``from app.database import supabase``
+def __getattr__(name: str):
+    if name == "supabase":
+        return _accessor.supabase
+    if name == "supabase_admin":
+        return _accessor.supabase_admin
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # SQLAlchemy setup for direct database access if needed (optional)
 engine = None
@@ -24,9 +66,10 @@ async_session_maker = None
 Base = None
 
 try:
+    supabase_url = os.getenv("SUPABASE_URL", "")
     DATABASE_URL = os.getenv(
         "DATABASE_URL",
-        f"postgresql+asyncpg://postgres:{os.getenv('SUPABASE_DB_PASSWORD')}@{supabase_url.split('//')[1]}/postgres"
+        f"postgresql+asyncpg://postgres:{os.getenv('SUPABASE_DB_PASSWORD')}@{supabase_url.split('//')[1] if '//' in supabase_url else 'localhost'}/postgres"
     )
 
     # Ensure async driver prefix
@@ -39,8 +82,8 @@ try:
     )
     Base = declarative_base()
 except Exception as e:
-    print(f"⚠️  SQLAlchemy setup skipped: {e}")
-    print("ℹ️  Using Supabase client for all database operations")
+    logger.warning("SQLAlchemy setup skipped: %s", e)
+    logger.info("Using Supabase client for all database operations")
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
@@ -61,12 +104,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def init_db():
     """Initialize database tables"""
     if not engine:
-        print("ℹ️  SQLAlchemy not available, skipping DB init")
+        logger.info("SQLAlchemy not available, skipping DB init")
         return
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        print("✅ Database initialized")
+        logger.info("Database initialized")
     except Exception as e:
-        print(f"⚠️  Database initialization failed: {e}")
-        print("ℹ️  Continuing without database - some features may not work")
+        logger.warning("Database initialization failed: %s", e)
+        logger.info("Continuing without database - some features may not work")

@@ -29,26 +29,39 @@ export function NGOForm({ userId }: { userId: string }) {
     const onSubmit = async (data: NGOFormData) => {
         setLoading(true);
         try {
-            // Cast to any to bypass missing type definition for 'ngo_details'
-            const { error } = await (supabase.from('ngo_details') as any).insert({
+            // 0. Ensure users row exists (FK parent for ngo_details)
+            const { error: upsertErr } = await (supabase.from('users') as any)
+                .upsert({ id: userId, email: (await supabase.auth.getUser()).data.user?.email ?? '', role: 'ngo' }, { onConflict: 'id' });
+            if (upsertErr) console.warn('users upsert warning:', upsertErr.message);
+
+            // 1. Insert NGO details
+            const { error } = await (supabase.from('ngo_details') as any).upsert({
                 id: userId,
                 organization_name: data.organization_name,
                 registration_number: data.registration_number,
                 operating_sectors: data.operating_sectors,
                 website: data.website || null,
-                verification_status: 'pending' // Default
-            });
+                verification_status: 'pending'
+            }, { onConflict: 'id' });
 
-            if (error) throw error;
+            if (error) {
+                console.error('ngo_details insert error:', error);
+                throw error;
+            }
 
             await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
 
-            router.push('/dashboard');
-            router.refresh();
-        } catch (error) {
-            console.error(error);
-            alert('Failed to save details');
-        } finally {
+            // Set role in user_metadata so middleware routes correctly
+            await supabase.auth.updateUser({ data: { role: 'ngo' } });
+
+            // Refresh the session so the JWT cookie contains the new role
+            await supabase.auth.refreshSession();
+
+            // Hard redirect — ensures middleware reads the fresh JWT cookie
+            window.location.href = '/dashboard';
+        } catch (error: any) {
+            console.error('NGO onboarding submit error:', error);
+            alert('Failed to save details: ' + (error?.message || 'Unknown error'));
             setLoading(false);
         }
     };

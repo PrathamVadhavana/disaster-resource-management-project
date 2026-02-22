@@ -1,0 +1,28 @@
+{
+  "model_type": "GradientBoostingRegressor",
+  "n_estimators": 300,
+  "train_samples": 4000,
+  "test_samples": 1000,
+  "features": [
+    "current_area_km2",
+    "wind_speed",
+    "wind_direction",
+    "elevation_m",
+    "vegetation_density",
+    "days_active",
+    "terrain_idx",
+    "dtype_earthquake",
+    "dtype_flood",
+    "dtype_hurricane",
+    "dtype_tornado",
+    "dtype_wildfire",
+    "dtype_tsunami",
+    "dtype_drought",
+    "dtype_landslide",
+    "dtype_volcano"
+  ],
+  "mae": 10.6458,
+  "rmse": 20.3208,
+  "r2": 0.9401,
+  "train_time_sec": 4.49
+}
