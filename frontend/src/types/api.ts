@@ -125,6 +125,17 @@ export interface ResourceRequest {
   // Flattened fields that may come from joined queries
   title?: string
   location_name?: string
+  // NLP / AI triage fields (populated by backend NLP service)
+  nlp_classification?: {
+    resource_types?: string[]
+    recommended_priority?: string
+    priority_was_escalated?: boolean
+    estimated_quantity?: number | string
+    confidence?: number
+  } | null
+  ai_confidence?: number | null
+  nlp_overridden?: boolean
+  urgency_signals?: Array<{ keyword: string; label: string; severity_boost: number }>
 }
 
 export interface ResourceRequestListResponse {

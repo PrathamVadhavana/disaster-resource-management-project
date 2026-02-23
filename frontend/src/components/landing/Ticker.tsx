@@ -49,7 +49,7 @@ export default function Ticker() {
                     transition={{
                         repeat: Infinity,
                         ease: "linear",
-                        duration: Math.max(20, items.length * 3),
+                        duration: Math.max(75, items.length * 7),
                     }}
                 >
                     {[...items, ...items, ...items].map((stat, i) => (
