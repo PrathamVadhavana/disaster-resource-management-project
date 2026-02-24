@@ -1,7 +1,7 @@
 {
-  "version": "20260221_195729",
-  "trained_at": "2026-02-21T19:57:29.495665+00:00",
-  "total_train_time_sec": 26.19,
+  "version": "20260224_052836",
+  "trained_at": "2026-02-24T05:28:36.892232+00:00",
+  "total_train_time_sec": 44.33,
   "models": {
     "severity": {
       "file": "severity_model.pkl",

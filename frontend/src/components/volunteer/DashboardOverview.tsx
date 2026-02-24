@@ -7,8 +7,9 @@ import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import {
     Loader2, MapPin, Shield, Clock, CheckCircle2,
-    ArrowRight, AlertTriangle, Zap, Award, HandHeart, ClipboardList
+    ArrowRight, AlertTriangle, Zap, Award, HandHeart, ClipboardList, ShieldCheck, Rocket
 } from 'lucide-react'
+import { VerificationHub } from './VerificationHub'
 
 export function VolunteerDashboardOverview() {
     const { profile } = useAuth()
@@ -19,10 +20,14 @@ export function VolunteerDashboardOverview() {
         refetchInterval: 30000,
     })
 
-    // Fetch volunteer certifications to show deployment readiness
-    const { data: certifications = [] } = useQuery({
-        queryKey: ['volunteer-certifications'],
-        queryFn: () => api.getCertifications(),
+    const { data: volunteerStats, isLoading: vStatsLoad } = useQuery({
+        queryKey: ['volunteer-stats'],
+        queryFn: () => api.getVolunteerStats(),
+    })
+
+    const { data: activeDeploymentData } = useQuery({
+        queryKey: ['active-deployment'],
+        queryFn: () => api.getActiveDeployment(),
     })
 
     const disasterList = Array.isArray(disasters) ? disasters : []
@@ -30,10 +35,11 @@ export function VolunteerDashboardOverview() {
     const criticalDisasters = activeDisasters.filter((d: any) => d.severity === 'critical' || d.severity === 'high')
 
     // Compute volunteer status from profile metadata
-    const volunteerStatus = profile?.metadata?.availability || 'Available'
-    const activeCerts = Array.isArray(certifications) ? certifications.filter((c: any) => c.status === 'active').length : 0
+    const volunteerStatus = (profile?.metadata as any)?.availability || 'Available'
+    const activeCerts = volunteerStats?.certifications_count || 0
+    const activeDeployment = activeDeploymentData?.active_deployment
 
-    if (dLoad) {
+    if (dLoad || vStatsLoad) {
         return (
             <div className="flex items-center justify-center h-64">
                 <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
@@ -42,9 +48,9 @@ export function VolunteerDashboardOverview() {
     }
 
     const statCards = [
-        { label: 'Active Disasters', value: activeDisasters.length, icon: AlertTriangle, bgColor: 'from-red-500 to-orange-600' },
-        { label: 'Urgent Need', value: criticalDisasters.length, icon: Zap, bgColor: 'from-amber-500 to-orange-600' },
-        { label: 'Status', value: volunteerStatus, icon: Shield, bgColor: 'from-emerald-500 to-teal-600' },
+        { label: 'Impact Score', value: volunteerStats?.impact_score || 0, icon: Zap, bgColor: 'from-amber-400 to-orange-500' },
+        { label: 'Hours Contributed', value: volunteerStats?.total_hours_contributed || 0, icon: Clock, bgColor: 'from-blue-500 to-blue-600' },
+        { label: 'Deployments', value: volunteerStats?.completed_deployments || 0, icon: Rocket, bgColor: 'from-emerald-500 to-emerald-600' },
         { label: 'Certifications', value: activeCerts, icon: Award, bgColor: 'from-purple-500 to-indigo-600' },
     ]
 
@@ -141,6 +147,9 @@ export function VolunteerDashboardOverview() {
                     <div className="p-10 text-center text-sm text-slate-400">No active disasters at the moment</div>
                 )}
             </div>
+
+            {/* Field Verification Hub (Phase 6) */}
+            <VerificationHub />
 
             {/* Quick Actions */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

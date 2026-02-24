@@ -1,8 +1,7 @@
 """
-Phase 5 – Configuration for AI Coordinator Dashboard.
+Phase 5 – Configuration for AI Dashboard.
 
 All features use free, rule-based implementations.
-SendGrid (free tier) is the only optional external service.
 """
 
 import os

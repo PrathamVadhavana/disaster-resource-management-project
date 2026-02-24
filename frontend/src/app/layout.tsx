@@ -19,8 +19,18 @@ const inter = Inter({
 })
 
 export const metadata: Metadata = {
-  title: 'Disaster Management System',
-  description: 'AI-powered disaster prediction and resource allocation platform',
+  title: 'HopeInChaos — Disaster Management System',
+  description: 'AI-powered disaster prediction, monitoring, and resource allocation platform',
+  manifest: '/manifest.json',
+  other: {
+    'mobile-web-app-capable': 'yes',
+    'apple-mobile-web-app-capable': 'yes',
+    'apple-mobile-web-app-status-bar-style': 'black-translucent',
+  },
+}
+
+export const viewport = {
+  themeColor: '#7c3aed',
 }
 
 export default function RootLayout({

@@ -199,7 +199,7 @@ export interface AlertNotification {
   created_at: string
 }
 
-// ─── AI Coordinator ─────────────────────────────────────────────────────────
+// ─── AI Operations ──────────────────────────────────────────────────────────
 
 export interface SitrepReport {
   id: string

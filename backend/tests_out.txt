@@ -1,0 +1,72 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.7, pytest-8.0.1, pluggy-1.6.0
+rootdir: C:\Users\borda\Desktop\disaster-resource-management-project\backend
+configfile: pyproject.toml
+plugins: anyio-4.12.0, asyncio-0.23.5, cov-4.1.0, mock-3.15.1, timeout-2.4.0
+asyncio: mode=Mode.AUTO
+collected 3 items
+
+tests\unit\test_dependencies.py FFF                                      [100%]
+
+================================== FAILURES ===================================
+__________________________ test_require_role_success __________________________
+tests\unit\test_dependencies.py:22: in test_require_role_success
+    mock_async_proxy.__await__.return_value = iter([mock_client])
+C:\Python313\Lib\unittest\mock.py:692: in __getattr__
+    raise AttributeError(name)
+E   AttributeError: __await__
+_________________________ test_require_role_forbidden _________________________
+tests\unit\test_dependencies.py:45: in test_require_role_forbidden
+    mock_async_proxy.__await__.return_value = iter([mock_client])
+C:\Python313\Lib\unittest\mock.py:692: in __getattr__
+    raise AttributeError(name)
+E   AttributeError: __await__
+______________________ test_get_current_user_id_success _______________________
+tests\unit\test_dependencies.py:67: in test_get_current_user_id_success
+    mock_async_proxy.__await__.return_value = iter([mock_client])
+C:\Python313\Lib\unittest\mock.py:692: in __getattr__
+    raise AttributeError(name)
+E   AttributeError: __await__
+============================== warnings summary ===============================
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:365
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:365: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:494
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:494: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:498
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:498: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:502
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:502: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:506
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:506: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:538
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:538: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:542
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:542: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:546
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:546: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+..\..\..\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:550
+  C:\Users\borda\AppData\Roaming\Python\Python313\site-packages\pyiceberg\table\metadata.py:550: PydanticDeprecatedSince212: Using `@model_validator` with mode='after' on a classmethod is deprecated. Instead, use an instance method. See the documentation at https://docs.pydantic.dev/2.12/concepts/validators/#model-after-validator. Deprecated in Pydantic V2.12 to be removed in V3.0.
+    @model_validator(mode="after")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/unit/test_dependencies.py::test_require_role_success - Attribute...
+FAILED tests/unit/test_dependencies.py::test_require_role_forbidden - Attribu...
+FAILED tests/unit/test_dependencies.py::test_get_current_user_id_success - At...
+======================== 3 failed, 9 warnings in 3.25s ========================

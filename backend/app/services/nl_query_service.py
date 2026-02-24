@@ -1,12 +1,16 @@
 ﻿"""
 Phase 5 - Natural Language Query Service.
 
-Provides a 'Chat with your data' interface using rule-based keyword
-matching and direct Supabase queries. No external AI API needed (free).
+Provides a 'Chat with your data' interface using BOTH:
+1. Rule-based keyword matching for DB queries (fast, free)
+2. Google Gemini LLM for intelligent response generation (free tier)
+
+Falls back to rule-based formatting if no Gemini API key is configured.
 """
 
 import json
 import time
+import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -16,12 +20,30 @@ from app.core.phase5_config import phase5_config
 
 logger = logging.getLogger("nl_query_service")
 
+# Gemini LLM State
+_gemini_available = False
+_genai_client = None
+
+try:
+    from google import genai
+    _api_key = os.getenv("GEMINI_API_KEY", "")
+    if _api_key:
+        _genai_client = genai.Client(api_key=_api_key)
+        _gemini_available = True
+        logger.info("✅ Gemini LLM configured successfully (google-genai)")
+    else:
+        logger.info("ℹ️  No GEMINI_API_KEY set — using rule-based NL query mode")
+except ImportError:
+    logger.warning("⚠️  google-genai not installed — using rule-based NL query mode")
+except Exception as e:
+    logger.warning(f"⚠️  Gemini setup failed: {e} — using rule-based NL query mode")
+
 
 class NLQueryService:
-    """Natural language query interface using rule-based parsing (free, no API)."""
+    """Natural language query interface with optional Gemini LLM enhancement."""
 
     def __init__(self):
-        self.model = "rule-based"
+        self.model = "gemini-2.0-flash" if _gemini_available else "rule-based"
 
     # -- Tool execution (same DB queries as before) --
 
@@ -98,6 +120,18 @@ class NLQueryService:
         query = query.order("created_at", desc=True).limit(params.get("limit", 50))
         return (query.execute()).data or []
 
+    async def _tool_query_available_resources(self, params: Dict) -> Any:
+        query = supabase_admin.table("available_resources").select("*").eq("is_active", True)
+        if params.get("category"): query = query.eq("category", params["category"])
+        query = query.order("category").limit(params.get("limit", 50))
+        return (query.execute()).data or []
+
+    async def _tool_query_users(self, params: Dict) -> Any:
+        query = supabase_admin.table("users").select("id, full_name, email, role, created_at")
+        if params.get("role"): query = query.eq("role", params["role"])
+        query = query.order("created_at", desc=True).limit(params.get("limit", 50))
+        return (query.execute()).data or []
+
     # -- Rule-based query classification and routing --
 
     def _classify_and_route(self, query: str) -> Dict[str, Any]:
@@ -139,14 +173,26 @@ class NLQueryService:
             return {"tool": "outcome_tracking", "params": params, "category": "outcomes"}
         if any(w in q for w in ["utiliz", "allocation", "how much resource", "resource status"]):
             return {"tool": "resource_utilization", "params": params, "category": "utilization"}
-        if any(w in q for w in ["resource", "supply", "supplie", "inventory", "stock", "food", "water", "medical", "shelter"]):
+        if any(w in q for w in ["available resource", "inventory", "stock", "supply available", "what's available", "remaining"]):
+            for cat in ["food", "water", "medical", "shelter", "clothing", "clothes"]:
+                if cat in q:
+                    params["category"] = cat.capitalize()
+                    break
+            return {"tool": "available_resources", "params": params, "category": "available_resources"}
+        if any(w in q for w in ["resource", "supply", "supplie"]):
             for rt in ["food", "water", "medical", "shelter", "clothing"]:
                 if rt in q:
                     params["resource_type"] = rt
                     break
             return {"tool": "resources", "params": params, "category": "resources"}
-        if any(w in q for w in ["request", "victim", "need", "demand", "pending request"]):
+        if any(w in q for w in ["request", "victim", "need", "demand", "pending request", "unmet"]):
             return {"tool": "victim_requests", "params": params, "category": "requests"}
+        if any(w in q for w in ["user", "volunteer", "ngo", "donor", "admin", "how many user", "team"]):
+            for role in ["victim", "ngo", "donor", "volunteer", "admin"]:
+                if role in q:
+                    params["role"] = role
+                    break
+            return {"tool": "users", "params": params, "category": "users"}
         if any(w in q for w in ["ingest", "feed", "external", "weather", "gdacs", "usgs", "firms", "social"]):
             for et in ["weather_update", "gdacs_alert", "earthquake", "fire_hotspot", "social_sos"]:
                 if et.replace("_", " ") in q or et in q:
@@ -200,12 +246,23 @@ class NLQueryService:
                 lines.append(f"| {r.get('type', '?')} | {r.get('status', '?')} | {r.get('quantity', 0)} |")
             return "\n".join(lines)
 
+        if category == "available_resources":
+            lines = [f"## Available Resources ({count} found)\n"]
+            lines.append("| Category | Title | Available | Unit |")
+            lines.append("|----------|-------|-----------|------|")
+            for r in data[:20]:
+                total = r.get("total_quantity", 0) or 0
+                claimed = r.get("claimed_quantity", 0) or 0
+                remaining = max(0, total - claimed)
+                lines.append(f"| {r.get('category', '?')} | {r.get('title', '?')} | {remaining}/{total} | {r.get('unit', 'units')} |")
+            return "\n".join(lines)
+
         if category == "requests":
             lines = [f"## Victim Requests ({count} found)\n"]
-            lines.append("| Resource | Priority | Status |")
-            lines.append("|----------|----------|--------|")
+            lines.append("| Resource | Priority | Status | Qty |")
+            lines.append("|----------|----------|--------|-----|")
             for r in data[:20]:
-                lines.append(f"| {r.get('resource_type', '?')} | {r.get('priority', '?')} | {r.get('status', '?')} |")
+                lines.append(f"| {r.get('resource_type', '?')} | {r.get('priority', '?')} | {r.get('status', '?')} | {r.get('quantity', 1)} |")
             return "\n".join(lines)
 
         if category == "predictions":
@@ -240,8 +297,64 @@ class NLQueryService:
                 lines.append(f"- **{o.get('prediction_type', '?')}**: predicted={o.get('predicted_severity', '?')} actual={o.get('actual_severity', '?')} match={o.get('severity_match', '?')}")
             return "\n".join(lines)
 
+        if category == "users":
+            lines = [f"## Users ({count} found)\n"]
+            lines.append("| Name | Email | Role | Joined |")
+            lines.append("|------|-------|------|--------|")
+            for u in data[:20]:
+                lines.append(f"| {u.get('full_name', '?')} | {u.get('email', '?')} | {u.get('role', '?')} | {str(u.get('created_at', ''))[:10]} |")
+            return "\n".join(lines)
+
         # Fallback: just dump JSON
         return f"Found {count} result(s):\n`json\n{json.dumps(data[:5], indent=2, default=str)}\n`"
+
+    # -- Gemini LLM Enhancement --
+
+    async def _generate_llm_response(self, query: str, category: str, data: Any, rule_based_text: str) -> str:
+        """Use Gemini to generate a more intelligent, natural response."""
+        if not _gemini_available or not _genai_client:
+            return rule_based_text
+
+        try:
+            # Prepare data summary (limit size for token efficiency)
+            data_summary = ""
+            if isinstance(data, dict):
+                data_summary = json.dumps(data, indent=2, default=str)[:3000]
+            elif isinstance(data, list):
+                data_summary = json.dumps(data[:10], indent=2, default=str)[:3000]
+            else:
+                data_summary = str(data)[:1000]
+
+            prompt = f"""You are an AI disaster management assistant. A user asked a question about the disaster management platform data.
+
+User Question: "{query}"
+
+Data Category: {category}
+Data Retrieved from Database:
+{data_summary}
+
+Based on this data, provide a clear, concise, and helpful response. Use markdown formatting.
+Key guidelines:
+- Be specific with numbers and facts from the data
+- Highlight critical or urgent items first
+- Provide actionable insights when possible
+- Keep the response under 500 words
+- Use bullet points and tables where appropriate
+- If the data is empty, say so clearly and suggest what might help
+
+Response:"""
+
+            response = _genai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            if response and response.text:
+                return response.text.strip()
+            return rule_based_text
+
+        except Exception as e:
+            logger.error(f"Gemini LLM error (falling back to rule-based): {e}")
+            return rule_based_text
 
     # -- Main query entry point --
 
@@ -251,7 +364,7 @@ class NLQueryService:
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Process a natural language query using rule-based routing (free, no API)."""
+        """Process a natural language query using rule-based routing + optional Gemini LLM."""
         start_ms = time.time()
 
         # Classify and route the query
@@ -273,6 +386,8 @@ class NLQueryService:
                 "anomaly_alerts": self._tool_query_anomaly_alerts,
                 "ingested_events": self._tool_query_ingested_events,
                 "outcome_tracking": self._tool_query_outcome_tracking,
+                "available_resources": self._tool_query_available_resources,
+                "users": self._tool_query_users,
             }
             fn = dispatch.get(tool_name)
             if fn:
@@ -285,8 +400,17 @@ class NLQueryService:
             data = []
             tools_called[0]["error"] = str(e)
 
-        # Format the response
-        response_text = self._format_response(category, data, query_text)
+        # Format the response (rule-based first)
+        rule_based_text = self._format_response(category, data, query_text)
+
+        # Enhance with Gemini LLM if available
+        if _gemini_available:
+            response_text = await self._generate_llm_response(query_text, category, data, rule_based_text)
+            model_used = "gemini-2.0-flash"
+        else:
+            response_text = rule_based_text
+            model_used = "rule-based"
+
         latency_ms = int((time.time() - start_ms) * 1000)
 
         # Log to database
@@ -298,7 +422,7 @@ class NLQueryService:
             "tools_called": tools_called,
             "response_text": response_text,
             "response_data": {},
-            "model_used": self.model,
+            "model_used": model_used,
             "tokens_used": 0,
             "latency_ms": latency_ms,
         }
@@ -313,6 +437,7 @@ class NLQueryService:
             "tools_called": tools_called,
             "tokens_used": 0,
             "latency_ms": latency_ms,
+            "model": model_used,
         }
 
     def _classify_query(self, query: str) -> str:
@@ -327,7 +452,7 @@ class NLQueryService:
     async def get_query_history(self, user_id: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> List[Dict]:
         query = (
             supabase_admin.table("nl_query_log")
-            .select("id, query_text, query_type, response_text, tools_called, latency_ms, feedback_rating, created_at")
+            .select("id, query_text, query_type, response_text, tools_called, latency_ms, feedback_rating, model_used, created_at")
             .order("created_at", desc=True)
             .limit(limit)
         )

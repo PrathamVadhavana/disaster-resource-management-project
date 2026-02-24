@@ -9,6 +9,7 @@ import {
     Loader2, Heart, TrendingUp, Globe, DollarSign,
     ArrowRight, Target, BarChart3, Sparkles, Users
 } from 'lucide-react'
+import { DonorInteractivityFeed } from './InteractivityFeed'
 
 export function DonorDashboardOverview() {
     const { profile } = useAuth()
@@ -35,7 +36,7 @@ export function DonorDashboardOverview() {
     const needsList = Array.isArray(urgentNeeds) ? urgentNeeds : []
     const activeDisasters = disasterList.filter((d: any) => d.status === 'active')
 
-    const isLoading = dLoad
+    const isLoading = dLoad || uLoad
 
     if (isLoading) {
         return (
@@ -80,6 +81,11 @@ export function DonorDashboardOverview() {
                         </div>
                     )
                 })}
+            </div>
+
+            {/* Interactivity Feed (Phase 6) */}
+            <div className="rounded-[32px] border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-8 shadow-sm">
+                <DonorInteractivityFeed />
             </div>
 
             {/* Impact Banner */}

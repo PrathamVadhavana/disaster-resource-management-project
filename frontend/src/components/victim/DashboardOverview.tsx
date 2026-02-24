@@ -70,7 +70,7 @@ export function DashboardOverview() {
                             {stats!.pending} request{stats!.pending > 1 ? 's' : ''} pending review
                         </p>
                         <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">
-                            Your requests are awaiting approval from relief coordinators.
+                            Your requests are awaiting approval from relief response teams.
                         </p>
                     </div>
                 </div>

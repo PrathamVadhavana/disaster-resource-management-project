@@ -341,13 +341,22 @@ class IngestionOrchestrator:
             prediction_ids.append(pid)
         except Exception:
             logger.exception("Spread prediction failed for event %s", event.get("id"))
-
         # 3. Impact prediction
         try:
             severity_score_map = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+            
+            # Extract number from string like "22 people affected"
+            pop_raw = raw.get("gdacs_population", "10000")
+            if isinstance(pop_raw, str):
+                import re
+                digits = re.findall(r'\d+', pop_raw)
+                pop_val = int(digits[0]) if digits else 10000
+            else:
+                pop_val = int(pop_raw or 10000)
+
             impact_features = {
                 "severity_score": severity_score_map.get(event.get("severity", "medium"), 2),
-                "affected_population": int(raw.get("gdacs_population", 0) or 0) or 10000,
+                "affected_population": pop_val or 10000,
             }
             result = await self._ml_service.predict("impact", impact_features)
             pid = str(uuid4())
@@ -366,6 +375,7 @@ class IngestionOrchestrator:
             prediction_ids.append(pid)
         except Exception:
             logger.exception("Impact prediction failed for event %s", event.get("id"))
+
 
         logger.info("Batch predictions complete for event %s: %d predictions", event.get("id"), len(prediction_ids))
         return prediction_ids

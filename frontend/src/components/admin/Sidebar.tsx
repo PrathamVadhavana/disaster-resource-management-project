@@ -8,15 +8,19 @@ import { useTheme } from 'next-themes'
 import {
     LayoutDashboard, Users, Map, Brain, Activity, Settings,
     LogOut, ChevronLeft, Menu, Sun, Moon, Shield, BarChart3,
+    Inbox, Package,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { NotificationBell } from '@/components/shared/NotificationBell'
 
 const navItems = [
     { href: '/admin', label: 'Overview', icon: LayoutDashboard },
+    { href: '/admin/requests', label: 'Requests', icon: Inbox },
+    { href: '/admin/resources', label: 'Resources', icon: Package },
     { href: '/admin/users', label: 'User Management', icon: Users },
     { href: '/admin/disasters', label: 'Disasters', icon: Activity },
     { href: '/admin/live-map', label: 'Live Map', icon: Map },
-    { href: '/admin/coordinator', label: 'AI Coordinator', icon: Brain },
+    { href: '/admin/ai-intelligence', label: 'AI Intelligence', icon: Brain },
     { href: '/admin/analytics', label: 'Analytics', icon: BarChart3 },
     { href: '/admin/settings', label: 'Settings', icon: Settings },
 ]
@@ -46,6 +50,7 @@ export function AdminSidebar() {
                         <Shield className="w-4 h-4 text-white" />
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">Admin Panel</span>
+                    <div className="ml-auto"><NotificationBell /></div>
                 </div>
             </div>
 

@@ -1,5 +1,6 @@
 import { NGOSidebar } from '@/components/ngo/Sidebar'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { VerificationBanner } from '@/components/shared/VerificationBanner'
 
 export default function NGOLayout({ children }: { children: React.ReactNode }) {
     return (
@@ -7,6 +8,7 @@ export default function NGOLayout({ children }: { children: React.ReactNode }) {
             <NGOSidebar />
             <main className="flex-1 lg:ml-0">
                 <div className="pt-20 lg:pt-8 pb-8 px-4 sm:px-6 lg:px-8 max-w-5xl mx-auto">
+                    <VerificationBanner />
                     <ErrorBoundary>{children}</ErrorBoundary>
                 </div>
             </main>

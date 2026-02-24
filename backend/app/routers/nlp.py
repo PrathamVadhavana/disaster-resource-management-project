@@ -79,7 +79,7 @@ class ChatResponse(BaseModel):
 
 
 class OverrideRequest(BaseModel):
-    """Coordinator override of NLP classification — feeds back for training."""
+    """Admin override of NLP classification — feeds back for training."""
     request_id: str
     corrected_resource_type: Optional[str] = None
     corrected_priority: Optional[str] = None
@@ -186,7 +186,7 @@ async def override_classification(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     """
-    Coordinator override of NLP classification.
+    Admin override of NLP classification.
     Stores the correction for future training data.
     """
     user_id = _get_user_id(credentials)

@@ -38,5 +38,5 @@
     "loo_cv_mae_casualties": 67.43,
     "loo_cv_mae_damage": 0.24
   },
-  "train_time_sec": 0.52
+  "train_time_sec": 1.49
 }

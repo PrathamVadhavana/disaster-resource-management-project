@@ -151,3 +151,28 @@ async def create_batch_predictions(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Batch prediction failed: {str(e)}")
+
+
+from app.dependencies import get_ml_service, require_admin
+
+@router.post("/sandbox")
+async def ml_sandbox(
+    prediction_input: PredictionInput,
+    ml_service: MLService = Depends(get_ml_service),
+    _admin = Depends(require_admin)
+):
+    """Run ML prediction without saving to database (Sandbox mode)"""
+    try:
+        ml_result = await ml_service.predict(
+            prediction_input.prediction_type,
+            prediction_input.features
+        )
+        return {
+            "prediction_type": prediction_input.prediction_type.value,
+            "features": prediction_input.features,
+            "result": ml_result,
+            "timestamp": datetime.utcnow().isoformat(),
+            "mode": "sandbox (no-save)"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sandbox prediction failed: {str(e)}")

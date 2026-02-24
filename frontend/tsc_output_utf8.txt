@@ -1,0 +1,38 @@
+﻿src/app/(dashboard)/admin/requests/page.tsx(120,13): error TS2353: Object literal may only specify known properties, and 'resource_type' does not exist in type '{ status?: string | undefined; priority?: string | undefined; search?: string | undefined; page?: number | undefined; page_size?: number | undefined; }'.
+src/app/(dashboard)/donor/causes/page.tsx(32,28): error TS2339: Property 'getPledges' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/causes/page.tsx(55,49): error TS2339: Property 'createPledge' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/causes/page.tsx(61,49): error TS2339: Property 'createDonation' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/donations/page.tsx(33,28): error TS2339: Property 'getDonations' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/donations/page.tsx(39,17): error TS2339: Property 'updateDonation' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/donations/page.tsx(44,41): error TS2339: Property 'deleteDonation' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/fulfill/page.tsx(171,41): error TS2339: Property 'createDonation' does not exist on type 'ApiClient'.
+src/app/(dashboard)/donor/impact/page.tsx(18,28): error TS2339: Property 'getDonations' does not exist on type 'ApiClient'.
+src/app/(dashboard)/ngo/requests/page.tsx(42,28): error TS2339: Property 'getNgoAvailableRequests' does not exist on type 'ApiClient'.
+src/app/(dashboard)/ngo/requests/page.tsx(44,24): error TS2339: Property 'getNgoAssignedRequests' does not exist on type 'ApiClient'.
+src/app/(dashboard)/ngo/requests/page.tsx(68,24): error TS2339: Property 'claimNgoRequest' does not exist on type 'ApiClient'.
+src/app/(dashboard)/ngo/requests/page.tsx(82,24): error TS2551: Property 'updateNgoRequestStatus' does not exist on type 'ApiClient'. Did you mean 'adminUpdateRequestStatus'?
+src/app/(dashboard)/volunteer/assignments/page.tsx(47,49): error TS2339: Property 'checkInVolunteer' does not exist on type 'ApiClient'.
+src/app/(dashboard)/volunteer/certifications/page.tsx(17,28): error TS2339: Property 'getCertifications' does not exist on type 'ApiClient'.
+src/app/(dashboard)/volunteer/certifications/page.tsx(21,31): error TS2339: Property 'createCertification' does not exist on type 'ApiClient'.
+src/app/(dashboard)/volunteer/certifications/page.tsx(30,41): error TS2339: Property 'deleteCertification' does not exist on type 'ApiClient'.
+src/app/(dashboard)/volunteer/profile/page.tsx(85,17): error TS2353: Object literal may only specify known properties, and 'availability' does not exist in type '{ skills?: string[] | undefined; assets?: string[] | undefined; availability_status?: string | undefined; bio?: string | undefined; }'.
+src/app/dashboard/page.tsx(53,73): error TS2339: Property 'getWeatherObservations' does not exist on type 'ApiClient'.
+src/components/coordinator/AnomalyAlertPanel.tsx(40,41): error TS2554: Expected 0 arguments, but got 1.
+src/components/coordinator/AnomalyAlertPanel.tsx(52,70): error TS2554: Expected 1 arguments, but got 2.
+src/components/coordinator/AnomalyAlertPanel.tsx(60,35): error TS2554: Expected 1 arguments, but got 2.
+src/components/coordinator/AnomalyAlertPanel.tsx(66,24): error TS2339: Property 'alerts' does not exist on type 'any[]'.
+src/components/coordinator/NLQueryWidget.tsx(36,67): error TS2554: Expected 1 arguments, but got 3.
+src/components/coordinator/OutcomeTrackingPanel.tsx(23,36): error TS2345: Argument of type '{ limit: number; }' is not assignable to parameter of type 'number'.
+src/components/coordinator/OutcomeTrackingPanel.tsx(29,56): error TS2554: Expected 0-1 arguments, but got 2.
+src/components/coordinator/OutcomeTrackingPanel.tsx(42,52): error TS2554: Expected 0 arguments, but got 2.
+src/components/coordinator/OutcomeTrackingPanel.tsx(227,30): error TS2339: Property 'outcomes' does not exist on type 'any[]'.
+src/components/coordinator/OutcomeTrackingPanel.tsx(240,35): error TS2339: Property 'outcomes' does not exist on type 'any[]'.
+src/components/coordinator/OutcomeTrackingPanel.tsx(289,33): error TS2339: Property 'reports' does not exist on type 'any[]'.
+src/components/coordinator/OutcomeTrackingPanel.tsx(290,31): error TS2339: Property 'reports' does not exist on type 'any[]'.
+src/components/coordinator/SituationReportPanel.tsx(18,35): error TS2345: Argument of type '{ limit: number; }' is not assignable to parameter of type 'number'.
+src/components/coordinator/SituationReportPanel.tsx(29,42): error TS2554: Expected 0 arguments, but got 2.
+src/components/coordinator/SituationReportPanel.tsx(36,32): error TS2339: Property 'reports' does not exist on type 'any[]'.
+src/components/coordinator/SituationReportPanel.tsx(151,44): error TS2551: Property 'getSitrep' does not exist on type 'ApiClient'. Did you mean 'getSitreps'?
+src/components/shared/NotificationBell.tsx(31,28): error TS2339: Property 'getNotifications' does not exist on type 'ApiClient'.
+src/components/shared/NotificationBell.tsx(37,45): error TS2339: Property 'markNotificationsRead' does not exist on type 'ApiClient'.
+src/components/volunteer/DashboardOverview.tsx(26,28): error TS2339: Property 'getCertifications' does not exist on type 'ApiClient'.

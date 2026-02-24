@@ -17,19 +17,14 @@ from app.schemas import (
     RequestStatus,
 )
 from app.services.nlp_service import classify_request, extract_urgency_signals, escalate_priority
+from app.services.notification_service import get_request_audit_trail
+from app.dependencies import require_role
+
 router = APIRouter()
 security = HTTPBearer()
 
 
-def _get_victim_id(credentials: HTTPAuthorizationCredentials) -> str:
-    """Extract and verify victim user from bearer token"""
-    try:
-        user = supabase.auth.get_user(credentials.credentials)
-        if not user or not user.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return user.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Authentication failed")
+
 
 
 def _serialize_items(items) -> list:
@@ -76,10 +71,10 @@ def _safe_row(row: dict) -> dict:
 @router.post("/requests", status_code=201)
 async def create_resource_request(
     request_data: ResourceRequestCreate,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin")),
 ):
     """Create a new resource request for the authenticated victim"""
-    victim_id = _get_victim_id(credentials)
+    victim_id = user["id"]
 
     # Process items — derive resource_type and quantity from items list
     items_list = _serialize_items(request_data.items) if request_data.items else []
@@ -181,7 +176,7 @@ async def create_resource_request(
 # ──────────────────────────────────────────────
 @router.get("/requests")
 async def list_resource_requests(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin", "volunteer", "donor")),
     status: Optional[str] = Query(None, description="Filter by status"),
     resource_type: Optional[str] = Query(None, description="Filter by resource type"),
     priority: Optional[str] = Query(None, description="Filter by priority"),
@@ -191,15 +186,22 @@ async def list_resource_requests(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=50),
 ):
-    """List resource requests for the authenticated victim with filtering"""
-    victim_id = _get_victim_id(credentials)
+    """List resource requests. Victims see own; Volunteers see all unverified or their own verified; Admins see all."""
+    user_id = user["id"]
+    role = user.get("role")
 
     try:
-        query = (
-            supabase_admin.table("resource_requests")
-            .select("*", count="exact")
-            .eq("victim_id", victim_id)
-        )
+        query = supabase_admin.table("resource_requests").select("*", count="exact")
+
+        # ── Role-Based Filtering ──
+        if role == "victim":
+            query = query.eq("victim_id", user_id)
+        elif role == "volunteer":
+            # Volunteers see:
+            # 1. Unverified requests
+            # 2. Requests verified by them
+            query = query.or_(f"is_verified.is.null,is_verified.eq.false,verified_by.eq.{user_id}")
+        # Admins see everything (no filter)
 
         if status:
             query = query.eq("status", status)
@@ -217,9 +219,27 @@ async def list_resource_requests(
         query = query.range(offset, offset + page_size - 1)
 
         response = query.execute()
+        base_requests = response.data or []
+
+        # Manual enrichment for assigned_user
+        assigned_ids = [r["assigned_to"] for r in base_requests if r.get("assigned_to")]
+        user_map = {}
+        if assigned_ids:
+            u_resp = supabase_admin.table("users").select("id, full_name, metadata").in_("id", assigned_ids).execute()
+            for u in (u_resp.data or []):
+                user_map[u["id"]] = u
+
+        # Map back to requests
+        final_requests = []
+        for r in base_requests:
+            row = _safe_row(r)
+            aid = row.get("assigned_to")
+            if aid:
+                row["assigned_user"] = user_map.get(aid)
+            final_requests.append(row)
 
         return JSONResponse(content={
-            "requests": [_safe_row(r) for r in (response.data or [])],
+            "requests": final_requests,
             "total": response.count or 0,
             "page": page,
             "page_size": page_size,
@@ -236,20 +256,20 @@ async def list_resource_requests(
 @router.get("/requests/{request_id}")
 async def get_resource_request(
     request_id: str,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin", "ngo", "volunteer")),
 ):
     """Get a single resource request by ID"""
-    victim_id = _get_victim_id(credentials)
+    user_id = user["id"]
+    role = user.get("role")
 
     try:
-        response = (
-            supabase_admin.table("resource_requests")
-            .select("*")
-            .eq("id", request_id)
-            .eq("victim_id", victim_id)
-            .single()
-            .execute()
-        )
+        query = supabase_admin.table("resource_requests").select("*").eq("id", request_id)
+
+        if role == "victim":
+            query = query.eq("victim_id", user_id)
+        # Admins, NGOs, and Volunteers can see the specific request if they have the ID
+
+        response = query.single().execute()
 
         if not response.data:
             raise HTTPException(status_code=404, detail="Request not found")
@@ -263,16 +283,37 @@ async def get_resource_request(
 
 
 # ──────────────────────────────────────────────
+# TIMELINE / AUDIT TRAIL
+# ──────────────────────────────────────────────
+@router.get("/requests/{request_id}/timeline")
+async def get_request_timeline(
+    request_id: str,
+    user: dict = Depends(require_role("victim", "admin", "ngo")),
+):
+    """Get the timeline (audit trail) for a specific resource request."""
+    victim_id = user["id"]
+
+    # First, verify ownership if the user is a victim
+    if user["role"] == "victim":
+        resp = supabase_admin.table("resource_requests").select("id").eq("id", request_id).eq("victim_id", victim_id).maybe_single().execute()
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="Request not found or not authorized")
+
+    trail = await get_request_audit_trail(request_id)
+    return JSONResponse(content={"timeline": trail})
+
+
+# ──────────────────────────────────────────────
 # UPDATE (only if status is pending)
 # ──────────────────────────────────────────────
 @router.put("/requests/{request_id}")
 async def update_resource_request(
     request_id: str,
     update_data: ResourceRequestUpdate,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin")),
 ):
     """Update a resource request (only allowed when status is pending)"""
-    victim_id = _get_victim_id(credentials)
+    victim_id = user["id"]
 
     try:
         existing = (
@@ -340,10 +381,10 @@ async def update_resource_request(
 @router.delete("/requests/{request_id}")
 async def delete_resource_request(
     request_id: str,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin")),
 ):
     """Delete/cancel a resource request"""
-    victim_id = _get_victim_id(credentials)
+    victim_id = user["id"]
 
     try:
         existing = (
@@ -386,10 +427,10 @@ async def delete_resource_request(
 # ──────────────────────────────────────────────
 @router.get("/dashboard-stats")
 async def get_dashboard_stats(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin")),
 ):
     """Get aggregated dashboard statistics for the victim"""
-    victim_id = _get_victim_id(credentials)
+    victim_id = user["id"]
 
     try:
         response = (
@@ -433,11 +474,11 @@ async def get_dashboard_stats(
 # ──────────────────────────────────────────────
 @router.get("/available-resources")
 async def get_available_resources(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user: dict = Depends(require_role("victim", "admin")),
     category: Optional[str] = Query(None, description="Filter by category"),
 ):
     """Get currently available resources that victims can request"""
-    _get_victim_id(credentials)  # auth check
+
 
     try:
         query = (

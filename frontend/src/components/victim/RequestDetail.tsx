@@ -5,11 +5,12 @@ import { getResourceRequest, deleteResourceRequest, type ResourceRequest } from 
 import { StatusBadge, PriorityBadge, ResourceTypeIcon } from './StatusBadge'
 import { UrgencyTags, ConfidenceBadge } from './UrgencyTags'
 import { cn } from '@/lib/utils'
-import { ArrowLeft, Edit3, Trash2, Loader2, MapPin, Calendar, User, Package, Brain } from 'lucide-react'
+import { ArrowLeft, Edit3, Trash2, Loader2, MapPin, Calendar, User, Package, Brain, Activity } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { format } from 'date-fns'
 import { useState } from 'react'
+import { api } from '@/lib/api'
 
 const statusSteps = ['pending', 'approved', 'assigned', 'in_progress', 'completed']
 
@@ -21,6 +22,11 @@ export function RequestDetail({ requestId }: { requestId: string }) {
     const { data: request, isLoading } = useQuery<ResourceRequest>({
         queryKey: ['victim-request', requestId],
         queryFn: () => getResourceRequest(requestId),
+    })
+
+    const { data: timelineData, isLoading: isLoadingTimeline } = useQuery({
+        queryKey: ['victim-timeline', requestId],
+        queryFn: () => api.getVictimRequestTimeline(requestId),
     })
 
     const deleteMut = useMutation({
@@ -206,13 +212,51 @@ export function RequestDetail({ requestId }: { requestId: string }) {
                 )}
             </div>
 
-            {/* Description */}
             {request.description && (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5">
                     <h3 className="text-sm font-semibold text-slate-900 dark:text-white mb-2">Description</h3>
                     <p className="text-sm text-slate-600 dark:text-slate-400 whitespace-pre-wrap">{request.description}</p>
                 </div>
             )}
+
+            {/* Timeline / Audit Trail */}
+            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                    <Activity className="w-5 h-5 text-emerald-500" />
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Status Timeline</h3>
+                </div>
+                {isLoadingTimeline ? (
+                    <div className="flex justify-center py-4 text-slate-400">
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                    </div>
+                ) : timelineData?.timeline && timelineData.timeline.length > 0 ? (
+                    <div className="relative border-l-2 border-slate-100 dark:border-slate-800 ml-3 space-y-6">
+                        {timelineData.timeline.map((event: any, idx: number) => (
+                            <div key={idx} className="relative pl-6">
+                                <span className={cn(
+                                    "absolute -left-1.5 top-1.5 w-3 h-3 rounded-full border-2 border-white dark:border-slate-900",
+                                    idx === 0 ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-700"
+                                )} />
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <p className="text-sm font-semibold text-slate-900 dark:text-white capitalize">
+                                            {event.action_type === 'status_change' ? `${event.details?.old_status || 'Pending'} → ${event.details?.new_status}` : event.action_type.replace(/_/g, ' ')}
+                                        </p>
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            {event.actor_role === 'victim' ? 'You' : event.actor_role === 'admin' ? 'NGO Liaison' : event.actor_role} — {event.details?.note || 'No notes'}
+                                        </p>
+                                    </div>
+                                    <span className="text-[10px] text-slate-400 whitespace-nowrap">
+                                        {format(new Date(event.created_at), 'MMM d, h:mm a')}
+                                    </span>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <p className="text-xs text-slate-500">No timeline data available yet.</p>
+                )}
+            </div>
 
             {/* NLP Classification & Urgency Signals (Phase 3) */}
             {(request.urgency_signals?.length || request.ai_confidence != null) && (

@@ -121,7 +121,7 @@ class Disaster(DisasterBase):
 
 
 class PredictionInput(BaseModel):
-    location_id: str
+    location_id: Optional[str] = "sandbox"
     prediction_type: PredictionType
     features: Dict[str, Any] = Field(
         ...,
@@ -135,15 +135,18 @@ class PredictionInput(BaseModel):
         if prediction_type == PredictionType.SEVERITY:
             required = ['temperature', 'humidity', 'wind_speed', 'pressure']
         elif prediction_type == PredictionType.SPREAD:
-            required = ['current_area', 'wind_speed', 'terrain_type']
+            required = ['current_area', 'wind_speed']
         elif prediction_type == PredictionType.IMPACT:
-            required = ['severity_score', 'affected_population']
+            required = ['affected_population']
         else:
             required = []
         
-        for field in required:
-            if field not in v:
-                raise ValueError(f"Missing required feature: {field}")
+        # Only warn; don't block — the ML service has fallbacks
+        missing = [f for f in required if f not in v]
+        if missing:
+            # Add defaults for missing required features
+            for f in missing:
+                v.setdefault(f, 0)
         
         return v
 
@@ -368,6 +371,16 @@ class ResourceRequestResponse(BaseModel):
     estimated_delivery: Optional[datetime] = None
     attachments: Optional[List[str]] = Field(default_factory=list)
     rejection_reason: Optional[str] = None
+    is_verified: bool = False
+    verification_status: Optional[str] = None
+    verified_at: Optional[datetime] = None
+    verified_by: Optional[str] = None
+    adopted_by: Optional[str] = None
+    adoption_status: Optional[str] = None
+    delivery_confirmation_code: Optional[str] = None
+    delivery_confirmed_at: Optional[datetime] = None
+    group_id: Optional[str] = None
+    head_count: int = 1
     created_at: datetime
     updated_at: datetime
 
@@ -426,3 +439,165 @@ class VictimProfileUpdate(BaseModel):
     medical_needs: Optional[str] = None
     location_lat: Optional[float] = Field(None, ge=-90, le=90)
     location_long: Optional[float] = Field(None, ge=-180, le=180)
+
+
+class VerificationStatus(str, Enum):
+    PENDING = "pending"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+
+
+class UserVerificationUpdate(BaseModel):
+    verification_status: VerificationStatus
+    verification_notes: Optional[str] = None
+
+# --- Phase 6: Interactivity Schemas ---
+
+class RequestVerificationStatus(str, Enum):
+    TRUSTED = "trusted"
+    DUBIOUS = "dubious"
+    FALSE_ALARM = "false_alarm"
+
+class RequestVerificationCreate(BaseModel):
+    request_id: str
+    field_notes: Optional[str] = None
+    photo_url: Optional[str] = None
+    verification_status: RequestVerificationStatus
+    latitude_at_verification: Optional[float] = None
+    longitude_at_verification: Optional[float] = None
+
+class RequestVerification(RequestVerificationCreate):
+    id: str
+    volunteer_id: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class UrgencyLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+class SourcingStatus(str, Enum):
+    OPEN = "open"
+    PARTIALLY_FUNDED = "partially_funded"
+    FILLED = "filled"
+    CLOSED = "closed"
+
+class ResourceSourcingCreate(BaseModel):
+    resource_type: str
+    quantity_needed: int
+    urgency: UrgencyLevel = UrgencyLevel.MEDIUM
+    description: Optional[str] = None
+
+class ResourceSourcing(ResourceSourcingCreate):
+    id: str
+    ngo_id: str
+    status: SourcingStatus
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class PledgeStatus(str, Enum):
+    PENDING = "pending"
+    SHIPPED = "shipped"
+    RECEIVED = "received"
+    CANCELLED = "cancelled"
+
+class DonorPledgeCreate(BaseModel):
+    sourcing_request_id: str
+    quantity_pledged: int
+
+class DonorPledge(DonorPledgeCreate):
+    id: str
+    donor_id: str
+    status: PledgeStatus
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class MobilizationStatus(str, Enum):
+    ACTIVE = "active"
+    FILLED = "filled"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+class NgoMobilizationCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    location_id: Optional[str] = None
+    required_volunteers: int = 1
+
+class NgoMobilization(NgoMobilizationCreate):
+    id: str
+    ngo_id: str
+    status: MobilizationStatus
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class AssignmentStatus(str, Enum):
+    ASSIGNED = "assigned"
+    ON_SITE = "on_site"
+    COMPLETED = "completed"
+    WITHDRAWN = "withdrawn"
+
+class VolunteerAssignment(BaseModel):
+    id: str
+    mobilization_id: str
+    volunteer_id: str
+    status: AssignmentStatus
+    assigned_at: datetime
+    feedback_notes: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class VolunteerProfileUpdate(BaseModel):
+    skills: Optional[List[str]] = None
+    assets: Optional[List[str]] = None
+    availability_status: Optional[str] = None
+    bio: Optional[str] = None
+    experience: Optional[str] = None
+    emergency_contact: Optional[str] = None
+    languages: Optional[List[str]] = None
+
+class VolunteerProfile(VolunteerProfileUpdate):
+    user_id: str
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class MissionTaskCreate(BaseModel):
+    mobilization_id: str
+    task_description: str
+
+class MissionTask(MissionTaskCreate):
+    id: str
+    is_completed: bool
+    completed_by: Optional[str] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class OperationalPulse(BaseModel):
+    id: str
+    actor_id: Optional[str]
+    target_id: Optional[str]
+    action_type: str
+    description: Optional[str]
+    metadata: Dict[str, Any]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

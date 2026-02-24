@@ -95,9 +95,7 @@ async def list_ingested_events(
     offset: int = Query(0, ge=0),
 ):
     """List recent ingested events with optional filters."""
-    query = supabase_admin.table("ingested_events").select(
-        "*, external_data_sources(source_name, source_type)"
-    )
+    query = supabase_admin.table("ingested_events").select("*")
 
     if event_type:
         query = query.eq("event_type", event_type)
@@ -108,10 +106,24 @@ async def list_ingested_events(
 
     query = query.order("ingested_at", desc=True).range(offset, offset + limit - 1)
     resp = query.execute()
+    base_events = resp.data or []
+
+    # Manual enrichment for data sources
+    source_ids = list(set(e["source_id"] for e in base_events if e.get("source_id")))
+    source_map = {}
+    if source_ids:
+        s_resp = supabase_admin.table("external_data_sources").select("id, source_name, source_type").in_("id", source_ids).execute()
+        for s in (s_resp.data or []):
+            source_map[s["id"]] = s
+
+    final_events = []
+    for e in base_events:
+        e["external_data_sources"] = source_map.get(e.get("source_id"))
+        final_events.append(e)
 
     return {
-        "events": resp.data or [],
-        "count": len(resp.data or []),
+        "events": final_events,
+        "count": len(final_events),
         "offset": offset,
         "limit": limit,
     }
@@ -122,14 +134,21 @@ async def get_ingested_event(event_id: str):
     """Get a specific ingested event."""
     resp = (
         supabase_admin.table("ingested_events")
-        .select("*, external_data_sources(source_name, source_type)")
+        .select("*")
         .eq("id", event_id)
         .single()
         .execute()
     )
     if not resp.data:
         raise HTTPException(status_code=404, detail="Event not found")
-    return resp.data
+    
+    event = resp.data
+    sid = event.get("source_id")
+    if sid:
+        s_resp = supabase_admin.table("external_data_sources").select("source_name, source_type").eq("id", sid).maybe_single().execute()
+        event["external_data_sources"] = s_resp.data
+
+    return event
 
 
 # ── Weather observations ────────────────────────────────────────────

@@ -60,7 +60,7 @@ Then run these scripts **in order**:
 | 3 | `database/phase3_nlp_triage.sql` | NLP training feedback table |
 | 4 | `database/create_resource_requests.sql` | Victim resource requests, available_resources |
 | 5 | `database/phase4_realtime_ingestion.sql` | External data sources, ingested events, weather/satellite observations, alerts |
-| 6 | `database/phase5_ai_coordinator.sql` | Situation reports, NL query log, anomaly alerts, outcome tracking, evaluations |
+| 6 | `database/phase5_ai_ops.sql` | Situation reports, NL query log, anomaly alerts, outcome tracking, evaluations |
 | 7 | `database/seed_available_resources.sql` | *(Optional)* Sample resource inventory data |
 
 **Tip:** Open each `.sql` file, copy the entire contents, paste into the SQL Editor, and click **Run**.
@@ -188,7 +188,7 @@ npm run dev
 - Interactive Leaflet map with live disaster markers
 - Run ML predictions (severity, spread, impact)
 - Manage resource inventory
-- Role-based dashboards (Admin, Victim, NGO, Coordinator)
+- Role-based dashboards (Admin, Victim, NGO, Volunteer)
 
 ### Phase 2 — Resource Allocation
 - LP-optimized allocation engine (maximizes coverage, minimizes distance)
@@ -197,14 +197,14 @@ npm run dev
 ### Phase 3 — NLP Triage & Chatbot
 - Submit resource requests in plain text — auto-classified to type + priority
 - AI chatbot walks victims through a guided intake conversation
-- Coordinators can override and correct NLP results (training feedback)
+- Admins can override and correct NLP results (training feedback)
 
 ### Phase 4 — Data Ingestion
 - Background orchestrator polls external feeds (weather, GDACS, USGS, FIRMS)
 - Ingested events shown in dashboard with alert notifications
 - Works without API keys: GDACS and USGS feeds are free and keyless
 
-### Phase 5 — AI Coordinator Dashboard
+### Phase 5 — AI Operations Dashboard
 - Generate situation reports (daily cron or on-demand)
 - Ask questions in natural language ("How many active disasters?")
 - Anomaly detection runs in background (Isolation Forest)
@@ -218,7 +218,7 @@ npm run dev
 | Role | Dashboard Path | Capabilities |
 |------|---------------|-------------|
 | **Admin** | `/admin/live-map` | Full system access, live monitoring |
-| **Coordinator** | `/dashboard/coordinator` | Sitreps, NL queries, anomalies, outcome tracking |
+| **Volunteer** | `/dashboard/volunteer` | View task assignments, update status |
 | **NGO / Donor** | `/ngo/inventory`, `/ngo/requests` | Manage resource inventory, review victim requests |
 | **Victim** | `/victim` | Submit requests, use chatbot, track request status |
 
@@ -294,7 +294,7 @@ Once setup is complete, confirm each feature:
 - [ ] Can submit a victim resource request
 - [ ] Chatbot responds at `/victim/requests/chatbot`
 - [ ] Swagger docs load at `localhost:8000/docs`
-- [ ] Can generate a situation report from coordinator dashboard
+- [ ] Can generate a situation report from admin dashboard
 
 ---
 

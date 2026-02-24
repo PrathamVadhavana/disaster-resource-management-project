@@ -1,13 +1,16 @@
 'use client'
 
 import { useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import {
     ClipboardList, Search, MapPin, Clock, AlertTriangle,
-    CheckCircle2, Filter, Loader2, ChevronRight, Calendar
+    CheckCircle2, Filter, Loader2, ChevronRight, Calendar,
+    Play
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ChatRoom } from '@/components/shared/ChatRoom'
+import { useAuth } from '@/lib/auth-provider'
 
 const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
     active: { bg: 'bg-blue-100 dark:bg-blue-500/10', text: 'text-blue-700 dark:text-blue-400', label: 'Active' },
@@ -28,44 +31,46 @@ const TYPE_ICONS: Record<string, string> = {
 }
 
 export default function VolunteerAssignmentsPage() {
+    const { user } = useAuth()
     const [search, setSearch] = useState('')
     const [statusFilter, setStatusFilter] = useState<string>('all')
     const [selected, setSelected] = useState<any>(null)
+    const [taskDesc, setTaskDesc] = useState('')
 
-    const { data: disasters, isLoading } = useQuery({
+    const { data: assignmentsData, isLoading, refetch } = useQuery({
         queryKey: ['volunteer-assignments'],
-        queryFn: () => api.getDisasters(),
+        queryFn: () => api.getVolunteerAvailableAssignments(),
         refetchInterval: 30000,
     })
 
-    const { data: resources } = useQuery({
-        queryKey: ['volunteer-assignment-resources'],
-        queryFn: () => api.getResources(),
+    const checkInMutation = useMutation({
+        mutationFn: (disasterId: string) => api.checkInVolunteer({
+            disaster_id: disasterId,
+            task_description: taskDesc || 'General volunteer support',
+        }),
+        onSuccess: () => {
+            setSelected(null)
+            setTaskDesc('')
+            // Optionally could navigate to active deployment view or show success toast
+            alert('Successfully checked in!')
+        },
+        onError: (err: any) => {
+            alert('Failed to check in: ' + err.message)
+        }
     })
 
-    const disasterList = Array.isArray(disasters) ? disasters : []
-    const resourceList = Array.isArray(resources) ? resources : []
-
-    // Generate assignments from active disasters
-    const assignments = useMemo(() => {
-        return disasterList
-            .filter((d: any) => d.status === 'active' || d.status === 'monitoring')
-            .map((d: any) => {
-                const relatedResources = resourceList.filter((r: any) => r.disaster_id === d.id)
-                return {
-                    id: d.id,
-                    title: d.title,
-                    type: d.type,
-                    severity: d.severity,
-                    status: d.status,
-                    location: d.location || 'Location TBD',
-                    description: d.description,
-                    created_at: d.created_at,
-                    resourcesNeeded: relatedResources.length,
-                    icon: TYPE_ICONS[d.type] || '⚠️',
-                }
-            })
-    }, [disasterList, resourceList])
+    const assignments = Array.isArray(assignmentsData) ? assignmentsData.map((d: any) => ({
+        id: d.id,
+        title: d.title,
+        type: d.type,
+        severity: d.severity,
+        status: d.status,
+        location: d.location || 'Location TBD',
+        description: d.description,
+        created_at: d.created_at,
+        resourcesNeeded: 0, // Simplified for brevity
+        icon: TYPE_ICONS[d.type] || '⚠️',
+    })) : []
 
     const filtered = useMemo(() => {
         return assignments.filter((a: any) => {
@@ -190,10 +195,32 @@ export default function VolunteerAssignmentsPage() {
                             <p><span className="text-slate-500">Started:</span> <span className="text-slate-900 dark:text-white">{selected.created_at ? new Date(selected.created_at).toLocaleString() : 'N/A'}</span></p>
                             {selected.description && <p className="text-slate-600 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-white/5">{selected.description}</p>}
                         </div>
-                        <button onClick={() => setSelected(null)}
-                            className="mt-5 w-full h-10 rounded-xl bg-slate-100 dark:bg-white/5 text-sm font-medium hover:bg-slate-200 dark:hover:bg-white/10">
-                            Close
-                        </button>
+
+                        <div className="mt-5 space-y-3 pt-4 border-t border-slate-100 dark:border-white/5">
+                            <h3 className="text-sm font-semibold text-slate-900 dark:text-white">Check In to Deployment</h3>
+                            <input
+                                value={taskDesc} onChange={e => setTaskDesc(e.target.value)}
+                                placeholder="What role/task are you fulfilling? (Optional)"
+                                className="w-full text-sm h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-900/50"
+                            />
+                            <div className="flex gap-2">
+                                <button onClick={() => setSelected(null)}
+                                    className="flex-1 h-10 rounded-xl bg-slate-100 dark:bg-white/5 text-sm font-medium hover:bg-slate-200 dark:hover:bg-white/10 transition-colors">
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={() => checkInMutation.mutate(selected.id)}
+                                    disabled={checkInMutation.isPending}
+                                    className="flex-1 h-10 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 flex items-center justify-center gap-2 transition-colors disabled:opacity-50">
+                                    {checkInMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                                    Confirm Check-In
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="mt-5 space-y-3 pt-4 border-t border-slate-100 dark:border-white/5">
+                            <ChatRoom disasterId={selected.id} currentUserId={user?.id} />
+                        </div>
                     </div>
                 </div>
             )}

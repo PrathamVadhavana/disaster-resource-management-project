@@ -12,7 +12,7 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 ┌──────────────────────────────────────────────────────────────────┐
 │                        Client Browser                            │
 │            Next.js · TypeScript · Tailwind CSS · Leaflet         │
-│   Landing ─ Auth ─ Admin ─ Victim ─ NGO ─ Coordinator Dashboards │
+│   Landing ─ Auth ─ Admin ─ Victim ─ NGO ─ Volunteer Dashboards   │
 └──────────────────────┬───────────────────────────────────────────┘
                        │ HTTPS / WebSocket
 ┌──────────────────────▼───────────────────────────────────────────┐
@@ -46,9 +46,9 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 |:-----:|------|------------|
 | **1** | Core Platform | Auth, disaster/resource CRUD, ML predictions (severity · spread · impact), interactive Leaflet map, role-based dashboards |
 | **2** | Allocation Engine | PuLP mixed-integer linear programming optimizer, resource shortfall forecasting (sklearn + optional Prophet) |
-| **3** | NLP Triage & Chatbot | Rule-based auto-classification of victim requests, urgency extraction, 8-state conversational chatbot, coordinator override feedback loop |
+| **3** | NLP Triage & Chatbot | Rule-based auto-classification of victim requests, urgency extraction, 8-state conversational chatbot, admin override feedback loop |
 | **4** | Real-Time Ingestion | Background orchestrator polling OpenWeatherMap, GDACS, USGS earthquakes, NASA FIRMS fire hotspots, social media; automated alert pipeline |
-| **5** | AI Coordinator | Situation report generation (daily cron + on-demand), natural-language "chat with your data" queries, Isolation Forest anomaly detection, outcome tracking, model evaluation reports |
+| **5** | AI Intelligence | Situation report generation (daily cron + on-demand), natural-language "chat with your data" queries, Isolation Forest anomaly detection, outcome tracking, model evaluation reports |
 
 ---
 
@@ -77,14 +77,14 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 - **Social media** — Twitter/X keyword monitoring (optional paid API)
 - **Alerting** — SendGrid email delivery (free tier: 100/day) with log-only fallback
 
-### Coordinator Dashboard (Phase 5)
+### AI Intelligence (Phase 5)
 - **Situation reports** — auto-generated daily or on-demand markdown reports
 - **Anomaly alerts** — acknowledge, resolve, or flag as false positive
 - **Outcome tracking** — compare predictions against actual outcomes
 - **Model evaluation** — accuracy reports across all prediction types
 
 ### Frontend
-- Role-based dashboards: **Admin**, **Victim**, **NGO/Donor**, **Coordinator**
+- Role-based dashboards: **Admin**, **Victim**, **NGO/Donor**, **Volunteer**
 - Interactive Leaflet/OpenStreetMap disaster map (no API key needed)
 - Real-time updates via Supabase WebSocket subscriptions
 - Dark/light theme, responsive mobile-first design
@@ -125,7 +125,7 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
    - `database/phase3_nlp_triage.sql` — NLP feedback table
    - `database/create_resource_requests.sql` — victim request tables
    - `database/phase4_realtime_ingestion.sql` — ingestion tables
-   - `database/phase5_ai_coordinator.sql` — coordinator tables
+   - `database/phase5_ai_ops.sql` — AI operations tables
    - `database/seed_available_resources.sql` — sample resource data (optional)
 3. Copy your **Project URL**, **Anon Key**, and **Service Role Key** from **Settings → API**
 
@@ -243,7 +243,7 @@ npm run dev
 | POST | `/chatbot` | Send message to AI chatbot |
 | GET | `/chatbot/{session_id}` | Get chatbot session |
 | DELETE | `/chatbot/{session_id}` | End chatbot session |
-| POST | `/override` | Coordinator correction feedback |
+| POST | `/override` | Admin correction feedback |
 
 ### Data Ingestion — `/api/ingestion`
 | Method | Endpoint | Description |
@@ -257,7 +257,7 @@ npm run dev
 | GET | `/satellites` | Satellite/fire hotspot data |
 | GET | `/alerts` | Alert notifications |
 
-### AI Coordinator — `/api/coordinator`
+### AI Intelligence — `/api/nlp` (was Coordinator)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/sitrep/generate` | Generate situation report |
@@ -296,7 +296,7 @@ disaster-resource-management/
 │   │   │   │   ├── ngo/             # NGO inventory & request management
 │   │   │   │   └── allocation/      # Resource allocation view
 │   │   │   └── dashboard/           # Shared dashboard pages
-│   │   │       ├── coordinator/     # AI coordinator (sitreps, NL query, anomalies)
+│   │   │       ├── admin/           # AI Intelligence dashboard (sitreps, NL query, anomalies)
 │   │   │       ├── disasters/       # Disaster management
 │   │   │       ├── predictions/     # ML prediction viewer
 │   │   │       └── resources/       # Resource management
@@ -345,7 +345,7 @@ disaster-resource-management/
 │   ├── phase2_allocation_engine.sql # Consumption log
 │   ├── phase3_nlp_triage.sql        # NLP feedback
 │   ├── phase4_realtime_ingestion.sql# Ingestion tables
-│   ├── phase5_ai_coordinator.sql    # Coordinator tables
+│   ├── phase5_ai_ops.sql            # AI Operations tables
 │   ├── seed_available_resources.sql # Sample resource data
 │   └── *.sql                        # Additional migration & fix scripts
 │
@@ -380,7 +380,7 @@ disaster-resource-management/
 | Table | Phase | Purpose |
 |-------|:-----:|---------|
 | `resource_consumption_log` | 2 | Historical consumption for forecasting |
-| `nlp_training_feedback` | 3 | Coordinator overrides for model improvement |
+| `nlp_training_feedback` | 3 | Admin overrides for model improvement |
 | `external_data_sources` | 4 | Registered feed source configuration |
 | `ingested_events` | 4 | Raw events from external feeds |
 | `weather_observations` | 4 | Weather data points |
@@ -400,7 +400,7 @@ disaster-resource-management/
 ## Security
 
 - **Authentication** — JWT-based via Supabase Auth with bcrypt password hashing
-- **Authorization** — Row-Level Security policies + role-based access control (admin, coordinator, ngo, donor, victim)
+- **Authorization** — Row-Level Security policies + role-based access control (admin, ngo, donor, victim, volunteer)
 - **Data protection** — HTTPS in production, CORS configuration, Pydantic input validation
 - **Environment isolation** — all secrets via `.env` files, never committed to source control
 

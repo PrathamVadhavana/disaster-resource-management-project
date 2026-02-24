@@ -26,7 +26,7 @@ export default function OutcomeTrackingPanel() {
 
   const { data: evaluationsData, isLoading: evaluationsLoading } = useQuery({
     queryKey: ['evaluation-reports'],
-    queryFn: () => api.getEvaluationReports(undefined, 10),
+    queryFn: () => api.getEvaluationReports({ limit: 10 }),
     enabled: activeTab === 'evaluations',
   })
 
@@ -39,7 +39,7 @@ export default function OutcomeTrackingPanel() {
   })
 
   const evaluateMutation = useMutation({
-    mutationFn: () => api.generateEvaluationReport(undefined, 7),
+    mutationFn: () => api.generateEvaluationReport({ days: 7 }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['evaluation-reports'] })
       queryClient.invalidateQueries({ queryKey: ['accuracy-summary'] })
@@ -93,11 +93,10 @@ export default function OutcomeTrackingPanel() {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
-                activeTab === tab.id
+              className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${activeTab === tab.id
                   ? 'bg-white dark:bg-white/10 text-slate-900 dark:text-white shadow-sm'
                   : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-              }`}
+                }`}
             >
               <Icon className="w-3.5 h-3.5" />
               {tab.label}
@@ -140,10 +139,9 @@ export default function OutcomeTrackingPanel() {
                         {data.accuracy !== null && data.accuracy !== undefined && (
                           <div className="flex items-center justify-between">
                             <span className="text-xs text-slate-500">Accuracy</span>
-                            <span className={`text-sm font-bold ${
-                              data.accuracy >= 0.8 ? 'text-green-600' :
-                              data.accuracy >= 0.6 ? 'text-amber-600' : 'text-red-600'
-                            }`}>
+                            <span className={`text-sm font-bold ${data.accuracy >= 0.8 ? 'text-green-600' :
+                                data.accuracy >= 0.6 ? 'text-amber-600' : 'text-red-600'
+                              }`}>
                               {(data.accuracy * 100).toFixed(1)}%
                             </span>
                           </div>

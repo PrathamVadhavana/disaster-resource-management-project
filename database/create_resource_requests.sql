@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS public.resource_requests (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT resource_requests_pkey PRIMARY KEY (id),
-  CONSTRAINT resource_requests_victim_id_fkey FOREIGN KEY (victim_id) REFERENCES auth.users(id) ON DELETE CASCADE,
-  CONSTRAINT resource_requests_assigned_to_fkey FOREIGN KEY (assigned_to) REFERENCES auth.users(id)
+  CONSTRAINT resource_requests_victim_id_fkey FOREIGN KEY (victim_id) REFERENCES public.users(id) ON DELETE CASCADE,
+  CONSTRAINT resource_requests_assigned_to_fkey FOREIGN KEY (assigned_to) REFERENCES public.users(id)
 );
 
 -- Index for fast victim lookups
@@ -62,37 +62,44 @@ CREATE TRIGGER trigger_update_resource_requests_updated_at
 ALTER TABLE public.resource_requests ENABLE ROW LEVEL SECURITY;
 
 -- Victims can read their own requests
+DROP POLICY IF EXISTS "Victims can read own requests" ON public.resource_requests;
 CREATE POLICY "Victims can read own requests"
   ON public.resource_requests FOR SELECT
   USING (auth.uid() = victim_id);
 
 -- Victims can insert their own requests
+DROP POLICY IF EXISTS "Victims can insert own requests" ON public.resource_requests;
 CREATE POLICY "Victims can insert own requests"
   ON public.resource_requests FOR INSERT
   WITH CHECK (auth.uid() = victim_id);
 
 -- Victims can update their own requests (only while pending)
+DROP POLICY IF EXISTS "Victims can update own pending requests" ON public.resource_requests;
 CREATE POLICY "Victims can update own pending requests"
   ON public.resource_requests FOR UPDATE
   USING (auth.uid() = victim_id AND status = 'pending')
   WITH CHECK (auth.uid() = victim_id);
 
 -- Victims can delete their own requests (only while pending)
+DROP POLICY IF EXISTS "Victims can delete own pending requests" ON public.resource_requests;
 CREATE POLICY "Victims can delete own pending requests"
   ON public.resource_requests FOR DELETE
   USING (auth.uid() = victim_id AND status = 'pending');
 
 -- Service role can do everything (for admin/backend operations)
+DROP POLICY IF EXISTS "Service role full access" ON public.resource_requests;
 CREATE POLICY "Service role full access"
   ON public.resource_requests FOR ALL
   USING (auth.role() = 'service_role');
 
 -- NGOs and Donors can read assigned requests
+DROP POLICY IF EXISTS "Assigned users can read requests" ON public.resource_requests;
 CREATE POLICY "Assigned users can read requests"
   ON public.resource_requests FOR SELECT
   USING (auth.uid() = assigned_to);
 
 -- Admins can read all requests
+DROP POLICY IF EXISTS "Admins can read all requests" ON public.resource_requests;
 CREATE POLICY "Admins can read all requests"
   ON public.resource_requests FOR SELECT
   USING (

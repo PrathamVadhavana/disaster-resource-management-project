@@ -3,259 +3,167 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import {
-    Award, Plus, Trash2, Edit2, CheckCircle2, Clock,
-    X, Save, Calendar, Loader2
-} from 'lucide-react'
+import { Award, Plus, Trash2, Loader2, Calendar } from 'lucide-react'
 import { cn } from '@/lib/utils'
-
-interface Certification {
-    id: string
-    name: string
-    issuer: string
-    date_obtained: string
-    expiry_date: string
-    status: 'active' | 'expired' | 'pending'
-}
-
-const CERT_TEMPLATES = [
-    'First Aid / CPR', 'Disaster Response', 'Search and Rescue',
-    'Hazmat Awareness', 'Incident Command System', 'Emergency Medical Technician',
-    'Wilderness First Responder', 'Community Emergency Response Team (CERT)',
-    'Swift Water Rescue', 'Fire Safety',
-]
+import { format } from 'date-fns'
 
 export default function VolunteerCertificationsPage() {
     const queryClient = useQueryClient()
-    const [showAdd, setShowAdd] = useState(false)
-    const [editId, setEditId] = useState<string | null>(null)
-    const [form, setForm] = useState({ name: '', issuer: '', dateObtained: '', expiryDate: '' })
+    const [isAdding, setIsAdding] = useState(false)
+    const [newCert, setNewCert] = useState({ name: '', issuer: '', date_obtained: '', expiry_date: '' })
 
-    // Fetch certifications from backend API
-    const { data: certs = [], isLoading } = useQuery<Certification[]>({
-        queryKey: ['volunteer-certifications'],
-        queryFn: () => api.getCertifications(),
+    const { data: certs, isLoading } = useQuery({
+        queryKey: ['certifications'],
+        queryFn: () => api.getCertifications()
     })
 
-    const createMutation = useMutation({
-        mutationFn: (data: { name: string; issuer?: string; date_obtained?: string; expiry_date?: string }) =>
-            api.createCertification(data),
+    const addMut = useMutation({
+        mutationFn: () => api.createCertification(newCert),
         onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['volunteer-certifications'] })
-            setForm({ name: '', issuer: '', dateObtained: '', expiryDate: '' })
-            setShowAdd(false)
-        },
+            queryClient.invalidateQueries({ queryKey: ['certifications'] })
+            setIsAdding(false)
+            setNewCert({ name: '', issuer: '', date_obtained: '', expiry_date: '' })
+        }
     })
 
-    const updateMutation = useMutation({
-        mutationFn: ({ id, data }: { id: string; data: { name?: string; issuer?: string; date_obtained?: string; expiry_date?: string } }) =>
-            api.updateCertification(id, data),
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['volunteer-certifications'] })
-            setEditId(null)
-            setForm({ name: '', issuer: '', dateObtained: '', expiryDate: '' })
-        },
-    })
-
-    const deleteMutation = useMutation({
+    const delMut = useMutation({
         mutationFn: (id: string) => api.deleteCertification(id),
-        onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['volunteer-certifications'] })
-        },
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['certifications'] })
     })
-
-    const addCert = () => {
-        if (!form.name.trim()) return
-        createMutation.mutate({
-            name: form.name,
-            issuer: form.issuer || 'Self-reported',
-            date_obtained: form.dateObtained || new Date().toISOString().split('T')[0],
-            expiry_date: form.expiryDate || undefined,
-        })
-    }
-
-    const updateCert = () => {
-        if (!editId || !form.name.trim()) return
-        updateMutation.mutate({
-            id: editId,
-            data: {
-                name: form.name,
-                issuer: form.issuer || undefined,
-                date_obtained: form.dateObtained || undefined,
-                expiry_date: form.expiryDate || undefined,
-            },
-        })
-    }
-
-    const deleteCert = (id: string) => deleteMutation.mutate(id)
-
-    const startEdit = (cert: Certification) => {
-        setEditId(cert.id)
-        setForm({
-            name: cert.name,
-            issuer: cert.issuer,
-            dateObtained: cert.date_obtained || '',
-            expiryDate: cert.expiry_date || '',
-        })
-    }
-
-    const activeCerts = certs.filter(c => c.status === 'active')
-    const expiredCerts = certs.filter(c => c.status === 'expired')
 
     if (isLoading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
-            </div>
-        )
+        return <div className="flex h-64 items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-blue-500" /></div>
     }
+
+    const certList = Array.isArray(certs) ? certs : []
 
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex justify-between items-center">
                 <div>
-                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Certifications</h1>
-                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Manage your qualifications and training records</p>
+                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white">My Certifications</h1>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Manage your active licenses and credentials for field assignments.</p>
                 </div>
-                <button onClick={() => { setShowAdd(true); setEditId(null); setForm({ name: '', issuer: '', dateObtained: '', expiryDate: '' }) }}
-                    className="h-9 px-4 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 flex items-center gap-2">
-                    <Plus className="w-4 h-4" /> Add Certification
+                <button
+                    onClick={() => setIsAdding(!isAdding)}
+                    className="h-10 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold flex items-center gap-2 transition-transform active:scale-95"
+                >
+                    <Plus className="w-4 h-4" /> Add Certificate
                 </button>
             </div>
 
-            {/* Stats */}
-            <div className="grid grid-cols-3 gap-4">
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-500/10 flex items-center justify-center">
-                        <Award className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-                    </div>
-                    <div>
-                        <p className="text-2xl font-bold text-slate-900 dark:text-white">{certs.length}</p>
-                        <p className="text-xs text-slate-500">Total Certifications</p>
-                    </div>
-                </div>
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-green-100 dark:bg-green-500/10 flex items-center justify-center">
-                        <CheckCircle2 className="w-5 h-5 text-green-600 dark:text-green-400" />
-                    </div>
-                    <div>
-                        <p className="text-2xl font-bold text-slate-900 dark:text-white">{activeCerts.length}</p>
-                        <p className="text-xs text-slate-500">Active</p>
-                    </div>
-                </div>
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5 flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-red-100 dark:bg-red-500/10 flex items-center justify-center">
-                        <Clock className="w-5 h-5 text-red-600 dark:text-red-400" />
-                    </div>
-                    <div>
-                        <p className="text-2xl font-bold text-slate-900 dark:text-white">{expiredCerts.length}</p>
-                        <p className="text-xs text-slate-500">Expired</p>
-                    </div>
-                </div>
-            </div>
-
-            {/* Certifications List */}
-            {certs.length > 0 ? (
-                <div className="space-y-3">
-                    {certs.map(cert => (
-                        <div key={cert.id} className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5 group hover:shadow-lg transition-shadow">
-                            <div className="flex items-start justify-between">
-                                <div className="flex items-start gap-4">
-                                    <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center',
-                                        cert.status === 'active' ? 'bg-green-100 dark:bg-green-500/10' : 'bg-red-100 dark:bg-red-500/10'
-                                    )}>
-                                        <Award className={cn('w-5 h-5', cert.status === 'active' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400')} />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-sm font-bold text-slate-900 dark:text-white">{cert.name}</h3>
-                                        <p className="text-xs text-slate-500 mt-0.5">Issued by: {cert.issuer}</p>
-                                        <div className="flex items-center gap-3 mt-2 text-[10px] text-slate-400">
-                                            <span className="flex items-center gap-1"><Calendar className="w-3 h-3" /> Obtained: {cert.date_obtained ? new Date(cert.date_obtained).toLocaleDateString() : 'N/A'}</span>
-                                            {cert.expiry_date && <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> Expires: {new Date(cert.expiry_date).toLocaleDateString()}</span>}
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <span className={cn('px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase',
-                                        cert.status === 'active' ? 'bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-400' : 'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400'
-                                    )}>
-                                        {cert.status}
-                                    </span>
-                                    <button onClick={() => startEdit(cert)}
-                                        className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <Edit2 className="w-3.5 h-3.5 text-slate-400" />
-                                    </button>
-                                    <button onClick={() => deleteCert(cert.id)}
-                                        className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <Trash2 className="w-3.5 h-3.5 text-red-500" />
-                                    </button>
-                                </div>
-                            </div>
+            {isAdding && (
+                <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 shadow-lg mb-6">
+                    <h2 className="text-lg font-bold text-slate-900 dark:text-white mb-4">Add New Certification</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                        <input
+                            type="text"
+                            placeholder="Certificate Name (e.g., FEMA Search & Rescue)"
+                            value={newCert.name}
+                            onChange={(e) => setNewCert({ ...newCert, name: e.target.value })}
+                            className="h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-950 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        />
+                        <input
+                            type="text"
+                            placeholder="Issuer (e.g., Red Cross)"
+                            value={newCert.issuer}
+                            onChange={(e) => setNewCert({ ...newCert, issuer: e.target.value })}
+                            className="h-10 px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-950 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        />
+                        <div className="space-y-1">
+                            <label className="text-xs font-semibold text-slate-500">Date Obtained</label>
+                            <input
+                                type="date"
+                                value={newCert.date_obtained}
+                                onChange={(e) => setNewCert({ ...newCert, date_obtained: e.target.value })}
+                                className="h-10 w-full px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-950 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            />
                         </div>
-                    ))}
-                </div>
-            ) : (
-                <div className="py-16 text-center rounded-2xl border border-dashed border-slate-300 dark:border-white/10">
-                    <Award className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600 mb-3" />
-                    <p className="text-sm font-medium text-slate-900 dark:text-white">No certifications yet</p>
-                    <p className="text-xs text-slate-500 mt-1">Add your training and qualifications to get started</p>
-                </div>
-            )}
-
-            {/* Add / Edit Modal */}
-            {(showAdd || editId) && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-                    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-md p-6">
-                        <div className="flex items-center justify-between mb-5">
-                            <h2 className="text-lg font-bold text-slate-900 dark:text-white">{editId ? 'Edit' : 'Add'} Certification</h2>
-                            <button onClick={() => { setShowAdd(false); setEditId(null) }}
-                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5"><X className="w-4 h-4" /></button>
+                        <div className="space-y-1">
+                            <label className="text-xs font-semibold text-slate-500">Expiry Date (Optional)</label>
+                            <input
+                                type="date"
+                                value={newCert.expiry_date}
+                                onChange={(e) => setNewCert({ ...newCert, expiry_date: e.target.value })}
+                                className="h-10 w-full px-3 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-950 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            />
                         </div>
-                        <div className="space-y-4">
-                            <div>
-                                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">Certification Name*</label>
-                                <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })}
-                                    placeholder="e.g. First Aid / CPR" list="cert-suggestions"
-                                    className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" />
-                                <datalist id="cert-suggestions">
-                                    {CERT_TEMPLATES.map(t => <option key={t} value={t} />)}
-                                </datalist>
-                            </div>
-                            <div>
-                                <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">Issuing Organization</label>
-                                <input value={form.issuer} onChange={e => setForm({ ...form, issuer: e.target.value })}
-                                    placeholder="e.g. American Red Cross"
-                                    className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" />
-                            </div>
-                            <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">Date Obtained</label>
-                                    <input type="date" value={form.dateObtained} onChange={e => setForm({ ...form, dateObtained: e.target.value })}
-                                        className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">Expiry Date</label>
-                                    <input type="date" value={form.expiryDate} onChange={e => setForm({ ...form, expiryDate: e.target.value })}
-                                        className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm" />
-                                </div>
-                            </div>
-                        </div>
-                        {(createMutation.isError || updateMutation.isError) && (
-                            <p className="text-xs text-red-500 mt-2">Failed to save. Please try again.</p>
-                        )}
-                        <button onClick={editId ? updateCert : addCert}
-                            disabled={!form.name.trim() || createMutation.isPending || updateMutation.isPending}
-                            className="mt-5 w-full h-10 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                            {(createMutation.isPending || updateMutation.isPending) ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                                <Save className="w-4 h-4" />
-                            )}
-                            {editId ? 'Update' : 'Add'} Certification
+                    </div>
+                    <div className="flex gap-3 justify-end">
+                        <button
+                            onClick={() => setIsAdding(false)}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={() => addMut.mutate()}
+                            disabled={!newCert.name || !newCert.issuer || addMut.isPending}
+                            className="px-4 py-2 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-2 disabled:opacity-50"
+                        >
+                            {addMut.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save Certificate'}
                         </button>
                     </div>
                 </div>
             )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {certList.length === 0 ? (
+                    <div className="col-span-full py-16 flex flex-col items-center justify-center border-2 border-dashed border-slate-200 dark:border-white/10 rounded-2xl">
+                        <Award className="w-12 h-12 text-slate-300 dark:text-slate-600 mb-3" />
+                        <h3 className="text-lg font-bold text-slate-900 dark:text-white">No Certifications Yet</h3>
+                        <p className="text-sm text-slate-500 mt-1">Add your credentials to unlock higher-tier deployments.</p>
+                    </div>
+                ) : (
+                    certList.map((cert: any) => (
+                        <div key={cert.id} className="relative group p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 shadow-sm hover:shadow-lg transition-all overflow-hidden flex flex-col">
+                            <div className="absolute -right-4 -top-4 w-24 h-24 bg-blue-500/10 rounded-full blur-2xl pointer-events-none group-hover:bg-blue-500/20 transition-all opacity-0 group-hover:opacity-100"></div>
+
+                            <div className="flex items-start justify-between mb-4">
+                                <div className="w-12 h-12 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                                    <Award className="w-6 h-6" />
+                                </div>
+                                <span className={cn(
+                                    "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
+                                    cert.verification_status === 'verified' ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400" :
+                                        cert.verification_status === 'rejected' ? "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400" :
+                                            "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400"
+                                )}>
+                                    {cert.verification_status || 'Pending'}
+                                </span>
+                            </div>
+
+                            <h3 className="font-bold text-slate-900 dark:text-white mb-1">{cert.name}</h3>
+                            <p className="text-sm font-medium text-blue-600 dark:text-blue-400 mb-4">{cert.issuer}</p>
+
+                            <div className="mt-auto space-y-2 pt-4 border-t border-slate-100 dark:border-white/5">
+                                {cert.date_obtained && (
+                                    <div className="flex items-center text-xs text-slate-500">
+                                        <Calendar className="w-3.5 h-3.5 mr-2" />
+                                        Obtained: <strong className="ml-1 text-slate-700 dark:text-slate-300">{format(new Date(cert.date_obtained), 'MMM yyyy')}</strong>
+                                    </div>
+                                )}
+                                {cert.expiry_date && (
+                                    <div className="flex items-center text-xs text-slate-500">
+                                        <Calendar className="w-3.5 h-3.5 mr-2" />
+                                        Expires: <strong className="ml-1 text-slate-700 dark:text-slate-300">{format(new Date(cert.expiry_date), 'MMM yyyy')}</strong>
+                                    </div>
+                                )}
+                            </div>
+
+                            <button
+                                onClick={() => {
+                                    if (confirm('Delete this certification?')) delMut.mutate(cert.id)
+                                }}
+                                disabled={delMut.isPending}
+                                className="absolute top-4 right-4 p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ))
+                )}
+            </div>
         </div>
     )
 }

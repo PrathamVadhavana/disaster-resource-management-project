@@ -9,9 +9,13 @@ import asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
-from app.routers import disasters, predictions, resources, auth, victim, victim_profile, retrain, nlp, ingestion, coordinator, global_disasters, admin, certifications, donor
+from app.routers import (
+    disasters, predictions, resources, auth, victim, victim_profile, retrain, nlp,
+    ingestion, global_disasters, admin, certifications, donor, ngo, volunteer,
+    chat, interactivity, analytics
+)
 from app.services.ml_service import MLService
 from app.services.ingestion.orchestrator import IngestionOrchestrator
 from app.routers.ingestion import set_orchestrator
@@ -172,11 +176,16 @@ app.include_router(victim.router, prefix="/api/victim", tags=["Victim Requests"]
 app.include_router(victim_profile.router, prefix="/api/victim", tags=["Victim Profile"])
 app.include_router(nlp.router, prefix="/api/nlp", tags=["NLP Triage & Chatbot"])
 app.include_router(ingestion.router, prefix="/api/ingestion", tags=["Data Ingestion & Alerts"])
-app.include_router(coordinator.router, prefix="/api/coordinator", tags=["AI Coordinator Dashboard"])
+
 app.include_router(global_disasters.router, prefix="/api/global-disasters", tags=["Global Live Disasters"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
 app.include_router(certifications.router, prefix="/api/volunteer", tags=["Volunteer Certifications"])
+app.include_router(volunteer.router, prefix="/api/volunteer", tags=["Volunteer Operations"])
 app.include_router(donor.router, prefix="/api/donor", tags=["Donor Operations"])
+app.include_router(ngo.router, prefix="/api/ngo", tags=["NGO Operations"])
+app.include_router(interactivity.router)
+app.include_router(analytics.router)
+app.include_router(chat.router)
 
 
 # Global exception handler – never leak internal details in production

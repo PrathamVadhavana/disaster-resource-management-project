@@ -33,7 +33,8 @@ async def get_disasters(
         if cached is not None:
             return cached
 
-        query = supabase.table("disasters").select("*, locations(latitude, longitude, name, city, country)")
+        # Fetch disasters without joins to avoid "schema cache" errors
+        query = supabase.table("disasters").select("*")
 
         if status:
             query = query.eq("status", status.value)
@@ -45,8 +46,20 @@ async def get_disasters(
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
 
         response = query.execute()
+        base_disasters = response.data or []
 
-        disasters_data = [serialize_disaster(d) for d in response.data]
+        # Manual enrichment for locations
+        location_ids = list(set(d["location_id"] for d in base_disasters if d.get("location_id")))
+        location_map = {}
+        if location_ids:
+            loc_resp = supabase.table("locations").select("id, latitude, longitude, name, city, country").in_("id", location_ids).execute()
+            for loc in (loc_resp.data or []):
+                location_map[loc["id"]] = loc
+
+        disasters_data = []
+        for d in base_disasters:
+            d["locations"] = location_map.get(d.get("location_id"))
+            disasters_data.append(serialize_disaster(d))
 
         await cache_set(cache_key, disasters_data, CACHE_TTL_SHORT)
         return disasters_data

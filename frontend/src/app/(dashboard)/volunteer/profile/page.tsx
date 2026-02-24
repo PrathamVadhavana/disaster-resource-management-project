@@ -82,11 +82,11 @@ export default function VolunteerProfilePage() {
             // Update extended profile via API
             await api.updateVolunteerProfile({
                 skills: volProfile.skills,
-                availability: volProfile.availability,
-                experience: volProfile.experience,
-                emergencyContact: volProfile.emergencyContact,
-                languages: volProfile.languages,
+                availability_status: volProfile.availability,
                 bio: volProfile.bio,
+                experience: volProfile.experience,
+                emergency_contact: volProfile.emergencyContact,
+                languages: volProfile.languages,
             })
 
             setSaved(true)

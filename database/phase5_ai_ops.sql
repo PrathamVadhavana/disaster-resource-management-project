@@ -1,5 +1,5 @@
 -- ============================================================
--- Phase 5: AI Coordinator Dashboard & Situational Reports
+-- Phase 5: AI Operations Dashboard & Situational Reports
 -- Situation reports, NL query logs, anomaly alerts, outcome tracking
 -- ============================================================
 
@@ -33,7 +33,7 @@ COMMENT ON TABLE situation_reports IS
   'AI-generated situation reports providing daily summaries of disasters, resources, and recommendations.';
 
 
--- 2. Natural language query log — tracks coordinator queries and AI responses
+-- 2. Natural language query log — tracks admin queries and AI responses
 CREATE TABLE IF NOT EXISTS nl_query_log (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_nlq_created_at  ON nl_query_log(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_nlq_query_type  ON nl_query_log(query_type);
 
 COMMENT ON TABLE nl_query_log IS
-  'Audit log for natural language queries from coordinators, including tool calls and responses.';
+  'Audit log for natural language queries from admins, including tool calls and responses.';
 
 
 -- 3. Anomaly alerts — ML-detected anomalies with AI explanations
@@ -202,42 +202,63 @@ ALTER TABLE anomaly_alerts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outcome_tracking ENABLE ROW LEVEL SECURITY;
 ALTER TABLE model_evaluation_reports ENABLE ROW LEVEL SECURITY;
 
--- Authenticated reads for coordinators/admins
+-- Authenticated reads for admins
+DROP POLICY IF EXISTS "Authenticated users can read situation reports" ON situation_reports;
 CREATE POLICY "Authenticated users can read situation reports"
     ON situation_reports FOR SELECT TO authenticated USING (true);
+
+DROP POLICY IF EXISTS "Authenticated users can read anomaly alerts" ON anomaly_alerts;
 CREATE POLICY "Authenticated users can read anomaly alerts"
     ON anomaly_alerts FOR SELECT TO authenticated USING (true);
+
+DROP POLICY IF EXISTS "Authenticated users can read outcome tracking" ON outcome_tracking;
 CREATE POLICY "Authenticated users can read outcome tracking"
     ON outcome_tracking FOR SELECT TO authenticated USING (true);
+
+DROP POLICY IF EXISTS "Authenticated users can read model evaluations" ON model_evaluation_reports;
 CREATE POLICY "Authenticated users can read model evaluations"
     ON model_evaluation_reports FOR SELECT TO authenticated USING (true);
 
 -- NL query log: users see only their own queries
+DROP POLICY IF EXISTS "Users can read own NL queries" ON nl_query_log;
 CREATE POLICY "Users can read own NL queries"
     ON nl_query_log FOR SELECT TO authenticated
     USING (user_id = auth.uid());
+
+DROP POLICY IF EXISTS "Users can insert own NL queries" ON nl_query_log;
 CREATE POLICY "Users can insert own NL queries"
     ON nl_query_log FOR INSERT TO authenticated
     WITH CHECK (user_id = auth.uid());
 
 -- Service role (backend) full access
+DROP POLICY IF EXISTS "Service role full access on situation_reports" ON situation_reports;
 CREATE POLICY "Service role full access on situation_reports"
     ON situation_reports FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role full access on nl_query_log" ON nl_query_log;
 CREATE POLICY "Service role full access on nl_query_log"
     ON nl_query_log FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role full access on anomaly_alerts" ON anomaly_alerts;
 CREATE POLICY "Service role full access on anomaly_alerts"
     ON anomaly_alerts FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role full access on outcome_tracking" ON outcome_tracking;
 CREATE POLICY "Service role full access on outcome_tracking"
     ON outcome_tracking FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Service role full access on model_evaluation_reports" ON model_evaluation_reports;
 CREATE POLICY "Service role full access on model_evaluation_reports"
     ON model_evaluation_reports FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- Coordinators can acknowledge anomaly alerts
+-- Admins can acknowledge anomaly alerts
+DROP POLICY IF EXISTS "Authenticated users can update anomaly alerts" ON anomaly_alerts;
 CREATE POLICY "Authenticated users can update anomaly alerts"
     ON anomaly_alerts FOR UPDATE TO authenticated
     USING (true) WITH CHECK (true);
 
--- Coordinators can provide NL query feedback
+-- Admins can provide NL query feedback
+DROP POLICY IF EXISTS "Users can update own NL query feedback" ON nl_query_log;
 CREATE POLICY "Users can update own NL query feedback"
     ON nl_query_log FOR UPDATE TO authenticated
     USING (user_id = auth.uid())

@@ -1,0 +1,7 @@
+﻿src/app/(dashboard)/volunteer/assignments/page.tsx(47,66): error TS2345: Argument of type '{ disaster_id: string; task_description: string; }' is not assignable to parameter of type 'string'.
+src/app/(dashboard)/volunteer/profile/page.tsx(85,17): error TS2353: Object literal may only specify known properties, and 'availability' does not exist in type '{ skills?: string[] | undefined; assets?: string[] | undefined; availability_status?: string | undefined; bio?: string | undefined; }'.
+src/components/coordinator/OutcomeTrackingPanel.tsx(29,56): error TS2554: Expected 0-1 arguments, but got 2.
+src/components/coordinator/OutcomeTrackingPanel.tsx(42,63): error TS2554: Expected 0-1 arguments, but got 2.
+src/components/coordinator/SituationReportPanel.tsx(18,35): error TS2345: Argument of type '{ limit: number; }' is not assignable to parameter of type 'number'.
+src/components/coordinator/SituationReportPanel.tsx(29,42): error TS2554: Expected 0 arguments, but got 2.
+src/components/coordinator/SituationReportPanel.tsx(36,32): error TS2339: Property 'reports' does not exist on type 'any[]'.

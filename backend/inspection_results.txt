@@ -1,0 +1,9 @@
+--- Inspection of ngo_details ---
+Check Constraint: ngo_details_verification_status_check -> (verification_status = ANY (ARRAY['pending'::text, 'verified'::text, 'rejected'::text, 'approved'::text]))
+Check Constraint: 2200_28986_1_not_null -> id IS NOT NULL
+Check Constraint: 2200_28986_2_not_null -> organization_name IS NOT NULL
+
+--- Inspection of donor_details ---
+Check Constraint: donor_details_donor_type_check -> (donor_type = ANY (ARRAY['individual'::text, 'corporate'::text, 'government'::text]))
+Check Constraint: donor_details_verification_status_check -> ((verification_status)::text = ANY ((ARRAY['pending'::character varying, 'verified'::character varying, 'rejected'::character varying, 'approved'::character varying])::text[]))
+Check Constraint: 2200_29002_1_not_null -> id IS NOT NULL

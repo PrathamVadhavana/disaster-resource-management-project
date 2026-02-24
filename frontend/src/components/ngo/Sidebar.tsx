@@ -10,6 +10,7 @@ import {
     LogOut, ChevronLeft, Menu, Activity, Sun, Moon, Building2,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { NotificationBell } from '@/components/shared/NotificationBell'
 
 const navItems = [
     { href: '/ngo', label: 'Overview', icon: LayoutDashboard },
@@ -45,6 +46,7 @@ export function NGOSidebar() {
                         <Building2 className="w-4 h-4 text-white" />
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">NGO Portal</span>
+                    <div className="ml-auto"><NotificationBell /></div>
                 </div>
             </div>
 

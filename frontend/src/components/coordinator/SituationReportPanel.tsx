@@ -8,6 +8,8 @@ import {
   ChevronRight, Loader2, Calendar, Zap
 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 export default function SituationReportPanel() {
   const queryClient = useQueryClient()
@@ -15,7 +17,7 @@ export default function SituationReportPanel() {
 
   const { data: reportsData, isLoading } = useQuery({
     queryKey: ['sitreps'],
-    queryFn: () => api.getSitreps({ limit: 10 }),
+    queryFn: () => api.getSitreps(10),
     refetchInterval: 60_000,
   })
 
@@ -26,14 +28,14 @@ export default function SituationReportPanel() {
   })
 
   const generateMutation = useMutation({
-    mutationFn: () => api.generateSitrep('on_demand', 'user'),
+    mutationFn: () => api.generateSitrep(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['sitreps'] })
       queryClient.invalidateQueries({ queryKey: ['sitrep-latest'] })
     },
   })
 
-  const reports = reportsData?.reports || []
+  const reports = Array.isArray(reportsData) ? reportsData : ((reportsData as any)?.reports || [])
 
   return (
     <div className="space-y-6">
@@ -126,8 +128,10 @@ export default function SituationReportPanel() {
               {selectedReport.report_type}
             </span>
           </div>
-          <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap">
-            {selectedReport.markdown_body}
+          <div className="max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {selectedReport.markdown_body}
+            </ReactMarkdown>
           </div>
         </div>
       )}
@@ -162,11 +166,10 @@ export default function SituationReportPanel() {
                       {report.report_date} · {report.report_type}
                     </p>
                   </div>
-                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
-                    report.status === 'generated' ? 'bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-400' :
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${report.status === 'generated' ? 'bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-400' :
                     report.status === 'emailed' ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400' :
-                    'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400'
-                  }`}>
+                      'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400'
+                    }`}>
                     {report.status}
                   </span>
                   <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />

@@ -7,13 +7,16 @@ import { useAuth } from '@/lib/auth-provider'
 import { useTheme } from 'next-themes'
 import {
     LayoutDashboard, Heart, TrendingUp, Globe, Receipt,
-    LogOut, ChevronLeft, Menu, Sun, Moon,
+    LogOut, ChevronLeft, Menu, Sun, Moon, HandHeart,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { NotificationBell } from '@/components/shared/NotificationBell'
+import { AccountSwitcher } from '@/components/shared/AccountSwitcher'
 
 const navItems = [
     { href: '/donor', label: 'Overview', icon: LayoutDashboard },
     { href: '/donor/donations', label: 'My Donations', icon: Heart },
+    { href: '/donor/fulfill', label: 'Sponsor Requests', icon: HandHeart },
     { href: '/donor/impact', label: 'Impact Report', icon: TrendingUp },
     { href: '/donor/causes', label: 'Discover Causes', icon: Globe },
     { href: '/donor/receipts', label: 'Tax Receipts', icon: Receipt },
@@ -44,6 +47,7 @@ export function DonorSidebar() {
                         <Heart className="w-4 h-4 text-white" />
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">Donor Portal</span>
+                    <div className="ml-auto"><NotificationBell /></div>
                 </div>
             </div>
 
@@ -73,16 +77,8 @@ export function DonorSidebar() {
                     </button>
                 </div>
 
-                <div className="p-4 border-b border-slate-200 dark:border-white/5 shrink-0">
-                    <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/5">
-                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500/80 to-teal-500/80 flex items-center justify-center text-white font-bold text-sm shadow-lg">
-                            {profile?.full_name?.charAt(0)?.toUpperCase() || 'D'}
-                        </div>
-                        <div className="min-w-0">
-                            <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">{profile?.full_name || 'Donor'}</p>
-                            <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate">{profile?.email}</p>
-                        </div>
-                    </div>
+                <div className="p-4 border-b border-slate-200 dark:border-white/5 shrink-0 flex justify-center w-full">
+                    <AccountSwitcher />
                 </div>
 
                 <nav className="flex-1 p-3 space-y-1 overflow-y-auto">

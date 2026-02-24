@@ -13,11 +13,11 @@ ADD COLUMN IF NOT EXISTS urgency_signals JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE resource_requests
 ADD COLUMN IF NOT EXISTS ai_confidence REAL DEFAULT NULL;
 
--- Whether a coordinator has overridden the NLP classification
+-- Whether an admin has overridden the NLP classification
 ALTER TABLE resource_requests
 ADD COLUMN IF NOT EXISTS nlp_overridden BOOLEAN DEFAULT FALSE;
 
--- Training feedback table for coordinator corrections
+-- Training feedback table for admin corrections
 CREATE TABLE IF NOT EXISTS nlp_training_feedback (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     request_id UUID REFERENCES resource_requests(id) ON DELETE CASCADE,
@@ -43,5 +43,5 @@ ON resource_requests USING gin(urgency_signals) WHERE urgency_signals != '[]'::j
 COMMENT ON COLUMN resource_requests.nlp_classification IS 'Auto-classification result from NLP triage (resource types, scores, priority recommendation)';
 COMMENT ON COLUMN resource_requests.urgency_signals IS 'Extracted urgency signals with severity labels (e.g. trapped, bleeding, infant)';
 COMMENT ON COLUMN resource_requests.ai_confidence IS 'Overall AI confidence score for the classification (0.0–1.0)';
-COMMENT ON COLUMN resource_requests.nlp_overridden IS 'Whether a coordinator has manually overridden the NLP classification';
-COMMENT ON TABLE nlp_training_feedback IS 'Coordinator corrections to NLP classifications — used for retraining';
+COMMENT ON COLUMN resource_requests.nlp_overridden IS 'Whether an admin has manually overridden the NLP classification';
+COMMENT ON TABLE nlp_training_feedback IS 'Admin corrections to NLP classifications — used for retraining';

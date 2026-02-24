@@ -296,7 +296,7 @@ class SitrepService:
         lines.append("## 8. Recommendations\n")
         rec_num = 1
         if critical_disasters:
-            lines.append(f"{rec_num}. **Prioritize critical-severity disasters** - {len(critical_disasters)} disaster(s) at critical level require immediate coordinator attention.")
+            lines.append(f"{rec_num}. **Prioritize critical-severity disasters** - {len(critical_disasters)} disaster(s) at critical level require immediate attention.")
             rec_num += 1
         if critical_requests:
             lines.append(f"{rec_num}. **Address critical victim requests** - {critical_requests} request(s) marked critical are awaiting action.")

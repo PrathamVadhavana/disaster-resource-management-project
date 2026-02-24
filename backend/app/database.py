@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 # ── Supabase clients (lazy-initialised) ──────────────────────────────────────
 _supabase: Client | None = None
 _supabase_admin: Client | None = None
+_async_supabase = None
+_async_supabase_admin = None
 
 
 def _get_supabase_credentials():
@@ -31,6 +33,35 @@ def _init_supabase() -> None:
     _supabase_admin = create_client(url, service_key)
 
 
+async def get_async_supabase():
+    global _async_supabase
+    if _async_supabase is None:
+        from supabase import create_async_client
+        url, key, _ = _get_supabase_credentials()
+        _async_supabase = await create_async_client(url, key)
+    return _async_supabase
+
+
+async def get_async_supabase_admin():
+    global _async_supabase_admin
+    if _async_supabase_admin is None:
+        from supabase import create_async_client
+        url, _, service_key = _get_supabase_credentials()
+        _async_supabase_admin = await create_async_client(url, service_key)
+    return _async_supabase_admin
+
+
+class _AsyncSupabaseProxy:
+    """Proxy that returns a fresh coroutine every time it is awaited."""
+    def __init__(self, admin: bool = False):
+        self._admin = admin
+
+    def __await__(self):
+        if self._admin:
+            return get_async_supabase_admin().__await__()
+        return get_async_supabase().__await__()
+
+
 class _LazySupabase:
     """Descriptor that initialises the Supabase clients on first access."""
 
@@ -46,6 +77,8 @@ class _LazySupabase:
 class _SupabaseAccessor:
     supabase = _LazySupabase(admin=False)
     supabase_admin = _LazySupabase(admin=True)
+    async_supabase = _AsyncSupabaseProxy(admin=False)
+    async_supabase_admin = _AsyncSupabaseProxy(admin=True)
 
 
 _accessor = _SupabaseAccessor()
@@ -58,6 +91,10 @@ def __getattr__(name: str):
         return _accessor.supabase
     if name == "supabase_admin":
         return _accessor.supabase_admin
+    if name == "async_supabase":
+        return _accessor.async_supabase
+    if name == "async_supabase_admin":
+        return _accessor.async_supabase_admin
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # SQLAlchemy setup for direct database access if needed (optional)

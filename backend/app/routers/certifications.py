@@ -12,6 +12,7 @@ from typing import Optional
 from datetime import date, datetime, timezone
 
 from app.database import supabase, supabase_admin
+from app.dependencies import get_current_user_id
 
 router = APIRouter()
 security = HTTPBearer()
@@ -19,16 +20,7 @@ security = HTTPBearer()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _get_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    try:
-        resp = supabase.auth.get_user(credentials.credentials)
-        if not resp or not resp.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return str(resp.user.id)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Authentication failed")
+
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -60,7 +52,7 @@ def _compute_status(expiry_date: Optional[str]) -> str:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/certifications")
-async def list_certifications(user_id: str = Depends(_get_user_id)):
+async def list_certifications(user_id: str = Depends(get_current_user_id)):
     """List all certifications for the authenticated volunteer."""
     resp = (
         supabase_admin.table("volunteer_certifications")
@@ -77,7 +69,7 @@ async def list_certifications(user_id: str = Depends(_get_user_id)):
 
 
 @router.post("/certifications")
-async def create_certification(body: CertificationCreate, user_id: str = Depends(_get_user_id)):
+async def create_certification(body: CertificationCreate, user_id: str = Depends(get_current_user_id)):
     """Add a new certification."""
     status = _compute_status(body.expiry_date)
     row = {
@@ -95,7 +87,7 @@ async def create_certification(body: CertificationCreate, user_id: str = Depends
 
 
 @router.put("/certifications/{cert_id}")
-async def update_certification(cert_id: str, body: CertificationUpdate, user_id: str = Depends(_get_user_id)):
+async def update_certification(cert_id: str, body: CertificationUpdate, user_id: str = Depends(get_current_user_id)):
     """Update an existing certification."""
     updates = {}
     if body.name is not None:
@@ -123,7 +115,7 @@ async def update_certification(cert_id: str, body: CertificationUpdate, user_id:
 
 
 @router.delete("/certifications/{cert_id}")
-async def delete_certification(cert_id: str, user_id: str = Depends(_get_user_id)):
+async def delete_certification(cert_id: str, user_id: str = Depends(get_current_user_id)):
     """Delete a certification."""
     resp = (
         supabase_admin.table("volunteer_certifications")

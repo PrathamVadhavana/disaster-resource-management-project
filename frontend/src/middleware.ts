@@ -113,6 +113,9 @@ export async function middleware(request: NextRequest) {
         return NextResponse.redirect(new URL(dashboardFor(role), request.url))
     }
 
+    // Non-admin routes are handled by default case above
+    // or explicitly per role if needed in the future.
+
     // Legacy /dashboard — redirect to role-specific dashboard
     if (path.startsWith('/dashboard')) {
         const target = dashboardFor(role)

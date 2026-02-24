@@ -173,7 +173,7 @@ CONFIRM_TEMPLATE = (
 
 SUBMITTED_MSG = (
     "Your request has been submitted successfully! "
-    "A coordinator will review it shortly. "
+    "A team member will review it shortly. "
     "Your reference information has been saved.\n\n"
     "If your situation changes, you can start a new conversation. Stay safe!"
 )

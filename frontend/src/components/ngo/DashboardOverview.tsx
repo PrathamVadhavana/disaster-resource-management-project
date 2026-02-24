@@ -7,8 +7,10 @@ import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import {
     Loader2, AlertTriangle, Clock, CheckCircle2, TrendingUp,
-    ArrowRight, Package, Users, MapPin, Activity, ListOrdered
+    ArrowRight, Package, Users, MapPin, Activity, ListOrdered, PackageSearch
 } from 'lucide-react'
+import { MobilizationManager } from './MobilizationManager'
+import { ResourceSourcingManager } from './ResourceSourcingManager'
 
 export function NGODashboardOverview() {
     const { profile } = useAuth()
@@ -25,13 +27,18 @@ export function NGODashboardOverview() {
         refetchInterval: 30000,
     })
 
+    const { data: ngoStats, isLoading: sLoad } = useQuery({
+        queryKey: ['ngo-stats'],
+        queryFn: () => api.getNgoStats(),
+    })
+
     const disasterList = Array.isArray(disasters) ? disasters : []
     const resourceList = Array.isArray(resources) ? resources : []
     const activeDisasters = disasterList.filter((d: any) => d.status === 'active')
     const criticalDisasters = activeDisasters.filter((d: any) => d.severity === 'critical')
     const availableResources = resourceList.filter((r: any) => r.status === 'available')
 
-    const isLoading = dLoad && rLoad
+    const isLoading = dLoad || rLoad || sLoad
 
     if (isLoading) {
         return (
@@ -42,15 +49,15 @@ export function NGODashboardOverview() {
     }
 
     const statCards = [
-        { label: 'Active Disasters', value: activeDisasters.length, icon: AlertTriangle, iconColor: 'text-red-500', bgColor: 'from-red-500 to-red-600' },
-        { label: 'Critical', value: criticalDisasters.length, icon: Activity, iconColor: 'text-orange-500', bgColor: 'from-orange-500 to-orange-600' },
-        { label: 'Available Resources', value: availableResources.length, icon: Package, iconColor: 'text-blue-500', bgColor: 'from-blue-500 to-blue-600' },
-        { label: 'Total Resources', value: resourceList.length, icon: TrendingUp, iconColor: 'text-emerald-500', bgColor: 'from-emerald-500 to-emerald-600' },
+        { label: 'Active Crises', value: activeDisasters.length, icon: AlertTriangle, iconColor: 'text-red-500', bgColor: 'from-slate-700 to-slate-800' },
+        { label: 'NGO Assignments', value: ngoStats?.total_assigned || 0, icon: ListOrdered, iconColor: 'text-blue-500', bgColor: 'from-blue-500 to-blue-600' },
+        { label: 'Completed', value: ngoStats?.completed || 0, icon: CheckCircle2, iconColor: 'text-emerald-500', bgColor: 'from-emerald-500 to-emerald-600' },
+        { label: 'In Progress', value: ngoStats?.in_progress || 0, icon: Clock, iconColor: 'text-amber-500', bgColor: 'from-amber-500 to-amber-600' },
     ]
 
     return (
         <div className="space-y-6">
-            {/* Header */}
+            {/* ... Existing header ... */}
             <div>
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
                     Welcome, {profile?.organization || profile?.full_name || 'Organization'}
@@ -77,6 +84,20 @@ export function NGODashboardOverview() {
                     )
                 })}
             </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Resource Sourcing (Phase 6) */}
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6 shadow-sm">
+                    <ResourceSourcingManager />
+                </div>
+
+                {/* Mobilization (Phase 6) */}
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6 shadow-sm">
+                    <MobilizationManager />
+                </div>
+            </div>
+
+            {/* ... Rest of the component ... */}
 
             {/* Critical Alert Banner */}
             {criticalDisasters.length > 0 && (
@@ -124,9 +145,9 @@ export function NGODashboardOverview() {
                                 <span className={cn(
                                     'text-[10px] px-2 py-0.5 rounded-full font-semibold ring-1 ring-inset',
                                     d.severity === 'critical' ? 'bg-red-500/10 text-red-600 ring-red-500/20' :
-                                    d.severity === 'high' ? 'bg-orange-500/10 text-orange-600 ring-orange-500/20' :
-                                    d.severity === 'medium' ? 'bg-amber-500/10 text-amber-600 ring-amber-500/20' :
-                                    'bg-green-500/10 text-green-600 ring-green-500/20'
+                                        d.severity === 'high' ? 'bg-orange-500/10 text-orange-600 ring-orange-500/20' :
+                                            d.severity === 'medium' ? 'bg-amber-500/10 text-amber-600 ring-amber-500/20' :
+                                                'bg-green-500/10 text-green-600 ring-green-500/20'
                                 )}>
                                     {d.severity}
                                 </span>
