@@ -59,8 +59,14 @@ export default function OnboardingPage() {
                 router.push('/login');
                 return;
             }
+            // Admin users should never be on the onboarding page
+            const effectiveRole = (profile?.role as string) || metaRole;
+            if (effectiveRole === 'admin') {
+                router.push('/admin');
+                return;
+            }
             if (profile?.is_profile_completed) {
-                const r = (profile.role as string) || (authUser?.user_metadata?.role as string) || 'victim';
+                const r = effectiveRole || 'victim';
                 router.push(roleToDashboard(r));
                 return;
             }

@@ -17,9 +17,12 @@ import traceback
 
 from app.database import supabase, supabase_admin
 from app.services.notification_service import (
-    notify_request_status_change, get_user_notifications,
-    mark_notifications_read, get_unread_count,
-    get_request_audit_trail, create_audit_entry,
+    notify_request_status_change,
+    get_user_notifications,
+    mark_notifications_read,
+    get_unread_count,
+    get_request_audit_trail,
+    create_audit_entry,
 )
 from app.dependencies import require_admin
 
@@ -27,8 +30,8 @@ router = APIRouter()
 security = HTTPBearer()
 
 
-
 # ── Schemas ───────────────────────────────────────────────────────────────────
+
 
 class UpdateRoleBody(BaseModel):
     role: str
@@ -59,11 +62,16 @@ class PlatformSettingsBody(BaseModel):
 
 class ApproveRejectBody(BaseModel):
     """Body for approving or rejecting a resource request."""
+
     action: str = Field(..., description="'approve' or 'reject'")
     rejection_reason: Optional[str] = Field(None, description="Required when rejecting")
     admin_note: Optional[str] = Field(None, description="Optional note from admin")
-    assigned_to: Optional[str] = Field(None, description="User ID to assign to (NGO/donor)")
-    estimated_delivery: Optional[str] = Field(None, description="ISO date for estimated delivery")
+    assigned_to: Optional[str] = Field(
+        None, description="User ID to assign to (NGO/donor)"
+    )
+    estimated_delivery: Optional[str] = Field(
+        None, description="ISO date for estimated delivery"
+    )
 
 
 class AdminNoteBody(BaseModel):
@@ -71,6 +79,7 @@ class AdminNoteBody(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/users")
 async def list_users(admin=Depends(require_admin)):
@@ -85,48 +94,49 @@ async def list_users(admin=Depends(require_admin)):
 
 
 @router.patch("/users/{user_id}/role")
-async def update_user_role(user_id: str, body: UpdateRoleBody, admin=Depends(require_admin)):
+async def update_user_role(
+    user_id: str, body: UpdateRoleBody, admin=Depends(require_admin)
+):
     """Change a user's role with audit note."""
     from datetime import datetime, timezone
 
-    updates = {
-        "role": body.role, 
-        "updated_at": datetime.now(timezone.utc).isoformat()
-    }
-    
+    updates = {"role": body.role, "updated_at": datetime.now(timezone.utc).isoformat()}
+
     # Store history in metadata
-    metadata_resp = supabase_admin.table("users").select("metadata").eq("id", user_id).maybe_single().execute()
+    metadata_resp = (
+        supabase_admin.table("users")
+        .select("metadata")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+    )
     existing_meta = (metadata_resp.data or {}).get("metadata") or {}
-    
+
     history = existing_meta.get("role_history", [])
-    history.append({
-        "changed_by": admin.get("id"),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "new_role": body.role,
-        "reason": body.reason or "No reason provided"
-    })
+    history.append(
+        {
+            "changed_by": admin.get("id"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "new_role": body.role,
+            "reason": body.reason or "No reason provided",
+        }
+    )
     existing_meta["role_history"] = history
     updates["metadata"] = existing_meta
 
-    resp = (
-        supabase_admin.table("users")
-        .update(updates)
-        .eq("id", user_id)
-        .execute()
-    )
+    resp = supabase_admin.table("users").update(updates).eq("id", user_id).execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail="User not found")
-        
+
     # Also update Supabase Auth metadata to keep sync (merging instead of overwriting)
     try:
         auth_user = supabase_admin.auth.admin.get_user_by_id(user_id)
         current_auth_meta = auth_user.user.user_metadata or {}
-        
+
         current_auth_meta["role"] = body.role
-        
+
         supabase_admin.auth.admin.update_user_by_id(
-            user_id,
-            attributes={"user_metadata": current_auth_meta}
+            user_id, attributes={"user_metadata": current_auth_meta}
         )
     except Exception as e:
         print(f"Warning: Failed to sync auth metadata: {e}")
@@ -141,70 +151,77 @@ async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_
         raise HTTPException(status_code=400, detail="Invalid status")
 
     # 1. Update the Users table (both column and metadata for compatibility)
-    metadata_resp = supabase_admin.table("users").select("metadata").eq("id", user_id).maybe_single().execute()
-    existing_meta = (metadata_resp.data or {}).get("metadata") or {}
-    
-    existing_meta["verification_status"] = body.status
-    existing_meta["verification_notes"] = body.notes
-    existing_meta["verified_at"] = datetime.now(timezone.utc).isoformat() if body.status == "verified" else None
-    existing_meta["verified_by"] = admin.get("id")
-    
-    updates = {
-        "verification_status": body.status,  # Top-level column
-        "metadata": existing_meta,           # JSONB metadata
-        "updated_at": datetime.now(timezone.utc).isoformat()
-    }
-
-    resp = (
+    metadata_resp = (
         supabase_admin.table("users")
-        .update(updates)
+        .select("metadata")
         .eq("id", user_id)
+        .maybe_single()
         .execute()
     )
+    existing_meta = (metadata_resp.data or {}).get("metadata") or {}
+
+    existing_meta["verification_status"] = body.status
+    existing_meta["verification_notes"] = body.notes
+    existing_meta["verified_at"] = (
+        datetime.now(timezone.utc).isoformat() if body.status == "verified" else None
+    )
+    existing_meta["verified_by"] = admin.get("id")
+
+    updates = {
+        "verification_status": body.status,  # Top-level column
+        "metadata": existing_meta,  # JSONB metadata
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    resp = supabase_admin.table("users").update(updates).eq("id", user_id).execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail="User not found")
-        
+
     # 2. Update Auth metadata (Merging carefully)
     try:
         # Fetch current auth user to get existing metadata (roles etc)
         auth_user = supabase_admin.auth.admin.get_user_by_id(user_id)
         current_auth_meta = auth_user.user.user_metadata or {}
-        
+
         # Merge new status
         current_auth_meta["verification_status"] = body.status
-        
+
         supabase_admin.auth.admin.update_user_by_id(
-            user_id,
-            attributes={"user_metadata": current_auth_meta}
+            user_id, attributes={"user_metadata": current_auth_meta}
         )
     except Exception as e:
         print(f"Warning: Failed to sync auth metadata: {e}")
 
-    return {"status": body.status, "message": f"User verification status updated to {body.status}"}
+    return {
+        "status": body.status,
+        "message": f"User verification status updated to {body.status}",
+    }
 
 
 @router.delete("/users/{user_id}")
 async def delete_user(user_id: str, admin=Depends(require_admin)):
     """Delete a user from the users table (does NOT remove from auth.users)."""
     # Prevent admin from deleting themselves
-    if str(admin.id) == user_id:
+    if str(admin.get("id")) == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
-    resp = (
-        supabase_admin.table("users")
-        .delete()
-        .eq("id", user_id)
-        .execute()
-    )
+    resp = supabase_admin.table("users").delete().eq("id", user_id).execute()
     return {"deleted": True}
 
 
 # ── Platform Settings ─────────────────────────────────────────────────────────
 
+
 @router.get("/settings")
 async def get_settings(admin=Depends(require_admin)):
     """Get platform settings (single row)."""
-    resp = supabase_admin.table("platform_settings").select("*").eq("id", 1).maybe_single().execute()
+    resp = (
+        supabase_admin.table("platform_settings")
+        .select("*")
+        .eq("id", 1)
+        .maybe_single()
+        .execute()
+    )
     if not resp.data:
         # Return defaults if the row doesn't exist yet
         return {
@@ -235,7 +252,9 @@ async def update_settings(body: PlatformSettingsBody, admin=Depends(require_admi
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     # Upsert: update the single row
-    resp = supabase_admin.table("platform_settings").update(updates).eq("id", 1).execute()
+    resp = (
+        supabase_admin.table("platform_settings").update(updates).eq("id", 1).execute()
+    )
     if not resp.data:
         # Row might not exist – insert it
         updates["id"] = 1
@@ -245,10 +264,11 @@ async def update_settings(body: PlatformSettingsBody, admin=Depends(require_admi
 
 # ── Platform Stats (for landing page hero) ────────────────────────────────────
 
+
 @router.get("/platform-stats")
 async def platform_stats():
     """Public endpoint returning aggregate platform stats for the landing page.
-    
+
     No authentication required – these are public marketing metrics.
     """
     try:
@@ -257,34 +277,67 @@ async def platform_stats():
         total_users = users_resp.count or 0
 
         # Count disasters
-        disasters_resp = supabase_admin.table("disasters").select("id, status, casualties_count", count="exact").execute()
+        disasters_resp = (
+            supabase_admin.table("disasters")
+            .select("id, status, casualties", count="exact")
+            .execute()
+        )
         total_disasters = disasters_resp.count or 0
         disaster_data = disasters_resp.data or []
         active_disasters = sum(1 for d in disaster_data if d.get("status") == "active")
-        resolved_disasters = sum(1 for d in disaster_data if d.get("status") == "resolved")
-        total_casualties_helped = sum(int(d.get("casualties_count") or 0) for d in disaster_data)
+        resolved_disasters = sum(
+            1 for d in disaster_data if d.get("status") == "resolved"
+        )
+        total_casualties_helped = sum(
+            int(d.get("casualties") or 0) for d in disaster_data
+        )
 
         # Count resources
-        resources_resp = supabase_admin.table("resources").select("id, status", count="exact").execute()
+        resources_resp = (
+            supabase_admin.table("resources")
+            .select("id, status", count="exact")
+            .execute()
+        )
         total_resources = resources_resp.count or 0
         resource_data = resources_resp.data or []
-        allocated_resources = sum(1 for r in resource_data if r.get("status") in ("allocated", "in_transit", "delivered"))
+        allocated_resources = sum(
+            1
+            for r in resource_data
+            if r.get("status") in ("allocated", "in_transit", "delivered")
+        )
 
         # Count volunteers
-        volunteers_resp = supabase_admin.table("users").select("id", count="exact").eq("role", "volunteer").execute()
+        volunteers_resp = (
+            supabase_admin.table("users")
+            .select("id", count="exact")
+            .eq("role", "volunteer")
+            .execute()
+        )
         total_volunteers = volunteers_resp.count or 0
 
         # Count NGOs
-        ngos_resp = supabase_admin.table("users").select("id", count="exact").eq("role", "ngo").execute()
+        ngos_resp = (
+            supabase_admin.table("users")
+            .select("id", count="exact")
+            .eq("role", "ngo")
+            .execute()
+        )
         total_ngos = ngos_resp.count or 0
 
         # Count donations
-        donations_resp = supabase_admin.table("donations").select("amount").eq("status", "completed").execute()
+        donations_resp = (
+            supabase_admin.table("donations")
+            .select("amount")
+            .eq("status", "completed")
+            .execute()
+        )
         donation_data = donations_resp.data or []
         total_donated = sum(float(d.get("amount", 0)) for d in donation_data)
 
         return {
-            "lives_impacted": max(total_casualties_helped, total_users * 3),  # Estimate: each user impacts ~3 people
+            "lives_impacted": max(
+                total_casualties_helped, total_users * 3
+            ),  # Estimate: each user impacts ~3 people
             "total_users": total_users,
             "total_volunteers": total_volunteers,
             "total_ngos": total_ngos,
@@ -294,7 +347,9 @@ async def platform_stats():
             "total_resources": total_resources,
             "resources_allocated": allocated_resources,
             "total_donated": total_donated,
-            "avg_response_minutes": 45 if resolved_disasters == 0 else max(15, 90 - resolved_disasters * 2),
+            "avg_response_minutes": (
+                45 if resolved_disasters == 0 else max(15, 90 - resolved_disasters * 2)
+            ),
         }
     except Exception:
         # Graceful fallback if tables don't exist yet
@@ -315,16 +370,19 @@ async def platform_stats():
 
 # ── Testimonials / Success Stories (public) ────────────────────────────────
 
+
 @router.get("/testimonials")
 async def get_testimonials():
     """Public endpoint returning active testimonials for the landing page."""
     try:
-        resp = supabase_admin.table("testimonials") \
-            .select("id, author_name, author_role, quote, image_url") \
-            .eq("is_active", True) \
-            .order("sort_order") \
-            .limit(6) \
+        resp = (
+            supabase_admin.table("testimonials")
+            .select("id, author_name, author_role, quote, image_url")
+            .eq("is_active", True)
+            .order("sort_order")
+            .limit(6)
             .execute()
+        )
         return resp.data or []
     except Exception:
         return []
@@ -332,46 +390,62 @@ async def get_testimonials():
 
 # ── Recent Incidents (public, for landing page map) ───────────────────────
 
+
 @router.get("/recent-incidents")
 async def recent_incidents():
     """Public endpoint returning the latest active disasters for the map preview."""
     try:
-        resp = supabase_admin.table("disasters") \
-            .select("*") \
-            .eq("status", "active") \
-            .order("created_at", desc=True) \
-            .limit(6) \
+        resp = (
+            supabase_admin.table("disasters")
+            .select("*")
+            .eq("status", "active")
+            .order("created_at", desc=True)
+            .limit(6)
             .execute()
+        )
         base_data = resp.data or []
-        
+
         # Manual enrichment for locations
-        location_ids = list(set(d["location_id"] for d in base_data if d.get("location_id")))
+        location_ids = list(
+            set(d["location_id"] for d in base_data if d.get("location_id"))
+        )
         location_map = {}
         if location_ids:
-            loc_resp = supabase_admin.table("locations").select("id, latitude, longitude, name, city, country").in_("id", location_ids).execute()
-            for loc in (loc_resp.data or []):
+            loc_resp = (
+                supabase_admin.table("locations")
+                .select("id, latitude, longitude, name, city, country")
+                .in_("id", location_ids)
+                .execute()
+            )
+            for loc in loc_resp.data or []:
                 location_map[loc["id"]] = loc
 
         incidents = []
         for d in base_data:
             loc = location_map.get(d.get("location_id")) or {}
-            incidents.append({
-                "id": d.get("id"),
-                "title": d.get("title", "Unnamed Incident"),
-                "type": d.get("type", "unknown"),
-                "severity": d.get("severity", "medium"),
-                "description": d.get("description", ""),
-                "created_at": d.get("created_at"),
-                "latitude": loc.get("latitude"),
-                "longitude": loc.get("longitude"),
-                "location_name": loc.get("name") or loc.get("city") or loc.get("country") or "Unknown",
-            })
+            incidents.append(
+                {
+                    "id": d.get("id"),
+                    "title": d.get("title", "Unnamed Incident"),
+                    "type": d.get("type", "unknown"),
+                    "severity": d.get("severity", "medium"),
+                    "description": d.get("description", ""),
+                    "created_at": d.get("created_at"),
+                    "latitude": loc.get("latitude"),
+                    "longitude": loc.get("longitude"),
+                    "location_name": loc.get("name")
+                    or loc.get("city")
+                    or loc.get("country")
+                    or "Unknown",
+                }
+            )
         return incidents
     except Exception:
         return []
 
 
 # ── Request Management (Approve / Reject Cycle) ───────────────────────────
+
 
 def _safe_request_row(row: dict) -> dict:
     """Ensure a request row is JSON-serializable."""
@@ -395,10 +469,17 @@ def _safe_request_row(row: dict) -> dict:
 @router.get("/requests")
 async def list_all_requests(
     admin=Depends(require_admin),
-    status: Optional[str] = Query(None, description="Filter by status: pending,approved,assigned,in_progress,completed,rejected"),
-    priority: Optional[str] = Query(None, description="Filter by priority: critical,high,medium,low"),
+    status: Optional[str] = Query(
+        None,
+        description="Filter by status: pending,approved,assigned,in_progress,completed,rejected",
+    ),
+    priority: Optional[str] = Query(
+        None, description="Filter by priority: critical,high,medium,low"
+    ),
     resource_type: Optional[str] = Query(None, description="Filter by resource type"),
-    search: Optional[str] = Query(None, description="Search by ID, description, or victim_id"),
+    search: Optional[str] = Query(
+        None, description="Search by ID, description, or victim_id"
+    ),
     date_from: Optional[str] = Query(None, description="Filter from date (ISO)"),
     date_to: Optional[str] = Query(None, description="Filter to date (ISO)"),
     sort_by: str = Query("created_at", description="Sort field"),
@@ -419,7 +500,9 @@ async def list_all_requests(
         if resource_type:
             query = query.eq("resource_type", resource_type)
         if search:
-            query = query.or_(f"id.eq.{search},description.ilike.%{search}%,victim_id.eq.{search}")
+            query = query.or_(
+                f"id.eq.{search},description.ilike.%{search}%,victim_id.eq.{search}"
+            )
         if date_from:
             query = query.gte("created_at", date_from)
         if date_to:
@@ -444,31 +527,40 @@ async def list_all_requests(
 
         user_map = {}
         if user_ids:
-            users_resp = supabase_admin.table("users").select("id, full_name, email, metadata").in_("id", list(user_ids)).execute()
-            for u in (users_resp.data or []):
+            users_resp = (
+                supabase_admin.table("users")
+                .select("id, full_name, email, metadata")
+                .in_("id", list(user_ids))
+                .execute()
+            )
+            for u in users_resp.data or []:
                 user_map[u["id"]] = u
 
         # Clean and flatten results for frontend
         requests = []
         for r in base_requests:
             row = _safe_request_row(r)
-            
+
             # Map victim info
             vid = row.get("victim_id")
             v = user_map.get(vid, {})
             row["victim_name"] = v.get("full_name") or "Unknown"
             row["victim_email"] = v.get("email") or ""
-            
+
             # Map assigned user info
             aid = row.get("assigned_to")
             row["assigned_user"] = user_map.get(aid)
-            
+
             requests.append(row)
 
         # Stats overview
-        all_resp = supabase_admin.table("resource_requests").select("status", count="exact").execute()
+        all_resp = (
+            supabase_admin.table("resource_requests")
+            .select("status", count="exact")
+            .execute()
+        )
         status_counts = {}
-        for row in (all_resp.data or []):
+        for row in all_resp.data or []:
             s = row.get("status", "unknown")
             status_counts[s] = status_counts.get(s, 0) + 1
 
@@ -482,7 +574,9 @@ async def list_all_requests(
     except Exception as e:
         print(f"❌ ADMIN LIST REQUESTS ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error fetching requests: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching requests: {str(e)}"
+        )
 
 
 @router.get("/requests/{request_id}")
@@ -508,7 +602,13 @@ async def get_request_detail(
         vid = row.get("victim_id")
         if vid:
             try:
-                user_resp = supabase_admin.table("users").select("id, full_name, email, phone, role").eq("id", vid).maybe_single().execute()
+                user_resp = (
+                    supabase_admin.table("users")
+                    .select("id, full_name, email, phone, role")
+                    .eq("id", vid)
+                    .maybe_single()
+                    .execute()
+                )
                 if user_resp.data:
                     row["victim_name"] = user_resp.data.get("full_name") or "Unknown"
                     row["victim_email"] = user_resp.data.get("email") or ""
@@ -531,10 +631,14 @@ async def approve_reject_request(
 ):
     """Approve or reject a resource request. Admin only."""
     if body.action not in ("approve", "reject"):
-        raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
+        raise HTTPException(
+            status_code=400, detail="Action must be 'approve' or 'reject'"
+        )
 
     if body.action == "reject" and not body.rejection_reason:
-        raise HTTPException(status_code=400, detail="Rejection reason is required when rejecting")
+        raise HTTPException(
+            status_code=400, detail="Rejection reason is required when rejecting"
+        )
 
     try:
         # Verify request exists
@@ -559,7 +663,7 @@ async def approve_reject_request(
             if current_status not in ("pending", "rejected"):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot approve request with status '{current_status}'. Only pending or rejected requests can be approved."
+                    detail=f"Cannot approve request with status '{current_status}'. Only pending or rejected requests can be approved.",
                 )
             update_fields["status"] = "approved"
             update_fields["rejection_reason"] = None  # Clear any previous rejection
@@ -568,19 +672,14 @@ async def approve_reject_request(
                 update_fields["status"] = "assigned"
             if body.estimated_delivery:
                 update_fields["estimated_delivery"] = body.estimated_delivery
-            if body.admin_note:
-                update_fields["admin_note"] = body.admin_note
 
         elif body.action == "reject":
             if current_status in ("completed",):
                 raise HTTPException(
-                    status_code=400,
-                    detail="Cannot reject a completed request."
+                    status_code=400, detail="Cannot reject a completed request."
                 )
             update_fields["status"] = "rejected"
             update_fields["rejection_reason"] = body.rejection_reason
-            if body.admin_note:
-                update_fields["admin_note"] = body.admin_note
 
         response = (
             supabase_admin.table("resource_requests")
@@ -596,6 +695,13 @@ async def approve_reject_request(
 
         # Send notification to victim & create audit trail
         try:
+            # Build audit details: include admin note if provided
+            audit_details = body.rejection_reason if body.action == "reject" else None
+            if body.admin_note:
+                audit_details = (
+                    f"{audit_details or ''}\n[Admin Note] {body.admin_note}".strip()
+                )
+
             await notify_request_status_change(
                 request_id=request_id,
                 victim_id=existing.data.get("victim_id", ""),
@@ -604,6 +710,7 @@ async def approve_reject_request(
                 new_status=new_status,
                 admin_id=admin.get("id"),
                 rejection_reason=body.rejection_reason,
+                admin_note=body.admin_note,
             )
         except Exception as ne:
             logger.warning(f"Notification failed (non-critical): {ne}")
@@ -617,7 +724,9 @@ async def approve_reject_request(
     except Exception as e:
         print(f"❌ ADMIN ACTION ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error processing action: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error processing action: {str(e)}"
+        )
 
 
 @router.patch("/requests/{request_id}/status")
@@ -629,9 +738,18 @@ async def update_request_status(
     """Update the status of a request (e.g., move to in_progress, completed).
     Admin only."""
     new_status = body.get("status")
-    valid_statuses = ["pending", "approved", "assigned", "in_progress", "completed", "rejected"]
+    valid_statuses = [
+        "pending",
+        "approved",
+        "assigned",
+        "in_progress",
+        "completed",
+        "rejected",
+    ]
     if new_status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}"
+        )
 
     try:
         update_fields = {
@@ -662,21 +780,21 @@ async def update_request_status(
 
 # ── Available Resources (admin view) ──────────────────────────────────────
 
+
 @router.get("/available-resources")
 async def list_available_resources(
     admin=Depends(require_admin),
     category: Optional[str] = Query(None, description="Filter by category"),
-    status: Optional[str] = Query(None, description="Filter by status: available, reserved"),
+    status: Optional[str] = Query(
+        None, description="Filter by status: available, reserved"
+    ),
     search: Optional[str] = Query(None, description="Search by title or description"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
     """List all available resources across all providers. Admin only."""
     try:
-        query = (
-            supabase_admin.table("available_resources")
-            .select("*", count="exact")
-        )
+        query = supabase_admin.table("available_resources").select("*", count="exact")
 
         if category:
             query = query.eq("category", category)
@@ -695,7 +813,7 @@ async def list_available_resources(
         response = query.execute()
 
         resources = []
-        for r in (response.data or []):
+        for r in response.data or []:
             total = r.get("total_quantity", 0) or 0
             claimed = r.get("claimed_quantity", 0) or 0
             remaining = max(0, total - claimed)
@@ -703,12 +821,19 @@ async def list_available_resources(
             resources.append(r)
 
         # Provider names
-        provider_ids = list(set(r.get("provider_id") for r in resources if r.get("provider_id")))
+        provider_ids = list(
+            set(r.get("provider_id") for r in resources if r.get("provider_id"))
+        )
         provider_names = {}
         if provider_ids:
             try:
-                users_resp = supabase_admin.table("users").select("id, full_name, email, role").in_("id", provider_ids).execute()
-                for u in (users_resp.data or []):
+                users_resp = (
+                    supabase_admin.table("users")
+                    .select("id, full_name, email, role")
+                    .in_("id", provider_ids)
+                    .execute()
+                )
+                for u in users_resp.data or []:
                     provider_names[u["id"]] = {
                         "full_name": u.get("full_name") or "Unknown",
                         "email": u.get("email") or "",
@@ -725,9 +850,14 @@ async def list_available_resources(
             r["provider_role_name"] = info.get("role", "unknown")
 
         # Category summary
-        all_resp = supabase_admin.table("available_resources").select("category, total_quantity, claimed_quantity").eq("is_active", True).execute()
+        all_resp = (
+            supabase_admin.table("available_resources")
+            .select("category, total_quantity, claimed_quantity")
+            .eq("is_active", True)
+            .execute()
+        )
         category_summary = {}
-        for row in (all_resp.data or []):
+        for row in all_resp.data or []:
             cat = row.get("category", "Unknown")
             if cat not in category_summary:
                 category_summary[cat] = {"total": 0, "claimed": 0, "count": 0}
@@ -745,13 +875,17 @@ async def list_available_resources(
     except Exception as e:
         print(f"❌ ADMIN RESOURCES ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error fetching resources: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching resources: {str(e)}"
+        )
 
 
 # ── Notifications & Audit Trail ───────────────────────────────────────────
 
 import logging
+
 logger = logging.getLogger("admin_router")
+
 
 @router.get("/notifications")
 async def list_notifications(
@@ -766,7 +900,9 @@ async def list_notifications(
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-    notifications = await get_user_notifications(user_id, unread_only=unread_only, limit=limit)
+    notifications = await get_user_notifications(
+        user_id, unread_only=unread_only, limit=limit
+    )
     unread = await get_unread_count(user_id)
     return {"notifications": notifications, "unread_count": unread}
 
@@ -800,6 +936,7 @@ async def get_audit_trail(
 
 # ── Analytics Data ────────────────────────────────────────────────────────
 
+
 @router.get("/analytics/request-trends")
 async def get_request_trends(
     admin=Depends(require_admin),
@@ -808,10 +945,15 @@ async def get_request_trends(
     """Get request creation trends over time."""
     try:
         from datetime import timedelta
+
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        resp = supabase_admin.table("resource_requests").select(
-            "id, status, priority, resource_type, created_at"
-        ).gte("created_at", since).order("created_at").execute()
+        resp = (
+            supabase_admin.table("resource_requests")
+            .select("id, status, priority, resource_type, created_at")
+            .gte("created_at", since)
+            .order("created_at")
+            .execute()
+        )
 
         requests = resp.data or []
 
@@ -820,7 +962,14 @@ async def get_request_trends(
         for r in requests:
             date = str(r.get("created_at", ""))[:10]
             if date not in daily:
-                daily[date] = {"date": date, "total": 0, "pending": 0, "approved": 0, "rejected": 0, "completed": 0}
+                daily[date] = {
+                    "date": date,
+                    "total": 0,
+                    "pending": 0,
+                    "approved": 0,
+                    "rejected": 0,
+                    "completed": 0,
+                }
             daily[date]["total"] += 1
             st = r.get("status", "pending")
             if st in daily[date]:
@@ -846,6 +995,7 @@ async def get_request_trends(
                 updated = r.get("updated_at", created)
                 try:
                     from dateutil.parser import parse as parse_date
+
                     c = parse_date(created)
                     u = parse_date(updated)
                     hours = (u - c).total_seconds() / 3600
@@ -853,7 +1003,9 @@ async def get_request_trends(
                 except Exception:
                     pass
 
-        avg_response_hours = round(sum(status_times) / len(status_times), 1) if status_times else 0
+        avg_response_hours = (
+            round(sum(status_times) / len(status_times), 1) if status_times else 0
+        )
 
         return {
             "daily_trends": sorted(daily.values(), key=lambda x: x["date"]),
@@ -873,6 +1025,7 @@ from fastapi.responses import StreamingResponse
 import csv
 import io
 
+
 @router.get("/export/{data_type}")
 async def export_data(
     data_type: str,
@@ -880,53 +1033,138 @@ async def export_data(
 ):
     """Export requests, resources, or users as CSV. Admin only."""
     if data_type not in ("requests", "resources", "users"):
-        raise HTTPException(status_code=400, detail="Invalid data_type. Use: requests, resources, users")
+        raise HTTPException(
+            status_code=400, detail="Invalid data_type. Use: requests, resources, users"
+        )
 
     try:
         output = io.StringIO()
         writer = csv.writer(output)
 
         if data_type == "requests":
-            resp = supabase_admin.table("resource_requests").select("*").order("created_at", desc=True).limit(5000).execute()
+            resp = (
+                supabase_admin.table("resource_requests")
+                .select("*")
+                .order("created_at", desc=True)
+                .limit(5000)
+                .execute()
+            )
             rows = resp.data or []
-            writer.writerow(["ID", "Victim ID", "Resource Type", "Quantity", "Priority", "Status",
-                           "Description", "Address", "Rejection Reason", "Admin Note", "Created At", "Updated At"])
+            writer.writerow(
+                [
+                    "ID",
+                    "Victim ID",
+                    "Resource Type",
+                    "Quantity",
+                    "Priority",
+                    "Status",
+                    "Description",
+                    "Address",
+                    "Rejection Reason",
+                    "Admin Note",
+                    "Created At",
+                    "Updated At",
+                ]
+            )
             for r in rows:
-                writer.writerow([
-                    r.get("id"), r.get("victim_id"), r.get("resource_type"), r.get("quantity"),
-                    r.get("priority"), r.get("status"), r.get("description", ""),
-                    r.get("address_text", ""), r.get("rejection_reason", ""),
-                    r.get("admin_note", ""), r.get("created_at"), r.get("updated_at"),
-                ])
+                writer.writerow(
+                    [
+                        r.get("id"),
+                        r.get("victim_id"),
+                        r.get("resource_type"),
+                        r.get("quantity"),
+                        r.get("priority"),
+                        r.get("status"),
+                        r.get("description", ""),
+                        r.get("address_text", ""),
+                        r.get("rejection_reason", ""),
+                        r.get("admin_note", ""),
+                        r.get("created_at"),
+                        r.get("updated_at"),
+                    ]
+                )
 
         elif data_type == "resources":
-            resp = supabase_admin.table("available_resources").select("*").limit(5000).execute()
+            resp = (
+                supabase_admin.table("available_resources")
+                .select("*")
+                .limit(5000)
+                .execute()
+            )
             rows = resp.data or []
-            writer.writerow(["ID", "Category", "Type", "Title", "Description", "Total Qty",
-                           "Claimed Qty", "Remaining", "Unit", "Provider ID", "Status", "Created At"])
+            writer.writerow(
+                [
+                    "ID",
+                    "Category",
+                    "Type",
+                    "Title",
+                    "Description",
+                    "Total Qty",
+                    "Claimed Qty",
+                    "Remaining",
+                    "Unit",
+                    "Provider ID",
+                    "Status",
+                    "Created At",
+                ]
+            )
             for r in rows:
-                writer.writerow([
-                    r.get("resource_id") or r.get("id"), r.get("category"), r.get("resource_type"),
-                    r.get("title"), r.get("description", ""), r.get("total_quantity"),
-                    r.get("claimed_quantity"), r.get("remaining_quantity"),
-                    r.get("unit"), r.get("provider_id"), r.get("status"), r.get("created_at"),
-                ])
+                writer.writerow(
+                    [
+                        r.get("resource_id") or r.get("id"),
+                        r.get("category"),
+                        r.get("resource_type"),
+                        r.get("title"),
+                        r.get("description", ""),
+                        r.get("total_quantity"),
+                        r.get("claimed_quantity"),
+                        r.get("remaining_quantity"),
+                        r.get("unit"),
+                        r.get("provider_id"),
+                        r.get("status"),
+                        r.get("created_at"),
+                    ]
+                )
 
         elif data_type == "users":
-            resp = supabase_admin.table("users").select("id, full_name, email, phone, role, created_at, updated_at").limit(5000).execute()
+            resp = (
+                supabase_admin.table("users")
+                .select("id, full_name, email, phone, role, created_at, updated_at")
+                .limit(5000)
+                .execute()
+            )
             rows = resp.data or []
-            writer.writerow(["ID", "Full Name", "Email", "Phone", "Role", "Created At", "Updated At"])
+            writer.writerow(
+                [
+                    "ID",
+                    "Full Name",
+                    "Email",
+                    "Phone",
+                    "Role",
+                    "Created At",
+                    "Updated At",
+                ]
+            )
             for r in rows:
-                writer.writerow([
-                    r.get("id"), r.get("full_name"), r.get("email"),
-                    r.get("phone"), r.get("role"), r.get("created_at"), r.get("updated_at"),
-                ])
+                writer.writerow(
+                    [
+                        r.get("id"),
+                        r.get("full_name"),
+                        r.get("email"),
+                        r.get("phone"),
+                        r.get("role"),
+                        r.get("created_at"),
+                        r.get("updated_at"),
+                    ]
+                )
 
         output.seek(0)
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={data_type}_export.csv"},
+            headers={
+                "Content-Disposition": f"attachment; filename={data_type}_export.csv"
+            },
         )
     except Exception as e:
         traceback.print_exc()
@@ -934,6 +1172,7 @@ async def export_data(
 
 
 # ── Data Quality & Deduplication ──────────────────────────────────────────
+
 
 @router.get("/duplicate-requests")
 async def detect_duplicate_requests(
@@ -943,14 +1182,23 @@ async def detect_duplicate_requests(
     """Detect potentially duplicate requests from the same victim within a time window."""
     try:
         from datetime import timedelta
+
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        resp = supabase_admin.table("resource_requests").select(
-            "id, victim_id, resource_type, quantity, description, status, created_at"
-        ).gte("created_at", since).order("victim_id").order("created_at").execute()
+        resp = (
+            supabase_admin.table("resource_requests")
+            .select(
+                "id, victim_id, resource_type, quantity, description, status, created_at"
+            )
+            .gte("created_at", since)
+            .order("victim_id")
+            .order("created_at")
+            .execute()
+        )
 
         rows = resp.data or []
 
         # Group by victim and detect duplicates
+        victim_requests = {}
         for r in rows:
             vid = r.get("victim_id", "")
             if vid not in victim_requests:
@@ -966,12 +1214,26 @@ async def detect_duplicate_requests(
                     a, b = reqs[i], reqs[j]
                     # Same resource type
                     if a.get("resource_type") == b.get("resource_type"):
-                        duplicates.append({
-                            "victim_id": vid,
-                            "request_a": {"id": a["id"], "type": a.get("resource_type"), "qty": a.get("quantity"), "status": a.get("status"), "created": a.get("created_at")},
-                            "request_b": {"id": b["id"], "type": b.get("resource_type"), "qty": b.get("quantity"), "status": b.get("status"), "created": b.get("created_at")},
-                            "reason": "Same resource type from same victim",
-                        })
+                        duplicates.append(
+                            {
+                                "victim_id": vid,
+                                "request_a": {
+                                    "id": a["id"],
+                                    "type": a.get("resource_type"),
+                                    "qty": a.get("quantity"),
+                                    "status": a.get("status"),
+                                    "created": a.get("created_at"),
+                                },
+                                "request_b": {
+                                    "id": b["id"],
+                                    "type": b.get("resource_type"),
+                                    "qty": b.get("quantity"),
+                                    "status": b.get("status"),
+                                    "created": b.get("created_at"),
+                                },
+                                "reason": "Same resource type from same victim",
+                            }
+                        )
 
         return {
             "duplicates": duplicates[:50],
@@ -981,7 +1243,9 @@ async def detect_duplicate_requests(
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error detecting duplicates: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error detecting duplicates: {str(e)}"
+        )
 
 
 @router.get("/analytics/model-info")
@@ -989,9 +1253,9 @@ async def get_admin_model_info(admin=Depends(require_admin)):
     """Get metadata about loaded ML models."""
     try:
         from app.dependencies import ml_service as global_ml
+
         if global_ml:
             return global_ml.get_model_info()
         return {"error": "ML service not initialized"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

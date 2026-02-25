@@ -30,7 +30,7 @@ export function ChatRoom({ disasterId, currentUserId }: { disasterId: string, cu
     })
 
     const mutation = useMutation({
-        mutationFn: (msg: string) => api.postDisasterChat(disasterId, msg),
+        mutationFn: (msg: string) => api.postDisasterChat(disasterId, { content: msg }),
         onSuccess: () => {
             setContent('')
         }

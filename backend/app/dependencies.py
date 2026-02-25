@@ -31,6 +31,7 @@ def get_ml_service():
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
+
 async def get_current_user_id(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> str:
@@ -80,6 +81,7 @@ def require_role(*allowed_roles: str):
         async def admin_only_endpoint(): ...
 
     """
+
     async def _check(
         credentials: HTTPAuthorizationCredentials = Depends(security),
     ) -> dict:
@@ -91,8 +93,29 @@ def require_role(*allowed_roles: str):
             user = resp.user
             role = (user.user_metadata or {}).get("role")
             additional_roles = (user.user_metadata or {}).get("additional_roles", [])
-            user_roles = [role] + (additional_roles if isinstance(additional_roles, list) else [])
-            
+
+            # Fallback: if JWT metadata has no role, look it up from the users table
+            if not role:
+                try:
+                    db_resp = (
+                        supabase_admin.table("users")
+                        .select("role, additional_roles")
+                        .eq("id", str(user.id))
+                        .maybe_single()
+                        .execute()
+                    )
+                    if db_resp.data:
+                        role = db_resp.data.get("role")
+                        db_additional = db_resp.data.get("additional_roles") or []
+                        if isinstance(db_additional, list):
+                            additional_roles = db_additional
+                except Exception as db_err:
+                    print(f"DB role lookup fallback error: {db_err}")
+
+            user_roles = [role] + (
+                additional_roles if isinstance(additional_roles, list) else []
+            )
+
             if not any(r in allowed_roles for r in user_roles):
                 raise HTTPException(
                     status_code=403,
@@ -126,6 +149,7 @@ def require_verified_role(*allowed_roles: str):
     """
     Checks if the user has one of the allowed roles AND is verified.
     """
+
     async def _check(
         user: dict = Depends(require_role(*allowed_roles)),
     ) -> dict:
@@ -133,19 +157,20 @@ def require_verified_role(*allowed_roles: str):
         # In this system, we store it in metadata or the specialized table.
         # Let's assume for now it's in the user's main metadata for quick checks.
         status = user.get("metadata", {}).get("verification_status", "pending")
-        
+
         # Admin is always 'verified' implicitly for this check
         if user.get("role") == "admin":
             return user
-            
+
         if status != "verified":
             raise HTTPException(
                 status_code=403,
-                detail=f"Access denied. Your account (role: {user.get('role')}) is currently '{status}'. Verification from an admin is required."
+                detail=f"Access denied. Your account (role: {user.get('role')}) is currently '{status}'. Verification from an admin is required.",
             )
         return user
 
     return _check
+
 
 require_verified_ngo = require_verified_role("admin", "ngo")
 require_verified_donor = require_verified_role("admin", "donor")

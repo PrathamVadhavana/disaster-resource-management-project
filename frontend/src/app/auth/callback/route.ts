@@ -50,6 +50,11 @@ export async function GET(request: Request) {
                     const profileRow = profile as { is_profile_completed: boolean; role?: string } | null
 
                     if (profileRow) {
+                        if (profileRow.role) {
+                            // Sync role to JWT metadata so middleware
+                            // can route correctly on the redirect
+                            await supabase.auth.updateUser({ data: { role: profileRow.role } })
+                        }
                         if (profileRow.is_profile_completed) {
                             switch (profileRow.role) {
                                 case 'victim': redirectPath = '/victim'; break

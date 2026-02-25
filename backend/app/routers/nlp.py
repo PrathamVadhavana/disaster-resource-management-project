@@ -2,6 +2,7 @@
 NLP Triage & AI Chatbot Router — Phase 3
 Endpoints for auto-classification, urgency extraction, and chatbot.
 """
+
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -37,10 +38,17 @@ def _get_user_id(credentials: HTTPAuthorizationCredentials) -> str:
 
 # ── Request / Response models ──────────────────────────────────────────────────
 
+
 class ClassifyRequest(BaseModel):
-    description: str = Field(..., min_length=3, max_length=5000, description="Free-text request description")
-    priority: str = Field("medium", description="User-selected priority (may be escalated)")
-    resource_type: Optional[str] = Field(None, description="User-selected resource type (optional)")
+    description: str = Field(
+        ..., min_length=3, max_length=5000, description="Free-text request description"
+    )
+    priority: str = Field(
+        "medium", description="User-selected priority (may be escalated)"
+    )
+    resource_type: Optional[str] = Field(
+        None, description="User-selected resource type (optional)"
+    )
 
 
 class ClassifyResponse(BaseModel):
@@ -66,7 +74,9 @@ class UrgencySignalResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    session_id: Optional[str] = Field(None, description="Existing session ID to continue conversation")
+    session_id: Optional[str] = Field(
+        None, description="Existing session ID to continue conversation"
+    )
     message: str = Field(..., min_length=1, max_length=2000, description="User message")
 
 
@@ -80,6 +90,7 @@ class ChatResponse(BaseModel):
 
 class OverrideRequest(BaseModel):
     """Admin override of NLP classification — feeds back for training."""
+
     request_id: str
     corrected_resource_type: Optional[str] = None
     corrected_priority: Optional[str] = None
@@ -88,6 +99,7 @@ class OverrideRequest(BaseModel):
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
 
 @router.post("/classify", response_model=ClassifyResponse)
 def classify_text(
@@ -122,10 +134,12 @@ async def extract_urgency(
     _get_user_id(credentials)
 
     signals = extract_urgency_signals(body.text)
-    return JSONResponse(content=[
-        {"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost}
-        for s in signals
-    ])
+    return JSONResponse(
+        content=[
+            {"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost}
+            for s in signals
+        ]
+    )
 
 
 @router.post("/chatbot", response_model=ChatResponse)
@@ -146,13 +160,18 @@ def chatbot_endpoint(
     )
 
     # Map to ChatResponse shape
-    return JSONResponse(content={
-        "session_id": result["session_id"],
-        "assistant_message": result["message"],
-        "extracted_data": result.get("extracted_data"),
-        "request_ready": result.get("state") == "submitted",
-        "message_count": 0,
-    })
+    # Mark request_ready when conversation reaches the confirmation or submitted stage —
+    # the frontend shows a structured submit button at that point.
+    state = result.get("state", "")
+    return JSONResponse(
+        content={
+            "session_id": result["session_id"],
+            "assistant_message": result["message"],
+            "extracted_data": result.get("extracted_data"),
+            "request_ready": state in ("confirm", "submitted"),
+            "message_count": 0,
+        }
+    )
 
 
 @router.get("/chatbot/{session_id}")
@@ -216,18 +235,24 @@ async def override_classification(
         if update_fields:
             # Also mark that NLP was overridden
             update_fields["nlp_overridden"] = True
-            supabase_admin.table("resource_requests").update(
-                update_fields
-            ).eq("id", body.request_id).execute()
+            supabase_admin.table("resource_requests").update(update_fields).eq(
+                "id", body.request_id
+            ).execute()
 
         # Log the override for training
         try:
-            supabase_admin.table("nlp_training_feedback").insert(override_data).execute()
+            supabase_admin.table("nlp_training_feedback").insert(
+                override_data
+            ).execute()
         except Exception as e:
             # Table may not exist yet — log but don't fail
             print(f"⚠️  Could not log NLP feedback (table may not exist): {e}")
 
-        return JSONResponse(content={"message": "Override applied", "updated_fields": update_fields})
+        return JSONResponse(
+            content={"message": "Override applied", "updated_fields": update_fields}
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error applying override: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error applying override: {str(e)}"
+        )

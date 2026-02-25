@@ -54,7 +54,7 @@ export default function AdminAnalyticsPage() {
     })
     const { data: trends } = useQuery({
         queryKey: ['admin-analytics-trends', trendDays],
-        queryFn: () => api.getRequestTrends(trendDays),
+        queryFn: () => api.getRequestTrends({ days: trendDays }),
         refetchInterval: 60000,
     })
     const { data: reqData } = useQuery({
@@ -77,7 +77,7 @@ export default function AdminAnalyticsPage() {
 
     const { data: burnRate } = useQuery({
         queryKey: ['admin-analytics-burnrate', trendDays],
-        queryFn: () => api.getResourceBurnRate(trendDays),
+        queryFn: () => api.getResourceBurnRate({ days: trendDays }),
         refetchInterval: 60000,
     })
 

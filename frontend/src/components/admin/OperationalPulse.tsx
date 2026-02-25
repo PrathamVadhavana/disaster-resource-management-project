@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
 export function OperationalPulseTimeline() {
     const { data: logs, isLoading } = useQuery({
         queryKey: ['operational-pulse'],
-        queryFn: () => api.getOperationalPulse(30),
+        queryFn: () => api.getOperationalPulse({ limit: 30 }),
         refetchInterval: 10000, // Refresh every 10s for "live" feel
     })
 

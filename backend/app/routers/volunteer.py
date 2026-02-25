@@ -1,7 +1,7 @@
 """
 Volunteer Operations Router.
 
-Endpoints for volunteers to view available tasks/disaster zones, 
+Endpoints for volunteers to view available tasks/disaster zones,
 check-in, check-out, and view their dashboard stats.
 """
 
@@ -13,12 +13,19 @@ from datetime import datetime, timezone
 
 from app.database import supabase, supabase_admin
 from app.dependencies import require_volunteer, require_verified_volunteer
-from app.services.notification_service import notify_request_status_change
 
 router = APIRouter()
 security = HTTPBearer()
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
+
+
+class VolunteerProfileUpdate(BaseModel):
+    skills: Optional[List[str]] = None
+    assets: Optional[List[str]] = None
+    availability_status: Optional[str] = None
+    bio: Optional[str] = None
+
 
 class CheckInBody(BaseModel):
     disaster_id: str
@@ -28,10 +35,74 @@ class CheckInBody(BaseModel):
 
 
 class CheckOutBody(BaseModel):
-    notes: Optional[str] = Field(None, description="Report or notes on what was accomplished")
+    notes: Optional[str] = Field(
+        None, description="Report or notes on what was accomplished"
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+
+@router.get("/profile")
+async def get_volunteer_profile(
+    volunteer=Depends(require_volunteer),
+):
+    """Get the volunteer's extended profile (skills, availability, etc.)."""
+    user_id = str(volunteer.get("id"))
+    resp = (
+        supabase_admin.table("volunteer_profiles")
+        .select("*")
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not resp.data:
+        # Auto-create default profile
+        profile = {
+            "user_id": user_id,
+            "skills": [],
+            "assets": [],
+            "availability_status": "available",
+        }
+        insert_resp = (
+            supabase_admin.table("volunteer_profiles").insert(profile).execute()
+        )
+        return insert_resp.data[0] if insert_resp.data else profile
+    return resp.data
+
+
+@router.put("/profile")
+async def update_volunteer_profile(
+    data: VolunteerProfileUpdate,
+    volunteer=Depends(require_volunteer),
+):
+    """Update the volunteer's extended profile."""
+    user_id = str(volunteer.get("id"))
+    update_data = {k: v for k, v in data.dict().items() if v is not None}
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Ensure profile exists first
+    existing = (
+        supabase_admin.table("volunteer_profiles")
+        .select("id")
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not existing.data:
+        update_data["user_id"] = user_id
+        resp = supabase_admin.table("volunteer_profiles").insert(update_data).execute()
+    else:
+        resp = (
+            supabase_admin.table("volunteer_profiles")
+            .update(update_data)
+            .eq("user_id", user_id)
+            .execute()
+        )
+    if not resp.data:
+        raise HTTPException(status_code=500, detail="Failed to update profile")
+    return resp.data[0]
+
 
 @router.get("/assignments/available")
 async def list_available_assignments(
@@ -50,15 +121,22 @@ async def list_available_assignments(
         .execute()
     )
     assignments = resp.data or []
-    
+
     # Enrich locations
-    location_ids = list(set(a["location_id"] for a in assignments if a.get("location_id")))
+    location_ids = list(
+        set(a["location_id"] for a in assignments if a.get("location_id"))
+    )
     if location_ids:
-        loc_resp = supabase_admin.table("locations").select("id, name").in_("id", location_ids).execute()
+        loc_resp = (
+            supabase_admin.table("locations")
+            .select("id, name")
+            .in_("id", location_ids)
+            .execute()
+        )
         loc_map = {loc["id"]: loc.get("name") for loc in (loc_resp.data or [])}
         for a in assignments:
             a["location_name"] = loc_map.get(a.get("location_id"), "Unknown")
-            
+
     return {"assignments": assignments}
 
 
@@ -78,21 +156,33 @@ async def get_active_deployment(
     )
     if not resp.data:
         return {"active_deployment": None}
-    
+
     op = resp.data
     # Manual enrichment for disaster info
     did = op.get("disaster_id")
     if did:
-        d_resp = supabase_admin.table("disasters").select("title, location_id, severity").eq("id", did).maybe_single().execute()
+        d_resp = (
+            supabase_admin.table("disasters")
+            .select("title, location_id, severity")
+            .eq("id", did)
+            .maybe_single()
+            .execute()
+        )
         if d_resp.data:
             op["disaster_title"] = d_resp.data.get("title", "Unknown")
             op["severity"] = d_resp.data.get("severity")
             lid = d_resp.data.get("location_id")
             if lid:
-                loc_resp = supabase_admin.table("locations").select("name").eq("id", lid).maybe_single().execute()
+                loc_resp = (
+                    supabase_admin.table("locations")
+                    .select("name")
+                    .eq("id", lid)
+                    .maybe_single()
+                    .execute()
+                )
                 if loc_resp.data:
                     op["location_name"] = loc_resp.data.get("name")
-    
+
     return {"active_deployment": op}
 
 
@@ -113,7 +203,10 @@ async def volunteer_check_in(
         .execute()
     )
     if active.data:
-        raise HTTPException(status_code=400, detail="Already checked into an active deployment. Check out first.")
+        raise HTTPException(
+            status_code=400,
+            detail="Already checked into an active deployment. Check out first.",
+        )
 
     now = datetime.now(timezone.utc).isoformat()
     row = {
@@ -124,7 +217,7 @@ async def volunteer_check_in(
         "longitude": body.longitude,
         "status": "active",
         "check_in_time": now,
-        "updated_at": now
+        "updated_at": now,
     }
 
     resp = supabase_admin.table("volunteer_ops").insert(row).execute()
@@ -160,12 +253,14 @@ async def volunteer_check_out(
 
     now = datetime.now(timezone.utc)
     check_in_time_str = existing.data.get("check_in_time")
-    
+
     # Calculate hours worked
     hours_worked = 0.0
     if check_in_time_str:
         try:
-            check_in_time = datetime.fromisoformat(check_in_time_str.replace("Z", "+00:00"))
+            check_in_time = datetime.fromisoformat(
+                check_in_time_str.replace("Z", "+00:00")
+            )
             hours_worked = round((now - check_in_time).total_seconds() / 3600.0, 2)
         except ValueError:
             pass
@@ -175,14 +270,11 @@ async def volunteer_check_out(
         "check_out_time": now.isoformat(),
         "hours_worked": hours_worked,
         "notes": body.notes,
-        "updated_at": now.isoformat()
+        "updated_at": now.isoformat(),
     }
 
     resp = (
-        supabase_admin.table("volunteer_ops")
-        .update(updates)
-        .eq("id", op_id)
-        .execute()
+        supabase_admin.table("volunteer_ops").update(updates).eq("id", op_id).execute()
     )
 
     if not resp.data:
@@ -206,11 +298,11 @@ async def get_volunteer_dashboard_stats(
         .execute()
     )
     ops = resp.data or []
-    
+
     total_deployments = len(ops)
     completed_deployments = sum(1 for o in ops if o["status"] == "completed")
     total_hours = sum(o.get("hours_worked", 0.0) for o in ops if o.get("hours_worked"))
-    
+
     # Get certifications count
     cert_resp = (
         supabase_admin.table("volunteer_certifications")
@@ -225,5 +317,7 @@ async def get_volunteer_dashboard_stats(
         "completed_deployments": completed_deployments,
         "total_hours_contributed": round(total_hours, 1),
         "certifications_count": cert_count,
-        "impact_score": min(100, int(completed_deployments * 5 + total_hours * 2 + cert_count * 10))
+        "impact_score": min(
+            100, int(completed_deployments * 5 + total_hours * 2 + cert_count * 10)
+        ),
     }

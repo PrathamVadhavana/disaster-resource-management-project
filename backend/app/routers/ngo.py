@@ -1,7 +1,7 @@
 """
 NGO Request Fulfillment Workflow Router.
 
-Endpoints for NGOs to view pending requests, claim them, update status, 
+Endpoints for NGOs to view pending requests, claim them, update status,
 and view their own dashboard statistics.
 """
 
@@ -20,24 +20,34 @@ security = HTTPBearer()
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
+
 class ClaimRequestBody(BaseModel):
-    estimated_delivery: Optional[str] = Field(None, description="ISO date for estimated delivery")
-    notes: Optional[str] = Field(None, description="Internal notes regarding fulfillment")
+    estimated_delivery: Optional[str] = Field(
+        None, description="ISO date for estimated delivery"
+    )
+    notes: Optional[str] = Field(
+        None, description="Internal notes regarding fulfillment"
+    )
 
 
 class UpdateFulfillmentBody(BaseModel):
     status: str = Field(..., description="'in_progress' or 'completed'")
-    proof_url: Optional[str] = Field(None, description="URL to delivery proof (image/document)")
+    proof_url: Optional[str] = Field(
+        None, description="URL to delivery proof (image/document)"
+    )
     notes: Optional[str] = Field(None, description="Update notes")
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+
 @router.get("/requests/available")
 async def list_available_requests(
     ngo=Depends(require_ngo),
     resource_type: Optional[str] = Query(None, description="Filter by resource type"),
-    priority: Optional[str] = Query(None, description="Filter by priority: critical,high,medium,low"),
+    priority: Optional[str] = Query(
+        None, description="Filter by priority: critical,high,medium,low"
+    ),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -63,8 +73,13 @@ async def list_available_requests(
     victim_ids = [r["victim_id"] for r in base_requests if r.get("victim_id")]
     user_map = {}
     if victim_ids:
-        users_resp = supabase_admin.table("users").select("id, full_name, email, phone").in_("id", victim_ids).execute()
-        for u in (users_resp.data or []):
+        users_resp = (
+            supabase_admin.table("users")
+            .select("id, full_name, email, phone")
+            .in_("id", victim_ids)
+            .execute()
+        )
+        for u in users_resp.data or []:
             user_map[u["id"]] = u
 
     requests = []
@@ -80,7 +95,9 @@ async def list_available_requests(
 @router.get("/requests/assigned")
 async def list_assigned_requests(
     ngo=Depends(require_ngo),
-    status: Optional[str] = Query(None, description="Filter by status: assigned,in_progress,completed"),
+    status: Optional[str] = Query(
+        None, description="Filter by status: assigned,in_progress,completed"
+    ),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -102,8 +119,13 @@ async def list_assigned_requests(
     victim_ids = [r["victim_id"] for r in base_requests if r.get("victim_id")]
     user_map = {}
     if victim_ids:
-        users_resp = supabase_admin.table("users").select("id, full_name, email, phone").in_("id", victim_ids).execute()
-        for u in (users_resp.data or []):
+        users_resp = (
+            supabase_admin.table("users")
+            .select("id, full_name, email, phone")
+            .in_("id", victim_ids)
+            .execute()
+        )
+        for u in users_resp.data or []:
             user_map[u["id"]] = u
 
     requests = []
@@ -136,10 +158,12 @@ async def claim_request(
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
-    
+
     if existing.data.get("status") != "approved":
-        raise HTTPException(status_code=400, detail="Only 'approved' requests can be claimed")
-        
+        raise HTTPException(
+            status_code=400, detail="Only 'approved' requests can be claimed"
+        )
+
     if existing.data.get("assigned_to"):
         raise HTTPException(status_code=400, detail="Request is already assigned")
 
@@ -147,7 +171,7 @@ async def claim_request(
     updates = {
         "status": "assigned",
         "assigned_to": ngo_id,
-        "updated_at": datetime.now(timezone.utc).isoformat()
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if body.estimated_delivery:
         updates["estimated_delivery"] = body.estimated_delivery
@@ -185,20 +209,17 @@ async def update_fulfillment_status(
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
-    
+
     if existing.data.get("assigned_to") != ngo_id:
         raise HTTPException(status_code=403, detail="Not assigned to this request")
-        
+
     if existing.data.get("status") == "completed":
         raise HTTPException(status_code=400, detail="Request is already completed")
 
     updates = {
         "status": body.status,
-        "updated_at": datetime.now(timezone.utc).isoformat()
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    # Append to existing notes or replace? Replace for simplicity here.
-    if body.notes:
-        updates["admin_note"] = body.notes  # Assuming we can use admin_note or need a dedicated ngo_note field
 
     resp = (
         supabase_admin.table("resource_requests")
@@ -218,7 +239,8 @@ async def update_fulfillment_status(
             resource_type=existing.data.get("resource_type", "resources"),
             old_status=existing.data.get("status"),
             new_status=body.status,
-            admin_id=ngo_id, 
+            admin_id=ngo_id,
+            admin_note=body.notes,
         )
     except Exception as e:
         print(f"Error notifying victim: {e}")
@@ -247,7 +269,7 @@ async def get_ngo_dashboard_stats(
         "assigned": sum(1 for r in requests if r["status"] == "assigned"),
         "in_progress": sum(1 for r in requests if r["status"] == "in_progress"),
         "completed": sum(1 for r in requests if r["status"] == "completed"),
-        "by_priority": {}
+        "by_priority": {},
     }
 
     for r in requests:

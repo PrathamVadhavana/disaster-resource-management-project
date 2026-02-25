@@ -144,6 +144,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
 
+      // Safety net: sync DB role to JWT metadata if they disagree.
+      // Covers all entry points (callback, page refresh, direct URL, etc.)
+      if (profileData?.role && currentUser.user_metadata?.role !== profileData.role) {
+        try {
+          await supabase.auth.updateUser({ data: { role: profileData.role as string } })
+        } catch (e) {
+          console.warn('Failed to sync role to JWT metadata:', e)
+        }
+      }
+
       setProfile(profileData)
     } catch (error) {
       console.error('Error loading profile:', error)
@@ -167,9 +177,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           .maybeSingle()
 
         const profileResult = profileRow as { is_profile_completed: boolean; role?: string } | null
-        if (profileResult?.is_profile_completed) {
-          router.push(getRoleDashboardPath(profileResult.role))
+        const dbRole = profileResult?.role
+        const jwtRole = authData.user.user_metadata?.role
+
+        // ALWAYS sync DB role to JWT metadata so middleware routes correctly.
+        // Without this, middleware sees no role and forces /onboarding.
+        if (dbRole && dbRole !== jwtRole) {
+          await supabase.auth.updateUser({ data: { role: dbRole } })
+        }
+
+        // Decide where to redirect
+        if (dbRole === 'admin') {
+          // Admins always go straight to dashboard — no onboarding needed
+          router.push('/admin')
+        } else if (profileResult?.is_profile_completed && dbRole) {
+          router.push(getRoleDashboardPath(dbRole))
+        } else if (dbRole) {
+          // Role exists but profile not complete → finish onboarding
+          router.push('/onboarding')
         } else {
+          // No role at all → onboarding for role selection
           router.push('/onboarding')
         }
       } catch {
@@ -200,9 +227,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const signOut = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
-    router.refresh()
+    // Clear local state immediately so UI updates before navigation
+    setUser(null)
+    setProfile(null)
+    setSession(null)
+
+    // Sign out from Supabase (local scope ensures cookies are cleared promptly)
+    await supabase.auth.signOut({ scope: 'local' })
+
+    // Hard navigation to /login — router.push can race with stale cookies
+    // causing middleware to redirect back to the old dashboard
+    window.location.href = '/login'
   }
 
   const updateProfile = async (updates: UserProfileUpdate) => {

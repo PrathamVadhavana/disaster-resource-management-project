@@ -2,6 +2,7 @@
 Victim Resource Requests Router
 Full CRUD for victim resource requests + dashboard stats
 """
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
@@ -16,7 +17,11 @@ from app.schemas import (
     DashboardStats,
     RequestStatus,
 )
-from app.services.nlp_service import classify_request, extract_urgency_signals, escalate_priority
+from app.services.nlp_service import (
+    classify_request,
+    extract_urgency_signals,
+    escalate_priority,
+)
 from app.services.notification_service import get_request_audit_trail
 from app.dependencies import require_role
 
@@ -24,14 +29,15 @@ router = APIRouter()
 security = HTTPBearer()
 
 
-
-
-
 def _serialize_items(items) -> list:
     """Serialize ResourceItem models to clean dicts (no None values)."""
     result = []
     for item in items:
-        d = item.model_dump() if hasattr(item, 'model_dump') else (item if isinstance(item, dict) else {})
+        d = (
+            item.model_dump()
+            if hasattr(item, "model_dump")
+            else (item if isinstance(item, dict) else {})
+        )
         result.append({k: v for k, v in d.items() if v is not None})
     return result
 
@@ -76,14 +82,64 @@ async def create_resource_request(
     """Create a new resource request for the authenticated victim"""
     victim_id = user["id"]
 
+    # Valid resource types matching the DB CHECK constraint
+    VALID_RESOURCE_TYPES = {
+        "Food",
+        "Water",
+        "Medical",
+        "Shelter",
+        "Clothing",
+        "Financial Aid",
+        "Evacuation",
+        "Volunteers",
+        "Custom",
+        "Multiple",
+    }
+    # Map common DB category variants to valid resource types
+    CATEGORY_ALIAS = {"Clothes": "Clothing"}
+
+    def _resolve_resource_type(raw_type: str) -> str:
+        """Resolve a resource type string to a valid DB enum value.
+        If it's already valid, return as-is. Otherwise, look it up
+        in available_resources to find the parent category."""
+        if raw_type in VALID_RESOURCE_TYPES:
+            return raw_type
+        mapped = CATEGORY_ALIAS.get(raw_type)
+        if mapped:
+            return mapped
+        # Try to look up the category from available_resources by title
+        try:
+            ar_resp = (
+                supabase_admin.table("available_resources")
+                .select("category")
+                .eq("title", raw_type)
+                .maybe_single()
+                .execute()
+            )
+            if ar_resp.data:
+                cat = ar_resp.data["category"]
+                return (
+                    CATEGORY_ALIAS.get(cat, cat)
+                    if cat in VALID_RESOURCE_TYPES or cat in CATEGORY_ALIAS
+                    else "Custom"
+                )
+        except Exception:
+            pass
+        return "Custom"
+
     # Process items — derive resource_type and quantity from items list
     items_list = _serialize_items(request_data.items) if request_data.items else []
     if items_list:
         total_qty = sum(i.get("quantity", 1) for i in items_list)
-        primary_type = items_list[0]["resource_type"] if len(items_list) == 1 else "Multiple"
+        raw_type = (
+            items_list[0]["resource_type"] if len(items_list) == 1 else "Multiple"
+        )
+        primary_type = _resolve_resource_type(raw_type)
     else:
         total_qty = request_data.quantity
-        primary_type = request_data.resource_type.value if request_data.resource_type else "Custom"
+        primary_type = (
+            request_data.resource_type.value if request_data.resource_type else "Custom"
+        )
 
     # ── NLP Triage: auto-classify description before saving ─────────
     nlp_classification = None
@@ -103,19 +159,27 @@ async def create_resource_request(
             # Auto-escalate priority if urgency signals warrant it
             if classification.priority_was_escalated:
                 final_priority = classification.recommended_priority
-                print(f"⚠️  NLP escalated priority: {request_data.priority.value} → {final_priority}")
+                print(
+                    f"⚠️  NLP escalated priority: {request_data.priority.value} → {final_priority}"
+                )
 
             # Auto-detect resource type if user didn't specify
             if primary_type == "Custom" and classification.resource_types:
-                primary_type = classification.resource_types[0] if len(classification.resource_types) == 1 else "Multiple"
+                primary_type = (
+                    classification.resource_types[0]
+                    if len(classification.resource_types) == 1
+                    else "Multiple"
+                )
 
             # Use NLP quantity estimate if user left default
             if total_qty == 1 and classification.estimated_quantity > 1:
                 total_qty = classification.estimated_quantity
 
-            print(f"🧠 NLP Classification: types={classification.resource_types}, "
-                  f"priority={classification.recommended_priority} (conf={classification.confidence:.2f}), "
-                  f"signals={[s['label'] for s in urgency_signals]}")
+            print(
+                f"🧠 NLP Classification: types={classification.resource_types}, "
+                f"priority={classification.recommended_priority} (conf={classification.confidence:.2f}), "
+                f"signals={[s['label'] for s in urgency_signals]}"
+            )
         except Exception as e:
             print(f"⚠️  NLP classification failed (non-blocking): {e}")
 
@@ -148,12 +212,12 @@ async def create_resource_request(
     try:
         print(f"📦 INSERT DATA: {json.dumps(insert_data, default=str)}")
         response = (
-            supabase_admin.table("resource_requests")
-            .insert(insert_data)
-            .execute()
+            supabase_admin.table("resource_requests").insert(insert_data).execute()
         )
         if not response.data:
-            raise HTTPException(status_code=500, detail="Failed to create request — no data returned")
+            raise HTTPException(
+                status_code=500, detail="Failed to create request — no data returned"
+            )
         row = _safe_row(response.data[0])
         print(f"✅ CREATED: {row.get('id')}")
         return JSONResponse(content=row, status_code=201)
@@ -164,9 +228,9 @@ async def create_resource_request(
         traceback.print_exc()
         # Try to extract detail from supabase/postgrest exceptions
         detail = str(e)
-        if hasattr(e, 'message'):
+        if hasattr(e, "message"):
             detail = e.message
-        elif hasattr(e, 'args') and e.args:
+        elif hasattr(e, "args") and e.args:
             detail = str(e.args[0])
         raise HTTPException(status_code=500, detail=f"Error creating request: {detail}")
 
@@ -180,7 +244,9 @@ async def list_resource_requests(
     status: Optional[str] = Query(None, description="Filter by status"),
     resource_type: Optional[str] = Query(None, description="Filter by resource type"),
     priority: Optional[str] = Query(None, description="Filter by priority"),
-    search: Optional[str] = Query(None, description="Search by request ID or description"),
+    search: Optional[str] = Query(
+        None, description="Search by request ID or description"
+    ),
     sort_by: str = Query("created_at", description="Sort field"),
     sort_order: str = Query("desc", description="asc or desc"),
     page: int = Query(1, ge=1),
@@ -200,7 +266,9 @@ async def list_resource_requests(
             # Volunteers see:
             # 1. Unverified requests
             # 2. Requests verified by them
-            query = query.or_(f"is_verified.is.null,is_verified.eq.false,verified_by.eq.{user_id}")
+            query = query.or_(
+                f"is_verified.is.null,is_verified.eq.false,verified_by.eq.{user_id}"
+            )
         # Admins see everything (no filter)
 
         if status:
@@ -225,8 +293,13 @@ async def list_resource_requests(
         assigned_ids = [r["assigned_to"] for r in base_requests if r.get("assigned_to")]
         user_map = {}
         if assigned_ids:
-            u_resp = supabase_admin.table("users").select("id, full_name, metadata").in_("id", assigned_ids).execute()
-            for u in (u_resp.data or []):
+            u_resp = (
+                supabase_admin.table("users")
+                .select("id, full_name, metadata")
+                .in_("id", assigned_ids)
+                .execute()
+            )
+            for u in u_resp.data or []:
                 user_map[u["id"]] = u
 
         # Map back to requests
@@ -238,16 +311,20 @@ async def list_resource_requests(
                 row["assigned_user"] = user_map.get(aid)
             final_requests.append(row)
 
-        return JSONResponse(content={
-            "requests": final_requests,
-            "total": response.count or 0,
-            "page": page,
-            "page_size": page_size,
-        })
+        return JSONResponse(
+            content={
+                "requests": final_requests,
+                "total": response.count or 0,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
     except Exception as e:
         print(f"❌ LIST ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error fetching requests: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching requests: {str(e)}"
+        )
 
 
 # ──────────────────────────────────────────────
@@ -263,7 +340,9 @@ async def get_resource_request(
     role = user.get("role")
 
     try:
-        query = supabase_admin.table("resource_requests").select("*").eq("id", request_id)
+        query = (
+            supabase_admin.table("resource_requests").select("*").eq("id", request_id)
+        )
 
         if role == "victim":
             query = query.eq("victim_id", user_id)
@@ -295,9 +374,18 @@ async def get_request_timeline(
 
     # First, verify ownership if the user is a victim
     if user["role"] == "victim":
-        resp = supabase_admin.table("resource_requests").select("id").eq("id", request_id).eq("victim_id", victim_id).maybe_single().execute()
+        resp = (
+            supabase_admin.table("resource_requests")
+            .select("id")
+            .eq("id", request_id)
+            .eq("victim_id", victim_id)
+            .maybe_single()
+            .execute()
+        )
         if not resp.data:
-            raise HTTPException(status_code=404, detail="Request not found or not authorized")
+            raise HTTPException(
+                status_code=404, detail="Request not found or not authorized"
+            )
 
     trail = await get_request_audit_trail(request_id)
     return JSONResponse(content={"timeline": trail})
@@ -338,18 +426,29 @@ async def update_resource_request(
         update_dict = {}
         for field, value in update_data.model_dump(exclude_unset=True).items():
             if value is not None:
-                if hasattr(value, 'value'):
+                if hasattr(value, "value"):
                     update_dict[field] = value.value
-                elif isinstance(value, list) and field == 'items':
-                    update_dict[field] = _serialize_items(update_data.items) if update_data.items else value
+                elif isinstance(value, list) and field == "items":
+                    update_dict[field] = (
+                        _serialize_items(update_data.items)
+                        if update_data.items
+                        else value
+                    )
                 else:
                     update_dict[field] = value
 
         # Re-derive resource_type and quantity from items
-        if 'items' in update_dict and update_dict['items']:
-            items = update_dict['items']
-            update_dict['quantity'] = sum(i.get('quantity', 1) if isinstance(i, dict) else i.quantity for i in items)
-            update_dict['resource_type'] = items[0].get('resource_type', 'Custom') if len(items) == 1 else 'Multiple'
+        if "items" in update_dict and update_dict["items"]:
+            items = update_dict["items"]
+            update_dict["quantity"] = sum(
+                i.get("quantity", 1) if isinstance(i, dict) else i.quantity
+                for i in items
+            )
+            update_dict["resource_type"] = (
+                items[0].get("resource_type", "Custom")
+                if len(items) == 1
+                else "Multiple"
+            )
 
         if not update_dict:
             return JSONResponse(content=_safe_row(existing.data))
@@ -402,7 +501,9 @@ async def delete_resource_request(
         current_status = existing.data["status"]
 
         if current_status == "pending":
-            supabase_admin.table("resource_requests").delete().eq("id", request_id).execute()
+            supabase_admin.table("resource_requests").delete().eq(
+                "id", request_id
+            ).execute()
             return {"message": "Request deleted successfully"}
         elif current_status in ("approved", "assigned", "in_progress"):
             supabase_admin.table("resource_requests").update(
@@ -479,11 +580,12 @@ async def get_available_resources(
 ):
     """Get currently available resources that victims can request"""
 
-
     try:
         query = (
             supabase_admin.table("available_resources")
-            .select("resource_id, category, resource_type, title, description, total_quantity, claimed_quantity, unit, address_text, status")
+            .select(
+                "resource_id, category, resource_type, title, description, total_quantity, claimed_quantity, unit, address_text, status"
+            )
             .eq("is_active", True)
             .eq("status", "available")
         )
@@ -494,27 +596,30 @@ async def get_available_resources(
         response = query.order("category").execute()
 
         resources = []
-        for r in (response.data or []):
+        for r in response.data or []:
             total = r.get("total_quantity", 0) or 0
             claimed = r.get("claimed_quantity", 0) or 0
             remaining = max(0, total - claimed)
             if remaining > 0:
-                resources.append({
-                    "resource_id": r["resource_id"],
-                    "category": r["category"],
-                    "resource_type": r["resource_type"],
-                    "title": r["title"],
-                    "description": r.get("description"),
-                    "total_quantity": total,
-                    "claimed_quantity": claimed,
-                    "remaining_quantity": remaining,
-                    "unit": r.get("unit", "units"),
-                    "address_text": r.get("address_text"),
-                })
+                resources.append(
+                    {
+                        "resource_id": r["resource_id"],
+                        "category": r["category"],
+                        "resource_type": r["resource_type"],
+                        "title": r["title"],
+                        "description": r.get("description"),
+                        "total_quantity": total,
+                        "claimed_quantity": claimed,
+                        "remaining_quantity": remaining,
+                        "unit": r.get("unit", "units"),
+                        "address_text": r.get("address_text"),
+                    }
+                )
 
         return JSONResponse(content={"resources": resources})
     except Exception as e:
         print(f"❌ AVAILABLE RESOURCES ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error fetching available resources: {str(e)}")
-
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching available resources: {str(e)}"
+        )

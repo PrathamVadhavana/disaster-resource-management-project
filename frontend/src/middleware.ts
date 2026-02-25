@@ -30,8 +30,34 @@ export async function middleware(request: NextRequest) {
         }
     )
 
-    // Validate the session
-    const { data: { user } } = await supabase.auth.getUser()
+    // Validate the session — treat errors as unauthenticated
+    const { data: { user }, error: userError } = await supabase.auth.getUser()
+    if (userError) {
+        // Session is invalid / expired — clear stale cookies so the browser
+        // doesn't keep sending them on every request
+        const loginUrl = new URL('/login', request.url)
+        const res = NextResponse.redirect(loginUrl)
+        // Remove all supabase auth cookies so the next request is clean
+        request.cookies.getAll().forEach(({ name }) => {
+            if (name.startsWith('sb-')) {
+                res.cookies.delete(name)
+            }
+        })
+        // Only redirect away from public pages
+        const path = request.nextUrl.pathname
+        if (
+            path === '/' ||
+            path.startsWith('/auth') ||
+            path.startsWith('/login') ||
+            path.startsWith('/signup') ||
+            path.startsWith('/_next') ||
+            path.startsWith('/api') ||
+            path.includes('.')
+        ) {
+            return response
+        }
+        return res
+    }
     const path = request.nextUrl.pathname
 
     // Helper: get the correct dashboard path for a role

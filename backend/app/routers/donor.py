@@ -19,8 +19,9 @@ router = APIRouter()
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
+
 class DonationCreate(BaseModel):
-    disaster_id: str
+    disaster_id: Optional[str] = None
     request_id: Optional[str] = None
     amount: float = 0
     currency: str = "USD"
@@ -42,6 +43,7 @@ class PledgeCreate(BaseModel):
 
 
 # ── Donation Endpoints ────────────────────────────────────────────────────────
+
 
 @router.get("/donations")
 async def list_donations(
@@ -67,28 +69,47 @@ async def list_donations(
         return []
 
     # Manual enrichment
-    disaster_ids = list(set(d["disaster_id"] for d in base_donations if d.get("disaster_id")))
-    request_ids = list(set(d["request_id"] for d in base_donations if d.get("request_id")))
+    disaster_ids = list(
+        set(d["disaster_id"] for d in base_donations if d.get("disaster_id"))
+    )
+    request_ids = list(
+        set(d["request_id"] for d in base_donations if d.get("request_id"))
+    )
 
     disaster_map = {}
     if disaster_ids:
-        d_resp = supabase_admin.table("disasters").select("id, title, type").in_("id", disaster_ids).execute()
-        for d in (d_resp.data or []):
+        d_resp = (
+            supabase_admin.table("disasters")
+            .select("id, title, type")
+            .in_("id", disaster_ids)
+            .execute()
+        )
+        for d in d_resp.data or []:
             disaster_map[d["id"]] = d
 
     request_map = {}
     victim_ids = set()
     if request_ids:
-        r_resp = supabase_admin.table("resource_requests").select("id, resource_type, description, victim_id").in_("id", request_ids).execute()
-        for r in (r_resp.data or []):
+        r_resp = (
+            supabase_admin.table("resource_requests")
+            .select("id, resource_type, description, victim_id")
+            .in_("id", request_ids)
+            .execute()
+        )
+        for r in r_resp.data or []:
             request_map[r["id"]] = r
             if r.get("victim_id"):
                 victim_ids.add(r["victim_id"])
 
     user_map = {}
     if victim_ids:
-        u_resp = supabase_admin.table("users").select("id, full_name").in_("id", list(victim_ids)).execute()
-        for u in (u_resp.data or []):
+        u_resp = (
+            supabase_admin.table("users")
+            .select("id, full_name")
+            .in_("id", list(victim_ids))
+            .execute()
+        )
+        for u in u_resp.data or []:
             user_map[u["id"]] = u
 
     # Flatten disaster and victim info
@@ -97,7 +118,7 @@ async def list_donations(
         d = disaster_map.get(r.get("disaster_id"), {})
         r["disaster_title"] = d.get("title", "Unknown")
         r["disaster_type"] = d.get("type", "disaster")
-        
+
         req = request_map.get(r.get("request_id"), {})
         vid = req.get("victim_id")
         v = user_map.get(vid, {})
@@ -128,7 +149,9 @@ async def create_donation(body: DonationCreate, donor=Depends(require_verified_d
 
 
 @router.patch("/donations/{donation_id}")
-async def update_donation(donation_id: str, body: DonationUpdate, user_id: str = Depends(get_current_user_id)):
+async def update_donation(
+    donation_id: str, body: DonationUpdate, user_id: str = Depends(get_current_user_id)
+):
     """Update a donation (e.g. mark completed with amount)."""
     updates = {}
     if body.amount is not None:
@@ -157,7 +180,9 @@ async def update_donation(donation_id: str, body: DonationUpdate, user_id: str =
 
 
 @router.get("/donations/{donation_id}/receipt")
-async def generate_donation_receipt(donation_id: str, user_id: str = Depends(get_current_user_id)):
+async def generate_donation_receipt(
+    donation_id: str, user_id: str = Depends(get_current_user_id)
+):
     """Generate a digital receipt for a completed donation."""
     # Fetch donation without joins
     resp = (
@@ -170,23 +195,38 @@ async def generate_donation_receipt(donation_id: str, user_id: str = Depends(get
     )
     if not resp.data:
         raise HTTPException(status_code=404, detail="Donation not found")
-        
+
     donation = resp.data
     if donation.get("status") != "completed":
-        raise HTTPException(status_code=400, detail="Receipts are only available for completed donations")
-        
+        raise HTTPException(
+            status_code=400,
+            detail="Receipts are only available for completed donations",
+        )
+
     # Manual enrichment for disaster and request
     disaster_title = "Unknown Disaster"
     did = donation.get("disaster_id")
     if did:
-        d_resp = supabase_admin.table("disasters").select("title").eq("id", did).maybe_single().execute()
+        d_resp = (
+            supabase_admin.table("disasters")
+            .select("title")
+            .eq("id", did)
+            .maybe_single()
+            .execute()
+        )
         if d_resp.data:
             disaster_title = d_resp.data.get("title", "Unknown Disaster")
 
     request_desc = "General Support"
     rid = donation.get("request_id")
     if rid:
-        r_resp = supabase_admin.table("resource_requests").select("description").eq("id", rid).maybe_single().execute()
+        r_resp = (
+            supabase_admin.table("resource_requests")
+            .select("description")
+            .eq("id", rid)
+            .maybe_single()
+            .execute()
+        )
         if r_resp.data:
             request_desc = r_resp.data.get("description", "General Support")
 
@@ -198,22 +238,31 @@ async def generate_donation_receipt(donation_id: str, user_id: str = Depends(get
         "amount": donation["amount"],
         "currency": donation["currency"],
         "cause": disaster_title,
-        "allocated_to": request_desc if donation.get("request_id") else "General Disaster Relief Fund",
+        "allocated_to": (
+            request_desc
+            if donation.get("request_id")
+            else "General Disaster Relief Fund"
+        ),
         "payment_reference": donation.get("payment_ref", "N/A"),
         "status": "COMPLETED",
-        "message": "Thank you for your generous contribution to disaster relief efforts."
+        "message": "Thank you for your generous contribution to disaster relief efforts.",
     }
     return receipt
 
 
 @router.delete("/donations/{donation_id}")
-async def delete_donation(donation_id: str, user_id: str = Depends(get_current_user_id)):
+async def delete_donation(
+    donation_id: str, user_id: str = Depends(get_current_user_id)
+):
     """Remove a donation record."""
-    supabase_admin.table("donations").delete().eq("id", donation_id).eq("user_id", user_id).execute()
+    supabase_admin.table("donations").delete().eq("id", donation_id).eq(
+        "user_id", user_id
+    ).execute()
     return {"deleted": True}
 
 
 # ── Pledge Endpoints ──────────────────────────────────────────────────────────
+
 
 @router.get("/pledges")
 async def list_pledges(user_id: str = Depends(get_current_user_id)):
@@ -221,18 +270,25 @@ async def list_pledges(user_id: str = Depends(get_current_user_id)):
     resp = (
         supabase_admin.table("donor_pledges")
         .select("*")
-        .eq("user_id", user_id)
+        .eq("donor_id", user_id)
         .order("created_at", desc=True)
         .execute()
     )
     base_pledges = resp.data or []
-    
+
     # Manual enrichment for disasters
-    disaster_ids = list(set(p["disaster_id"] for p in base_pledges if p.get("disaster_id")))
+    disaster_ids = list(
+        set(p["disaster_id"] for p in base_pledges if p.get("disaster_id"))
+    )
     disaster_map = {}
     if disaster_ids:
-        d_resp = supabase_admin.table("disasters").select("id, title, type, severity, status").in_("id", disaster_ids).execute()
-        for d in (d_resp.data or []):
+        d_resp = (
+            supabase_admin.table("disasters")
+            .select("id, title, type, severity, status")
+            .in_("id", disaster_ids)
+            .execute()
+        )
+        for d in d_resp.data or []:
             disaster_map[d["id"]] = d
 
     pledges = []
@@ -246,7 +302,7 @@ async def list_pledges(user_id: str = Depends(get_current_user_id)):
 async def create_pledge(body: PledgeCreate, donor=Depends(require_verified_donor)):
     """Pledge support for a disaster cause."""
     user_id = donor.get("id")
-    row = {"user_id": user_id, "disaster_id": body.disaster_id}
+    row = {"donor_id": user_id, "disaster_id": body.disaster_id}
     resp = supabase_admin.table("donor_pledges").insert(row).execute()
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to create pledge")
@@ -256,11 +312,14 @@ async def create_pledge(body: PledgeCreate, donor=Depends(require_verified_donor
 @router.delete("/pledges/{disaster_id}")
 async def remove_pledge(disaster_id: str, user_id: str = Depends(get_current_user_id)):
     """Remove a pledge."""
-    supabase_admin.table("donor_pledges").delete().eq("disaster_id", disaster_id).eq("user_id", user_id).execute()
+    supabase_admin.table("donor_pledges").delete().eq("disaster_id", disaster_id).eq(
+        "donor_id", user_id
+    ).execute()
     return {"deleted": True}
 
 
 # ── Donor Stats ───────────────────────────────────────────────────────────────
+
 
 @router.get("/stats")
 async def donor_stats(user_id: str = Depends(get_current_user_id)):
@@ -278,7 +337,7 @@ async def donor_stats(user_id: str = Depends(get_current_user_id)):
     pledges_resp = (
         supabase_admin.table("donor_pledges")
         .select("id")
-        .eq("user_id", user_id)
+        .eq("donor_id", user_id)
         .execute()
     )
     pledges = pledges_resp.data or []
@@ -289,5 +348,7 @@ async def donor_stats(user_id: str = Depends(get_current_user_id)):
         "pending_donations": len(donations) - len(completed),
         "total_donated": total_donated,
         "causes_supported": len(pledges),
-        "impact_score": min(100, round(total_donated / 100 + len(completed) * 5 + len(pledges) * 2)),
+        "impact_score": min(
+            100, round(total_donated / 100 + len(completed) * 5 + len(pledges) * 2)
+        ),
     }

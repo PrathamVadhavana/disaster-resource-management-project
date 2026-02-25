@@ -18,21 +18,36 @@ async def create_notification(
     user_id: str,
     title: str,
     message: str,
-    notification_type: str = "info",     # info, success, warning, error, request_update
-    related_id: Optional[str] = None,    # request_id, disaster_id, etc.
+    notification_type: str = "info",  # info, success, warning, error, request_update
+    related_id: Optional[str] = None,  # request_id, disaster_id, etc.
     related_type: Optional[str] = None,  # request, disaster, resource
 ) -> Optional[Dict]:
     """Create a notification for a user. Stored in DB for persistence."""
     try:
+        # Map notification_type to priority for the DB schema
+        type_to_priority = {
+            "info": "low",
+            "success": "medium",
+            "warning": "high",
+            "error": "critical",
+            "request_update": "medium",
+        }
         record = {
             "user_id": user_id,
             "title": title,
             "message": message,
-            "type": notification_type,
-            "related_id": related_id,
-            "related_type": related_type,
-            "is_read": False,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "priority": type_to_priority.get(notification_type, "medium"),
+            "read": False,
+            "data": {
+                "type": notification_type,
+                "related_id": related_id,
+                "related_type": related_type,
+            },
+            "action_url": (
+                f"/victim/requests/{related_id}"
+                if related_id and related_type == "request"
+                else None
+            ),
         }
         resp = supabase_admin.table("notifications").insert(record).execute()
         return resp.data[0] if resp.data else None
@@ -103,7 +118,7 @@ async def get_user_notifications(
             .limit(limit)
         )
         if unread_only:
-            query = query.eq("is_read", False)
+            query = query.eq("read", False)
         resp = query.execute()
         return resp.data or []
     except Exception as e:
@@ -111,10 +126,16 @@ async def get_user_notifications(
         return []
 
 
-async def mark_notifications_read(user_id: str, notification_ids: Optional[List[str]] = None) -> int:
+async def mark_notifications_read(
+    user_id: str, notification_ids: Optional[List[str]] = None
+) -> int:
     """Mark notifications as read. If no IDs given, mark all as read."""
     try:
-        query = supabase_admin.table("notifications").update({"is_read": True}).eq("user_id", user_id)
+        query = (
+            supabase_admin.table("notifications")
+            .update({"read": True, "read_at": datetime.now(timezone.utc).isoformat()})
+            .eq("user_id", user_id)
+        )
         if notification_ids:
             query = query.in_("id", notification_ids)
         resp = query.execute()
@@ -131,7 +152,7 @@ async def get_unread_count(user_id: str) -> int:
             supabase_admin.table("notifications")
             .select("id", count="exact")
             .eq("user_id", user_id)
-            .eq("is_read", False)
+            .eq("read", False)
             .execute()
         )
         return resp.count or 0
@@ -178,6 +199,7 @@ async def notify_request_status_change(
     new_status: str,
     admin_id: Optional[str] = None,
     rejection_reason: Optional[str] = None,
+    admin_note: Optional[str] = None,
 ):
     """Send notification to victim and create audit trail entry for a status change."""
     template = NOTIFICATION_TEMPLATES.get(new_status)
@@ -195,6 +217,11 @@ async def notify_request_status_change(
             related_type="request",
         )
 
+    # Build audit details
+    details = rejection_reason if new_status == "rejected" else None
+    if admin_note:
+        details = f"{details or ''}\n[Admin Note] {admin_note}".strip()
+
     # Audit trail
     await create_audit_entry(
         request_id=request_id,
@@ -203,5 +230,5 @@ async def notify_request_status_change(
         actor_role="admin" if admin_id else "system",
         old_status=old_status,
         new_status=new_status,
-        details=rejection_reason if new_status == "rejected" else None,
+        details=details,
     )

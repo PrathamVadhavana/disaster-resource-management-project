@@ -17,7 +17,7 @@ export default function SituationReportPanel() {
 
   const { data: reportsData, isLoading } = useQuery({
     queryKey: ['sitreps'],
-    queryFn: () => api.getSitreps(10),
+    queryFn: () => api.getSitreps({ limit: 10 }),
     refetchInterval: 60_000,
   })
 
@@ -151,10 +151,7 @@ export default function SituationReportPanel() {
               {reports.map((report: any) => (
                 <button
                   key={report.id}
-                  onClick={async () => {
-                    const full = await api.getSitrep(report.id)
-                    setSelectedReport(full)
-                  }}
+                  onClick={() => setSelectedReport(report)}
                   className="w-full flex items-center gap-4 px-5 py-3 hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors text-left"
                 >
                   <FileText className="w-4 h-4 text-blue-500 shrink-0" />
