@@ -367,4 +367,32 @@ export const api = {
     // ━━ NGO Stats (alias) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getNgoStats: () =>
         apiFetch('/api/ngo/dashboard-stats'),
+
+    // ━━ NGO Enhanced Dashboard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    submitNgoAvailability: (requestId: string, data: { available_quantity: number; estimated_delivery_time: string; assigned_team?: string; vehicle_type?: string; ngo_latitude?: number; ngo_longitude?: number; notes?: string }) =>
+        apiFetch(`/api/ngo/requests/${requestId}/availability`, { method: 'POST', body: JSON.stringify(data) }),
+
+    getNgoAvailability: (requestId: string) =>
+        apiFetch(`/api/ngo/requests/${requestId}/availability`),
+
+    updateNgoDeliveryStatus: (requestId: string, data: { new_status: string; proof_url?: string; notes?: string; delivery_latitude?: number; delivery_longitude?: number }) =>
+        apiFetch(`/api/ngo/requests/${requestId}/delivery`, { method: 'PUT', body: JSON.stringify(data) }),
+
+    getNgoInventory: (params?: { category?: string; status?: string; limit?: number; offset?: number }) =>
+        apiFetch(`/api/ngo/inventory${qs(params)}`),
+
+    addNgoInventoryItem: (data: { category: string; resource_type: string; title: string; description?: string; total_quantity: number; unit?: string; address_text?: string }) =>
+        apiFetch('/api/ngo/inventory', { method: 'POST', body: JSON.stringify(data) }),
+
+    updateNgoInventoryItem: (resourceId: string, params: { total_quantity?: number; status?: string }) =>
+        apiFetch(`/api/ngo/inventory/${resourceId}${qs(params)}`, { method: 'PATCH' }),
+
+    getNgoAuditLog: (params?: { action_type?: string; limit?: number; offset?: number }) =>
+        apiFetch(`/api/ngo/audit-log${qs(params)}`),
+
+    getNgoNotifications: (params?: { unread_only?: boolean; limit?: number }) =>
+        apiFetch(`/api/ngo/notifications${qs(params)}`),
+
+    markNgoNotificationsRead: (notificationIds?: string[]) =>
+        apiFetch('/api/ngo/notifications/mark-read', { method: 'POST', body: JSON.stringify({ notification_ids: notificationIds }) }),
 }

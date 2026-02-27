@@ -5,17 +5,22 @@ import Link from 'next/link'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/lib/auth-provider'
 import { useTheme } from 'next-themes'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '@/lib/api'
 import {
     LayoutDashboard, ListOrdered, Package, Map, Users,
-    LogOut, ChevronLeft, Menu, Activity, Sun, Moon, Building2,
+    LogOut, ChevronLeft, Menu, Sun, Moon, Building2,
+    CheckSquare, Truck, Bell,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { NotificationBell } from '@/components/shared/NotificationBell'
 
 const navItems = [
     { href: '/ngo', label: 'Overview', icon: LayoutDashboard },
-    { href: '/ngo/requests', label: 'Requests Queue', icon: ListOrdered },
-    { href: '/ngo/inventory', label: 'Inventory', icon: Package },
+    { href: '/ngo/requests', label: 'Approved Requests', icon: ListOrdered },
+    { href: '/ngo/assigned', label: 'Assigned Requests', icon: CheckSquare },
+    { href: '/ngo/deliveries', label: 'Delivery Tracking', icon: Truck },
+    { href: '/ngo/inventory', label: 'Resource Inventory', icon: Package },
     { href: '/ngo/live-map', label: 'Live Map', icon: Map },
     { href: '/ngo/team', label: 'Team', icon: Users },
 ]
@@ -29,6 +34,14 @@ export function NGOSidebar() {
 
     useEffect(() => { setMounted(true) }, [])
 
+    // Fetch unread notification count
+    const { data: notifData } = useQuery({
+        queryKey: ['ngo-notif-count'],
+        queryFn: () => api.getNgoNotifications({ unread_only: true, limit: 1 }),
+        refetchInterval: 15000,
+    })
+    const unreadCount = notifData?.unread_count || 0
+
     const isActive = (href: string) => {
         if (href === '/ngo') return pathname === '/ngo'
         return pathname?.startsWith(href) ?? false
@@ -41,12 +54,20 @@ export function NGOSidebar() {
                 <button onClick={() => setCollapsed(!collapsed)} className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 transition-colors">
                     <Menu className="w-5 h-5 text-slate-600 dark:text-slate-400" />
                 </button>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-1">
                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center">
                         <Building2 className="w-4 h-4 text-white" />
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">NGO Portal</span>
-                    <div className="ml-auto"><NotificationBell /></div>
+                    <div className="ml-auto flex items-center gap-2">
+                        {unreadCount > 0 && (
+                            <Link href="/ngo" className="relative">
+                                <Bell className="w-5 h-5 text-slate-500" />
+                                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{unreadCount > 9 ? '9+' : unreadCount}</span>
+                            </Link>
+                        )}
+                        <NotificationBell />
+                    </div>
                 </div>
             </div>
 

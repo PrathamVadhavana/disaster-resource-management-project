@@ -1,59 +1,65 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
+import { createClient } from '@/lib/supabase/client'
 import {
-    Loader2, Package, Plus, Search, Filter,
-    CheckCircle2, AlertTriangle, Archive, RefreshCw, X
+    Loader2, Search, Package, Plus, AlertTriangle,
+    RefreshCw, X, CheckCircle2, Archive, TrendingDown,
+    Boxes, ShoppingBag,
 } from 'lucide-react'
 
-const STATUS_OPTIONS = ['all', 'available', 'allocated', 'depleted', 'in_transit'] as const
-
-const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
-    available: { label: 'Available', color: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 ring-emerald-500/20' },
-    allocated: { label: 'Allocated', color: 'text-blue-600 bg-blue-50 dark:bg-blue-500/10 ring-blue-500/20' },
-    depleted: { label: 'Depleted', color: 'text-red-600 bg-red-50 dark:bg-red-500/10 ring-red-500/20' },
-    in_transit: { label: 'In Transit', color: 'text-amber-600 bg-amber-50 dark:bg-amber-500/10 ring-amber-500/20' },
-}
+const CATEGORIES = ['Food', 'Water', 'Medical', 'Shelter', 'Clothing', 'Equipment', 'Hygiene', 'Other']
 
 export default function NGOInventoryPage() {
-    const [statusFilter, setStatusFilter] = useState<string>('all')
+    const qc = useQueryClient()
     const [search, setSearch] = useState('')
-    const [showAddForm, setShowAddForm] = useState(false)
-    const queryClient = useQueryClient()
-
-    const { data: resources, isLoading } = useQuery({
-        queryKey: ['ngo-inventory', statusFilter],
-        queryFn: () => api.getResources(statusFilter !== 'all' ? { status: statusFilter } : {}),
-        refetchInterval: 30000,
+    const [catFilter, setCatFilter] = useState('')
+    const [showAddModal, setShowAddModal] = useState(false)
+    const [form, setForm] = useState({
+        category: 'Food', resource_type: '', title: '', description: '',
+        total_quantity: 10, unit: 'units', address_text: '',
     })
 
+    const { data, isLoading, refetch } = useQuery({
+        queryKey: ['ngo-inventory', catFilter],
+        queryFn: () => api.getNgoInventory({ category: catFilter || undefined, limit: 200 }),
+    })
+
+    useEffect(() => {
+        const supabase = createClient()
+        const channel = supabase
+            .channel('ngo-inventory-rt')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'available_resources' }, () => {
+                qc.invalidateQueries({ queryKey: ['ngo-inventory'] })
+            })
+            .subscribe()
+        return () => { supabase.removeChannel(channel) }
+    }, [qc])
+
     const addMutation = useMutation({
-        mutationFn: (data: any) => api.createResource(data),
+        mutationFn: () => api.addNgoInventoryItem(form),
         onSuccess: () => {
-            queryClient.invalidateQueries({ queryKey: ['ngo-inventory'] })
-            setShowAddForm(false)
+            qc.invalidateQueries({ queryKey: ['ngo-inventory'] })
+            setShowAddModal(false)
+            setForm({ category: 'Food', resource_type: '', title: '', description: '', total_quantity: 10, unit: 'units', address_text: '' })
         },
     })
 
-    const resourceList = Array.isArray(resources) ? resources : []
+    const items = data?.items || []
+    const summary = data?.summary || {}
 
     const filtered = search
-        ? resourceList.filter((r: any) =>
-            (r.name || r.type || r.resource_type || '').toLowerCase().includes(search.toLowerCase())
-        )
-        : resourceList
-
-    const availableCount = resourceList.filter((r: any) => r.status === 'available').length
-    const allocatedCount = resourceList.filter((r: any) => r.status === 'allocated').length
-    const depletedCount = resourceList.filter((r: any) => r.status === 'depleted').length
+        ? items.filter((i: any) => (i.title || i.resource_type || i.category || '').toLowerCase().includes(search.toLowerCase()))
+        : items
 
     if (isLoading) {
         return (
-            <div className="flex items-center justify-center h-64">
-                <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
+            <div className="flex flex-col items-center justify-center h-64 gap-3">
+                <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
+                <span className="text-sm text-slate-500">Loading inventory...</span>
             </div>
         )
     }
@@ -61,109 +67,163 @@ export default function NGOInventoryPage() {
     return (
         <div className="space-y-6">
             {/* Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Inventory</h1>
+                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                        <Package className="w-6 h-6 text-emerald-500" />
+                        Resource Inventory
+                    </h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                        Track and manage your organization&apos;s resources.
+                        Manage your available resources, track reservations, and monitor stock levels.
                     </p>
                 </div>
-                <button
-                    onClick={() => setShowAddForm(true)}
-                    className="shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition-colors shadow-lg shadow-blue-600/20"
-                >
-                    <Plus className="w-4 h-4" /> Add Resource
-                </button>
+                <div className="flex gap-2">
+                    <button onClick={() => refetch()} className="flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5">
+                        <RefreshCw className="w-4 h-4" /> Refresh
+                    </button>
+                    <button onClick={() => setShowAddModal(true)}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold hover:from-emerald-600 hover:to-teal-700 shadow-md transition-all">
+                        <Plus className="w-4 h-4" /> Add Resource
+                    </button>
+                </div>
             </div>
 
-            {/* Summary */}
-            <div className="grid grid-cols-3 gap-4">
-                {[
-                    { label: 'Available', count: availableCount, icon: CheckCircle2, color: 'from-emerald-500 to-teal-600' },
-                    { label: 'Allocated', count: allocatedCount, icon: Package, color: 'from-blue-500 to-cyan-600' },
-                    { label: 'Depleted', count: depletedCount, icon: AlertTriangle, color: 'from-red-500 to-orange-600' },
-                ].map((s) => {
-                    const Icon = s.icon
-                    return (
-                        <div key={s.label} className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-4">
-                            <div className={cn('w-9 h-9 rounded-lg bg-gradient-to-br flex items-center justify-center mb-3', s.color)}>
-                                <Icon className="w-4 h-4 text-white" />
-                            </div>
-                            <p className="text-xl font-bold text-slate-900 dark:text-white">{s.count}</p>
-                            <p className="text-xs text-slate-500 dark:text-slate-400">{s.label}</p>
+            {/* Summary Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <div className="w-8 h-8 rounded-lg bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
+                            <Boxes className="w-4 h-4 text-blue-500" />
                         </div>
-                    )
-                })}
+                    </div>
+                    <p className="text-xl font-bold text-slate-900 dark:text-white">{summary.total_quantity || 0}</p>
+                    <p className="text-xs text-slate-500">Total Stock</p>
+                </div>
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <div className="w-8 h-8 rounded-lg bg-orange-50 dark:bg-orange-500/10 flex items-center justify-center">
+                            <ShoppingBag className="w-4 h-4 text-orange-500" />
+                        </div>
+                    </div>
+                    <p className="text-xl font-bold text-slate-900 dark:text-white">{summary.reserved_quantity || 0}</p>
+                    <p className="text-xs text-slate-500">Reserved</p>
+                </div>
+                <div className="rounded-2xl border border-emerald-200 dark:border-emerald-500/20 bg-emerald-50/50 dark:bg-emerald-500/5 p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <div className="w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-500/10 flex items-center justify-center">
+                            <Archive className="w-4 h-4 text-emerald-500" />
+                        </div>
+                    </div>
+                    <p className="text-xl font-bold text-emerald-600 dark:text-emerald-400">{summary.available_quantity || 0}</p>
+                    <p className="text-xs text-slate-500">Available</p>
+                </div>
+                <div className={cn(
+                    'rounded-2xl border p-4',
+                    (summary.low_stock_count || 0) > 0
+                        ? 'border-red-200 dark:border-red-500/20 bg-red-50/50 dark:bg-red-500/5'
+                        : 'border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02]'
+                )}>
+                    <div className="flex items-center gap-2 mb-2">
+                        <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center',
+                            (summary.low_stock_count || 0) > 0 ? 'bg-red-100 dark:bg-red-500/10' : 'bg-slate-100 dark:bg-white/5')}>
+                            <TrendingDown className={cn('w-4 h-4', (summary.low_stock_count || 0) > 0 ? 'text-red-500' : 'text-slate-400')} />
+                        </div>
+                    </div>
+                    <p className={cn('text-xl font-bold', (summary.low_stock_count || 0) > 0 ? 'text-red-600' : 'text-slate-900 dark:text-white')}>
+                        {summary.low_stock_count || 0}
+                    </p>
+                    <p className="text-xs text-slate-500">Low Stock Alerts</p>
+                </div>
             </div>
 
             {/* Filters */}
             <div className="flex flex-col sm:flex-row gap-3">
                 <div className="relative flex-1">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                    <input
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
+                    <input value={search} onChange={e => setSearch(e.target.value)}
                         placeholder="Search resources..."
-                        className="w-full pl-10 pr-4 h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition-all"
-                    />
+                        className="w-full pl-10 pr-4 h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
                 </div>
-                <div className="flex gap-2 overflow-x-auto pb-1">
-                    {STATUS_OPTIONS.map((s) => (
-                        <button
-                            key={s}
-                            onClick={() => setStatusFilter(s)}
-                            className={cn(
-                                'px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap transition-all border',
-                                statusFilter === s
-                                    ? 'bg-blue-600 text-white border-blue-600'
-                                    : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-white/5'
-                            )}
-                        >
-                            {s === 'all' ? 'All' : s.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                <div className="flex gap-2 flex-wrap">
+                    <button onClick={() => setCatFilter('')}
+                        className={cn('px-3 py-2 rounded-lg text-xs font-medium border transition-all',
+                            !catFilter ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-white/5')}>
+                        All
+                    </button>
+                    {CATEGORIES.map(c => (
+                        <button key={c} onClick={() => setCatFilter(c)}
+                            className={cn('px-3 py-2 rounded-lg text-xs font-medium border transition-all',
+                                catFilter === c ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-white/5')}>
+                            {c}
                         </button>
                     ))}
                 </div>
             </div>
 
-            {/* Resource Table */}
+            {/* Items Table */}
             {filtered.length === 0 ? (
-                <div className="text-center py-16 px-4">
-                    <Archive className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
-                    <p className="text-slate-500 dark:text-slate-400 font-medium">No resources found</p>
-                    <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
-                        {search ? 'Try adjusting your search.' : 'Add resources to get started.'}
-                    </p>
+                <div className="text-center py-16 rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02]">
+                    <Package className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
+                    <p className="text-slate-500 font-medium">No resources in inventory</p>
+                    <p className="text-sm text-slate-400 mt-1">Add resources to start managing your stock.</p>
                 </div>
             ) : (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
                     <div className="overflow-x-auto">
-                        <table className="w-full">
+                        <table className="w-full text-left">
                             <thead>
-                                <tr className="border-b border-slate-100 dark:border-white/5">
-                                    <th className="text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider px-5 py-3">Resource</th>
-                                    <th className="text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider px-5 py-3">Type</th>
-                                    <th className="text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider px-5 py-3">Quantity</th>
-                                    <th className="text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider px-5 py-3">Status</th>
-                                    <th className="text-left text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider px-5 py-3">Priority</th>
+                                <tr className="bg-slate-50 dark:bg-white/[0.02] border-b border-slate-200 dark:border-white/5">
+                                    <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Resource</th>
+                                    <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Category</th>
+                                    <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider text-right">Total</th>
+                                    <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider text-right">Reserved</th>
+                                    <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider text-right">Available</th>
+                                    <th className="px-5 py-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Status</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-white/5">
-                                {filtered.map((r: any) => {
-                                    const st = STATUS_CONFIG[r.status] || { label: r.status || 'Unknown', color: 'text-slate-500 bg-slate-50 dark:bg-slate-800 ring-slate-500/20' }
+                                {filtered.map((item: any) => {
+                                    const available = item.available_quantity || 0
+                                    const total = item.total_quantity || 0
+                                    const pct = total > 0 ? (available / total) * 100 : 0
+                                    const isLow = item.is_low_stock
                                     return (
-                                        <tr key={r.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
-                                            <td className="px-5 py-3.5">
-                                                <p className="text-sm font-medium text-slate-900 dark:text-white">{r.name || r.resource_type || 'Unnamed'}</p>
-                                                {r.description && <p className="text-xs text-slate-400 mt-0.5 truncate max-w-xs">{r.description}</p>}
+                                        <tr key={item.resource_id || item.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
+                                            <td className="px-5 py-3">
+                                                <div className="flex items-center gap-3">
+                                                    {isLow && <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 animate-pulse" />}
+                                                    <div>
+                                                        <p className="text-sm font-medium text-slate-900 dark:text-white">{item.title || item.resource_type}</p>
+                                                        {item.description && <p className="text-[10px] text-slate-400 line-clamp-1">{item.description}</p>}
+                                                    </div>
+                                                </div>
                                             </td>
-                                            <td className="px-5 py-3.5 text-sm text-slate-600 dark:text-slate-400 capitalize">{r.type || r.resource_type || '—'}</td>
-                                            <td className="px-5 py-3.5 text-sm font-semibold text-slate-900 dark:text-white">{r.quantity ?? '—'}</td>
-                                            <td className="px-5 py-3.5">
-                                                <span className={cn('text-[10px] px-2 py-0.5 rounded-full font-semibold ring-1 ring-inset', st.color)}>
-                                                    {st.label}
+                                            <td className="px-5 py-3">
+                                                <span className="text-xs font-medium text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">
+                                                    {item.category}
                                                 </span>
                                             </td>
-                                            <td className="px-5 py-3.5 text-sm text-slate-600 dark:text-slate-400 capitalize">{r.priority || '—'}</td>
+                                            <td className="px-5 py-3 text-right">
+                                                <span className="text-sm font-semibold text-slate-900 dark:text-white">{total}</span>
+                                                <span className="text-[10px] text-slate-400 ml-0.5">{item.unit}</span>
+                                            </td>
+                                            <td className="px-5 py-3 text-right">
+                                                <span className="text-sm font-medium text-orange-600">{item.claimed_quantity || 0}</span>
+                                            </td>
+                                            <td className="px-5 py-3 text-right">
+                                                <span className={cn('text-sm font-bold', isLow ? 'text-red-600' : 'text-emerald-600')}>{available}</span>
+                                            </td>
+                                            <td className="px-5 py-3">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="w-16 h-1.5 bg-slate-100 dark:bg-white/5 rounded-full overflow-hidden">
+                                                        <div className={cn('h-full rounded-full transition-all', isLow ? 'bg-red-500' : 'bg-emerald-500')}
+                                                            style={{ width: `${pct}%` }} />
+                                                    </div>
+                                                    <span className={cn('text-[10px] font-bold', isLow ? 'text-red-500' : 'text-emerald-500')}>
+                                                        {isLow ? 'LOW' : 'OK'}
+                                                    </span>
+                                                </div>
+                                            </td>
                                         </tr>
                                     )
                                 })}
@@ -174,74 +234,81 @@ export default function NGOInventoryPage() {
             )}
 
             {/* Add Resource Modal */}
-            {showAddForm && <AddResourceModal onClose={() => setShowAddForm(false)} onSubmit={(data) => addMutation.mutate(data)} isLoading={addMutation.isPending} />}
-        </div>
-    )
-}
-
-function AddResourceModal({ onClose, onSubmit, isLoading }: { onClose: () => void; onSubmit: (data: any) => void; isLoading: boolean }) {
-    const [form, setForm] = useState({ name: '', resource_type: 'food', quantity: '', description: '', priority: 'medium' })
-
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault()
-        onSubmit({ ...form, quantity: parseInt(form.quantity) || 1 })
-    }
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-md p-6">
-                <div className="flex items-center justify-between mb-5">
-                    <h2 className="text-lg font-bold text-slate-900 dark:text-white">Add Resource</h2>
-                    <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5"><X className="w-4 h-4 text-slate-400" /></button>
+            {showAddModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+                        <div className="flex items-center justify-between mb-5">
+                            <h2 className="text-lg font-bold text-slate-900 dark:text-white">Add Resource</h2>
+                            <button onClick={() => setShowAddModal(false)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5">
+                                <X className="w-4 h-4 text-slate-400" />
+                            </button>
+                        </div>
+                        {addMutation.error && (
+                            <div className="mb-4 p-3 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 text-xs text-red-600">
+                                {(addMutation.error as Error).message}
+                            </div>
+                        )}
+                        <form onSubmit={e => { e.preventDefault(); addMutation.mutate() }} className="space-y-4">
+                            <div>
+                                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Category</label>
+                                <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}
+                                    className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
+                                    {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Resource Type</label>
+                                <input value={form.resource_type} onChange={e => setForm({ ...form, resource_type: e.target.value })}
+                                    placeholder="e.g. Rice, Blankets, First Aid Kit" required
+                                    className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Title</label>
+                                <input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })}
+                                    placeholder="e.g. 25kg Basmati Rice Bags" required
+                                    className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Description</label>
+                                <textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })}
+                                    rows={2} placeholder="Optional description..."
+                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none resize-none" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Quantity</label>
+                                    <input type="number" min="1" value={form.total_quantity}
+                                        onChange={e => setForm({ ...form, total_quantity: parseInt(e.target.value) || 1 })} required
+                                        className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+                                </div>
+                                <div>
+                                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Unit</label>
+                                    <select value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })}
+                                        className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
+                                        <option value="units">Units</option>
+                                        <option value="kg">Kilograms</option>
+                                        <option value="liters">Liters</option>
+                                        <option value="boxes">Boxes</option>
+                                        <option value="packs">Packs</option>
+                                        <option value="cartons">Cartons</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Warehouse Address</label>
+                                <input value={form.address_text} onChange={e => setForm({ ...form, address_text: e.target.value })}
+                                    placeholder="e.g. Warehouse #3, Mumbai"
+                                    className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+                            </div>
+                            <button type="submit" disabled={addMutation.isPending}
+                                className="w-full h-11 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold hover:from-emerald-600 hover:to-teal-700 disabled:opacity-50 flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20">
+                                {addMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                                {addMutation.isPending ? 'Adding...' : 'Add to Inventory'}
+                            </button>
+                        </form>
+                    </div>
                 </div>
-                <form onSubmit={handleSubmit} className="space-y-4">
-                    <div>
-                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 block">Name</label>
-                        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required
-                            className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div>
-                            <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 block">Type</label>
-                            <select value={form.resource_type} onChange={(e) => setForm({ ...form, resource_type: e.target.value })}
-                                className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                                <option value="food">Food</option>
-                                <option value="water">Water</option>
-                                <option value="medical">Medical</option>
-                                <option value="shelter">Shelter</option>
-                                <option value="clothing">Clothing</option>
-                                <option value="equipment">Equipment</option>
-                                <option value="other">Other</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 block">Quantity</label>
-                            <input type="number" min="1" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} required
-                                className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                        </div>
-                    </div>
-                    <div>
-                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 block">Priority</label>
-                        <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })}
-                            className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                            <option value="critical">Critical</option>
-                            <option value="high">High</option>
-                            <option value="medium">Medium</option>
-                            <option value="low">Low</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1 block">Description (optional)</label>
-                        <textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={2}
-                            className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none" />
-                    </div>
-                    <button type="submit" disabled={isLoading}
-                        className="w-full h-10 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2">
-                        {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                        {isLoading ? 'Adding...' : 'Add Resource'}
-                    </button>
-                </form>
-            </div>
+            )}
         </div>
     )
 }
