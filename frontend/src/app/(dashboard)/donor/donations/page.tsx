@@ -14,8 +14,12 @@ import { cn } from '@/lib/utils'
 interface DonationRecord {
     id: string
     disaster_id: string
+    request_id: string
     disaster_title: string
     disaster_type: string
+    resource_type: string
+    description: string
+    victim_name: string
     amount: number
     status: 'completed' | 'pending' | 'failed' | 'refunded'
     created_at: string
@@ -26,12 +30,17 @@ export default function DonorDonationsPage() {
     const queryClient = useQueryClient()
     const [search, setSearch] = useState('')
     const [statusFilter, setStatusFilter] = useState<string>('all')
+    const [page, setPage] = useState(1)
+    const pageSize = 20
 
-    // Fetch donations from backend API
-    const { data: donations = [], isLoading } = useQuery<DonationRecord[]>({
-        queryKey: ['donor-donations'],
-        queryFn: () => api.getDonations(),
+    // Fetch donations from backend API (paginated)
+    const { data: donationsResp, isLoading } = useQuery<{ donations: DonationRecord[]; total: number; page: number; page_size: number }>({
+        queryKey: ['donor-donations', page],
+        queryFn: () => api.getDonations({ page, page_size: pageSize }),
     })
+    const donations = donationsResp?.donations ?? (Array.isArray(donationsResp) ? donationsResp as unknown as DonationRecord[] : [])
+    const totalDonations = donationsResp?.total ?? donations.length
+    const totalPages = Math.max(1, Math.ceil(totalDonations / pageSize))
 
     // Update donation (mark completed)
     const updateMutation = useMutation({
@@ -65,7 +74,10 @@ export default function DonorDonationsPage() {
 
     const filtered = useMemo(() => {
         return donations.filter(d => {
-            const matchSearch = !search || (d.disaster_title || '').toLowerCase().includes(search.toLowerCase())
+            const matchSearch = !search ||
+                (d.disaster_title || '').toLowerCase().includes(search.toLowerCase()) ||
+                (d.victim_name || '').toLowerCase().includes(search.toLowerCase()) ||
+                (d.resource_type || '').toLowerCase().includes(search.toLowerCase())
             const matchStatus = statusFilter === 'all' || d.status === statusFilter
             return matchSearch && matchStatus
         })
@@ -190,7 +202,7 @@ export default function DonorDonationsPage() {
                 <table className="w-full text-sm">
                     <thead>
                         <tr className="border-b border-slate-100 dark:border-white/5">
-                            <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Disaster</th>
+                            <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Cause / Resource</th>
                             <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Type</th>
                             <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Amount</th>
                             <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Status</th>
@@ -201,8 +213,21 @@ export default function DonorDonationsPage() {
                     <tbody>
                         {filtered.map(d => (
                             <tr key={d.id} className="border-b border-slate-50 dark:border-white/5 hover:bg-slate-50 dark:hover:bg-white/[0.02]">
-                                <td className="px-5 py-3 font-medium text-slate-900 dark:text-white">{d.disaster_title}</td>
-                                <td className="px-5 py-3 text-slate-500 capitalize">{d.disaster_type}</td>
+                                <td className="px-5 py-3">
+                                    <p className="font-medium text-slate-900 dark:text-white">{d.disaster_title}</p>
+                                    {(d as any).victim_name && (
+                                        <p className="text-[11px] text-slate-400 mt-0.5">For: {(d as any).victim_name}</p>
+                                    )}
+                                </td>
+                                <td className="px-5 py-3">
+                                    <span className={cn('inline-flex px-2 py-0.5 rounded-md text-[10px] font-semibold capitalize',
+                                        d.disaster_type === 'pledge'
+                                            ? 'bg-pink-100 text-pink-700 dark:bg-pink-500/10 dark:text-pink-400'
+                                            : 'bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400'
+                                    )}>
+                                        {d.disaster_type}
+                                    </span>
+                                </td>
                                 <td className="px-5 py-3 text-slate-900 dark:text-white font-semibold">
                                     {d.amount > 0 ? `$${d.amount.toLocaleString()}` : '—'}
                                 </td>
@@ -249,6 +274,34 @@ export default function DonorDonationsPage() {
                     </div>
                 )}
             </div>
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Showing {(page - 1) * pageSize + 1}\u2013{Math.min(page * pageSize, totalDonations)} of {totalDonations} donations
+                    </p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            disabled={page <= 1}
+                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            className="h-9 px-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium disabled:opacity-40 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
+                        >
+                            Previous
+                        </button>
+                        <span className="text-sm text-slate-600 dark:text-slate-300 px-2">
+                            Page {page} of {totalPages}
+                        </span>
+                        <button
+                            disabled={page >= totalPages}
+                            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                            className="h-9 px-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium disabled:opacity-40 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* Amount Modal */}
             {amountModal && (

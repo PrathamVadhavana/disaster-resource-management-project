@@ -25,6 +25,7 @@ export function SubmitAvailabilityModal({ request, onClose }: Props) {
         notes: '',
     })
     const [gpsStatus, setGpsStatus] = useState<'detecting' | 'success' | 'error' | 'manual'>('detecting')
+    const [gpsError, setGpsError] = useState('')
     const [submitted, setSubmitted] = useState(false)
 
     // Auto-detect GPS
@@ -39,11 +40,21 @@ export function SubmitAvailabilityModal({ request, onClose }: Props) {
                     }))
                     setGpsStatus('success')
                 },
-                () => setGpsStatus('manual'),
+                (err) => {
+                    setGpsStatus('manual')
+                    if (err.code === 1) {
+                        setGpsError('Location permission denied. Please allow location access or enter coordinates manually.')
+                    } else if (err.code === 2) {
+                        setGpsError('Location unavailable. If using HTTP (not HTTPS), GPS may be blocked by the browser. Enter coordinates manually.')
+                    } else {
+                        setGpsError('Location detection timed out. Please enter coordinates manually.')
+                    }
+                },
                 { enableHighAccuracy: true, timeout: 10000 }
             )
         } else {
             setGpsStatus('manual')
+            setGpsError('Geolocation is not supported by this browser. Please enter coordinates manually.')
         }
     }, [])
 
@@ -161,7 +172,15 @@ export function SubmitAvailabilityModal({ request, onClose }: Props) {
                                     <Loader2 className="w-2.5 h-2.5 animate-spin" /> Detecting...
                                 </span>
                             )}
+                            {gpsStatus === 'manual' && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 dark:bg-red-500/10 text-red-500 font-medium">Manual entry</span>
+                            )}
                         </label>
+                        {gpsError && (
+                            <p className="text-[11px] text-amber-600 dark:text-amber-400 mb-2 bg-amber-50 dark:bg-amber-500/10 rounded-lg px-3 py-2">
+                                {gpsError}
+                            </p>
+                        )}
                         <div className="grid grid-cols-2 gap-3">
                             <input type="number" step="any" value={form.ngo_latitude || ''}
                                 onChange={(e) => setForm({ ...form, ngo_latitude: parseFloat(e.target.value) || 0 })}

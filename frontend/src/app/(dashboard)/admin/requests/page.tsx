@@ -8,15 +8,20 @@ import {
     Loader2, Search, Filter, CheckCircle2, XCircle, Clock,
     ChevronLeft, ChevronRight, AlertTriangle, Package, User,
     Eye, ThumbsUp, ThumbsDown, RefreshCw, ArrowUpDown,
-    Calendar, Inbox, TrendingUp, X, Send, MessageSquare
+    Calendar, Inbox, TrendingUp, X, Send, MessageSquare,
+    Truck, FileCheck, Archive
 } from 'lucide-react'
 
 const STATUS_COLORS: Record<string, { bg: string; text: string; ring: string; icon: any }> = {
     pending: { bg: 'bg-amber-500/10', text: 'text-amber-600 dark:text-amber-400', ring: 'ring-amber-500/20', icon: Clock },
     approved: { bg: 'bg-green-500/10', text: 'text-green-600 dark:text-green-400', ring: 'ring-green-500/20', icon: CheckCircle2 },
+    availability_submitted: { bg: 'bg-cyan-500/10', text: 'text-cyan-600 dark:text-cyan-400', ring: 'ring-cyan-500/20', icon: FileCheck },
+    under_review: { bg: 'bg-indigo-500/10', text: 'text-indigo-600 dark:text-indigo-400', ring: 'ring-indigo-500/20', icon: Eye },
     assigned: { bg: 'bg-blue-500/10', text: 'text-blue-600 dark:text-blue-400', ring: 'ring-blue-500/20', icon: User },
     in_progress: { bg: 'bg-purple-500/10', text: 'text-purple-600 dark:text-purple-400', ring: 'ring-purple-500/20', icon: TrendingUp },
+    delivered: { bg: 'bg-teal-500/10', text: 'text-teal-600 dark:text-teal-400', ring: 'ring-teal-500/20', icon: Truck },
     completed: { bg: 'bg-emerald-500/10', text: 'text-emerald-600 dark:text-emerald-400', ring: 'ring-emerald-500/20', icon: CheckCircle2 },
+    closed: { bg: 'bg-slate-500/10', text: 'text-slate-600 dark:text-slate-400', ring: 'ring-slate-500/20', icon: Archive },
     rejected: { bg: 'bg-red-500/10', text: 'text-red-600 dark:text-red-400', ring: 'ring-red-500/20', icon: XCircle },
 }
 
@@ -33,7 +38,7 @@ function StatusBadge({ status }: { status: string }) {
     return (
         <span className={cn('inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold ring-1 ring-inset capitalize', s.bg, s.text, s.ring)}>
             <Icon className="w-3 h-3" />
-            {status.replace('_', ' ')}
+            {status.replace(/_/g, ' ')}
         </span>
     )
 }
@@ -49,9 +54,13 @@ function PriorityBadge({ priority }: { priority: string }) {
 const AUDIT_COLORS: Record<string, string> = {
     status_changed_to_approved: 'bg-green-500',
     status_changed_to_rejected: 'bg-red-500',
+    status_changed_to_availability_submitted: 'bg-cyan-500',
+    status_changed_to_under_review: 'bg-indigo-500',
     status_changed_to_assigned: 'bg-blue-500',
     status_changed_to_in_progress: 'bg-purple-500',
+    status_changed_to_delivered: 'bg-teal-500',
     status_changed_to_completed: 'bg-emerald-500',
+    status_changed_to_closed: 'bg-slate-500',
     status_changed_to_pending: 'bg-amber-500',
 }
 
@@ -90,6 +99,91 @@ function AuditTrailTimeline({ requestId }: { requestId: string }) {
                         </div>
                     )
                 })}
+            </div>
+        </div>
+    )
+}
+
+function NgoSubmissionsPanel({ requestId, status, onAssign }: { requestId: string; status: string; onAssign: (ngoId: string) => void }) {
+    const { data, isLoading } = useQuery({
+        queryKey: ['ngo-submissions', requestId],
+        queryFn: () => api.getRequestNgoSubmissions(requestId),
+        enabled: !!requestId,
+    })
+    const submissions = data?.submissions || []
+    if (isLoading) return null
+    if (submissions.length === 0) return null
+
+    const ROLE_BADGE: Record<string, string> = {
+        ngo: 'bg-cyan-100 dark:bg-cyan-500/10 text-cyan-700 dark:text-cyan-400 ring-cyan-500/20',
+        donor: 'bg-pink-100 dark:bg-pink-500/10 text-pink-700 dark:text-pink-400 ring-pink-500/20',
+    }
+
+    return (
+        <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+                Submissions ({submissions.length})
+            </p>
+            <div className="space-y-2">
+                {submissions.map((s: any) => (
+                    <div key={s.id} className={cn(
+                        'rounded-xl border p-4 space-y-2',
+                        s.role === 'donor'
+                            ? 'border-pink-200 dark:border-pink-500/20 bg-pink-50 dark:bg-pink-500/5'
+                            : 'border-cyan-200 dark:border-cyan-500/20 bg-cyan-50 dark:bg-cyan-500/5'
+                    )}>
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <div>
+                                    <p className="text-sm font-semibold text-slate-900 dark:text-white">{s.ngo_name}</p>
+                                    {s.ngo_email && <p className="text-[11px] text-slate-500">{s.ngo_email}</p>}
+                                </div>
+                                <span className={cn('text-[10px] px-2 py-0.5 rounded-full font-semibold ring-1 ring-inset uppercase',
+                                    ROLE_BADGE[s.role] || ROLE_BADGE.ngo)}>
+                                    {s.role || 'ngo'}
+                                </span>
+                            </div>
+                            {(status === 'availability_submitted' || status === 'under_review') && (
+                                <button
+                                    onClick={() => onAssign(s.ngo_id)}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:opacity-90 shadow-sm"
+                                >
+                                    Assign
+                                </button>
+                            )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                            {s.metadata?.available_quantity && (
+                                <div>
+                                    <span className="text-slate-400">Quantity: </span>
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{s.metadata.available_quantity}</span>
+                                </div>
+                            )}
+                            {s.metadata?.estimated_delivery_time && (
+                                <div>
+                                    <span className="text-slate-400">ETA: </span>
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{new Date(s.metadata.estimated_delivery_time).toLocaleString()}</span>
+                                </div>
+                            )}
+                            {s.metadata?.vehicle_type && (
+                                <div>
+                                    <span className="text-slate-400">Vehicle: </span>
+                                    <span className="text-slate-700 dark:text-slate-300">{s.metadata.vehicle_type}</span>
+                                </div>
+                            )}
+                            {s.metadata?.distance_km !== null && s.metadata?.distance_km !== undefined && (
+                                <div>
+                                    <span className="text-slate-400">Distance: </span>
+                                    <span className="text-slate-700 dark:text-slate-300">{s.metadata.distance_km} km</span>
+                                </div>
+                            )}
+                        </div>
+                        {s.metadata?.notes && (
+                            <p className="text-xs text-slate-500 italic">{s.metadata.notes}</p>
+                        )}
+                        <p className="text-[10px] text-slate-400">Submitted: {new Date(s.submitted_at).toLocaleString()}</p>
+                    </div>
+                ))}
             </div>
         </div>
     )
@@ -182,8 +276,8 @@ export default function AdminRequestsPage() {
             </div>
 
             {/* Status Overview Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                {['pending', 'approved', 'assigned', 'in_progress', 'completed', 'rejected'].map((s) => {
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                {['pending', 'approved', 'availability_submitted', 'assigned', 'in_progress', 'delivered', 'completed', 'rejected'].map((s) => {
                     const sc = STATUS_COLORS[s]
                     const Icon = sc?.icon || Clock
                     const count = statusCounts[s] || 0
@@ -343,6 +437,24 @@ export default function AdminRequestsPage() {
                                                             </button>
                                                         </>
                                                     )}
+                                                    {req.status === 'availability_submitted' && (
+                                                        <>
+                                                            <button
+                                                                onClick={() => setActionModal({ type: 'approve', requestId: req.id })}
+                                                                className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-cyan-100 dark:bg-cyan-500/10 text-cyan-600 hover:opacity-80 transition-opacity"
+                                                                title="Assign to NGO"
+                                                            >
+                                                                Assign NGO
+                                                            </button>
+                                                            <button
+                                                                onClick={() => statusMutation.mutate({ requestId: req.id, data: { status: 'approved' } })}
+                                                                className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-amber-100 dark:bg-amber-500/10 text-amber-600 hover:opacity-80 transition-opacity"
+                                                                title="Revert to approved"
+                                                            >
+                                                                Revert
+                                                            </button>
+                                                        </>
+                                                    )}
                                                     {req.status === 'approved' && (
                                                         <button
                                                             onClick={() => statusMutation.mutate({ requestId: req.id, data: { status: 'in_progress' } })}
@@ -483,6 +595,14 @@ export default function AdminRequestsPage() {
                                 </div>
                             )}
 
+                            {/* NGO Availability Submissions */}
+                            <NgoSubmissionsPanel requestId={selectedRequest.id} status={selectedRequest.status} onAssign={(ngoId: string) => {
+                                actionMutation.mutate({
+                                    requestId: selectedRequest.id,
+                                    data: { action: 'approve', assigned_to: ngoId }
+                                })
+                            }} />
+
                             {/* Audit Trail / Timeline */}
                             <AuditTrailTimeline requestId={selectedRequest.id} />
 
@@ -509,6 +629,24 @@ export default function AdminRequestsPage() {
                                     >
                                         <XCircle className="w-4 h-4" />
                                         Reject
+                                    </button>
+                                </div>
+                            )}
+                            {selectedRequest.status === 'availability_submitted' && (
+                                <div className="flex gap-3 pt-2">
+                                    <button
+                                        onClick={() => setActionModal({ type: 'approve', requestId: selectedRequest.id })}
+                                        className="flex-1 flex items-center justify-center gap-2 h-11 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-medium text-sm hover:opacity-90 shadow-lg shadow-cyan-600/20"
+                                    >
+                                        <CheckCircle2 className="w-4 h-4" />
+                                        Assign to NGO
+                                    </button>
+                                    <button
+                                        onClick={() => statusMutation.mutate({ requestId: selectedRequest.id, data: { status: 'approved' } })}
+                                        className="flex-1 flex items-center justify-center gap-2 h-11 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 font-medium text-sm hover:bg-slate-50 dark:hover:bg-white/5"
+                                    >
+                                        <X className="w-4 h-4" />
+                                        Revert to Approved
                                     </button>
                                 </div>
                             )}

@@ -30,13 +30,29 @@ export default function NGOApprovedRequestsPage() {
     const [priorityFilter, setPriorityFilter] = useState('')
     const [selectedRequest, setSelectedRequest] = useState<any>(null)
     const [showAvailabilityModal, setShowAvailabilityModal] = useState<any>(null)
+    const [sortBy, setSortBy] = useState<'priority' | 'distance'>('priority')
+    const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null)
+    const [gpsStatus, setGpsStatus] = useState<'detecting' | 'ready' | 'denied' | 'unavailable'>('detecting')
+
+    // Auto-detect GPS
+    useEffect(() => {
+        if (!navigator.geolocation) { setGpsStatus('unavailable'); return }
+        navigator.geolocation.getCurrentPosition(
+            pos => { setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setGpsStatus('ready') },
+            err => { setGpsStatus(err.code === 1 ? 'denied' : 'unavailable') },
+            { enableHighAccuracy: true, timeout: 10000 }
+        )
+    }, [])
 
     const { data, isLoading, refetch } = useQuery({
-        queryKey: ['ngo-fulfillment', page, priorityFilter],
+        queryKey: ['ngo-fulfillment', page, priorityFilter, sortBy, gps?.lat, gps?.lng],
         queryFn: () => api.getNgoAvailableRequests({
             limit: 20,
             offset: (page - 1) * 20,
             priority: priorityFilter || undefined,
+            ngo_latitude: gps?.lat,
+            ngo_longitude: gps?.lng,
+            sort: sortBy,
         }),
     })
 
@@ -110,6 +126,28 @@ export default function NGOApprovedRequestsPage() {
                         </button>
                     ))}
                 </div>
+            </div>
+
+            {/* Sort + GPS */}
+            <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs font-medium text-slate-500">Sort:</span>
+                {(['priority', 'distance'] as const).map(s => (
+                    <button key={s} onClick={() => setSortBy(s)} disabled={s === 'distance' && !gps}
+                        className={cn('px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
+                            sortBy === s ? 'bg-cyan-600 text-white border-cyan-600' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-white/5',
+                            s === 'distance' && !gps && 'opacity-40 cursor-not-allowed'
+                        )}>
+                        {s === 'priority' ? 'By Priority' : 'By Distance'}
+                    </button>
+                ))}
+                <span className={cn('ml-auto text-[10px] font-medium px-2.5 py-1 rounded-full',
+                    gpsStatus === 'ready' ? 'bg-green-100 dark:bg-green-500/10 text-green-600' :
+                        gpsStatus === 'detecting' ? 'bg-amber-100 dark:bg-amber-500/10 text-amber-600' :
+                            'bg-red-100 dark:bg-red-500/10 text-red-500'
+                )}>
+                    <Navigation className="w-3 h-3 inline mr-1" />
+                    {gpsStatus === 'ready' ? 'GPS Ready' : gpsStatus === 'detecting' ? 'Detecting GPS…' : gpsStatus === 'denied' ? 'GPS Denied' : 'GPS Unavailable'}
+                </span>
             </div>
 
             {/* Results Count */}

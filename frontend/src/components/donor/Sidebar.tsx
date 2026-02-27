@@ -36,6 +36,21 @@ export function DonorSidebar() {
         return pathname?.startsWith(href) ?? false
     }
 
+    if (!mounted) {
+        return (
+            <>
+                <div className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 bg-white/80 dark:bg-slate-950/90 backdrop-blur-xl border-b border-slate-200 dark:border-white/5" />
+                <aside className={cn(
+                    'fixed top-0 left-0 z-50 h-screen flex flex-col',
+                    'bg-white/95 dark:bg-slate-950/95 backdrop-blur-2xl border-r border-slate-200 dark:border-white/5',
+                    'lg:translate-x-0 lg:relative lg:z-auto',
+                    '-translate-x-full w-72',
+                    'lg:w-72'
+                )} />
+            </>
+        )
+    }
+
     return (
         <>
             <div className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 bg-white/80 dark:bg-slate-950/90 backdrop-blur-xl border-b border-slate-200 dark:border-white/5 flex items-center px-4 gap-3">

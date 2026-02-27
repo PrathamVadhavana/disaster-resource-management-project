@@ -195,7 +195,7 @@ export const api = {
         apiFetch(`/api/volunteer/ops/${opId}/check-out`, { method: 'POST', body: JSON.stringify(data) }),
 
     // ━━ Donor ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    getDonations: (params?: { status?: string; limit?: number }) =>
+    getDonations: (params?: { status?: string; page?: number; page_size?: number }) =>
         apiFetch(`/api/donor/donations${qs(params)}`),
 
     getDonationReceipt: (id: string) =>
@@ -225,6 +225,9 @@ export const api = {
     getUrgentNeeds: () =>
         apiFetch('/api/resources?status=critical&limit=20'),
 
+    getDonorApprovedRequests: (params?: { resource_type?: string; priority?: string; search?: string; donor_latitude?: number; donor_longitude?: number; sort?: string; page?: number; page_size?: number }) =>
+        apiFetch(`/api/donor/approved-requests${qs(params)}`),
+
     // ━━ Admin – Requests ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getAdminRequests: (params?: { status?: string; priority?: string; resource_type?: string; search?: string; page?: number; page_size?: number }) =>
         apiFetch(`/api/admin/requests${qs(params)}`),
@@ -240,6 +243,9 @@ export const api = {
 
     getRequestAuditTrail: (requestId: string) =>
         apiFetch(`/api/admin/requests/${requestId}/audit-trail`),
+
+    getRequestNgoSubmissions: (requestId: string) =>
+        apiFetch(`/api/admin/requests/${requestId}/ngo-submissions`),
 
     getAdminAvailableResources: (params?: { category?: string; status?: string; search?: string; page?: number; page_size?: number }) =>
         apiFetch(`/api/admin/available-resources${qs(params)}`),
@@ -257,7 +263,7 @@ export const api = {
     getNGORequests: (params?: { status?: string; priority?: string; page?: number; page_size?: number }) =>
         apiFetch(`/api/victim/requests${qs(params)}`),
 
-    getNgoAvailableRequests: (params?: { resource_type?: string; priority?: string; limit?: number; offset?: number }) =>
+    getNgoAvailableRequests: (params?: { resource_type?: string; priority?: string; ngo_latitude?: number; ngo_longitude?: number; sort?: string; limit?: number; offset?: number }) =>
         apiFetch(`/api/ngo/requests/available${qs(params)}`),
 
     getNgoAssignedRequests: (params?: { status?: string; limit?: number; offset?: number }) =>

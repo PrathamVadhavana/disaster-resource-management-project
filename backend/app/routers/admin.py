@@ -660,12 +660,38 @@ async def approve_reject_request(
         }
 
         if body.action == "approve":
-            if current_status not in ("pending", "rejected"):
+            if current_status not in (
+                "pending",
+                "rejected",
+                "availability_submitted",
+                "under_review",
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot approve request with status '{current_status}'. Only pending or rejected requests can be approved.",
+                    detail=f"Cannot approve request with status '{current_status}'. Only pending, rejected, or availability_submitted requests can be approved.",
                 )
-            update_fields["status"] = "approved"
+            # If NGO submitted availability, approve means assign to that NGO
+            if current_status in ("availability_submitted", "under_review"):
+                update_fields["status"] = "assigned"
+                update_fields["assigned_role"] = "ngo"
+                # Find the NGO that submitted availability
+                if body.assigned_to:
+                    update_fields["assigned_to"] = body.assigned_to
+                else:
+                    # Auto-assign to the first NGO that submitted availability
+                    ngo_pulse = (
+                        supabase_admin.table("operational_pulse")
+                        .select("actor_id")
+                        .eq("target_id", request_id)
+                        .eq("action_type", "ngo_availability_submitted")
+                        .order("created_at", desc=False)
+                        .limit(1)
+                        .execute()
+                    )
+                    if ngo_pulse.data:
+                        update_fields["assigned_to"] = ngo_pulse.data[0]["actor_id"]
+            else:
+                update_fields["status"] = "approved"
             update_fields["rejection_reason"] = None  # Clear any previous rejection
             if body.assigned_to:
                 update_fields["assigned_to"] = body.assigned_to
@@ -741,9 +767,13 @@ async def update_request_status(
     valid_statuses = [
         "pending",
         "approved",
+        "availability_submitted",
+        "under_review",
         "assigned",
         "in_progress",
+        "delivered",
         "completed",
+        "closed",
         "rejected",
     ]
     if new_status not in valid_statuses:
@@ -932,6 +962,103 @@ async def get_audit_trail(
     """Get the audit trail for a specific request. Admin only."""
     trail = await get_request_audit_trail(request_id)
     return {"audit_trail": trail}
+
+
+@router.get("/requests/{request_id}/ngo-submissions")
+async def get_ngo_submissions(
+    request_id: str,
+    admin=Depends(require_admin),
+):
+    """Get all fulfillment submissions (NGO + Donor) for a request.
+    NGO submissions are prioritised over donor at same distance. Admin only."""
+    try:
+        # Fetch NGO availability submissions from operational_pulse
+        ngo_resp = (
+            supabase_admin.table("operational_pulse")
+            .select("*")
+            .eq("target_id", request_id)
+            .eq("action_type", "ngo_availability_submitted")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        ngo_submissions = ngo_resp.data or []
+
+        # Fetch donor pledge submissions from operational_pulse
+        donor_resp = (
+            supabase_admin.table("operational_pulse")
+            .select("*")
+            .eq("target_id", request_id)
+            .eq("action_type", "donor_pledge_submitted")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        donor_submissions = donor_resp.data or []
+
+        # Gather all user IDs for enrichment
+        all_ids = list(
+            set(
+                [s.get("actor_id") for s in ngo_submissions if s.get("actor_id")]
+                + [s.get("actor_id") for s in donor_submissions if s.get("actor_id")]
+            )
+        )
+        user_map = {}
+        if all_ids:
+            users_resp = (
+                supabase_admin.table("users")
+                .select("id, full_name, email, phone, role, metadata")
+                .in_("id", all_ids)
+                .execute()
+            )
+            for u in users_resp.data or []:
+                user_map[u["id"]] = u
+
+        enriched = []
+        for s in ngo_submissions:
+            user = user_map.get(s.get("actor_id"), {})
+            meta = s.get("metadata") or {}
+            enriched.append(
+                {
+                    "id": s.get("id"),
+                    "ngo_id": s.get("actor_id"),
+                    "ngo_name": user.get("full_name") or "Unknown NGO",
+                    "ngo_email": user.get("email") or "",
+                    "role": "ngo",
+                    "submitted_at": s.get("created_at"),
+                    "metadata": meta,
+                    "distance_km": meta.get("distance_km"),
+                    "sort_priority": 0,  # NGO gets priority
+                }
+            )
+        for s in donor_submissions:
+            user = user_map.get(s.get("actor_id"), {})
+            meta = s.get("metadata") or {}
+            enriched.append(
+                {
+                    "id": s.get("id"),
+                    "ngo_id": s.get("actor_id"),
+                    "ngo_name": user.get("full_name") or "Unknown Donor",
+                    "ngo_email": user.get("email") or "",
+                    "role": "donor",
+                    "submitted_at": s.get("created_at"),
+                    "metadata": meta,
+                    "distance_km": meta.get("distance_km"),
+                    "sort_priority": 1,  # Donor gets lower priority
+                }
+            )
+
+        # Sort: by distance ascending, then by role priority (NGO first at same distance)
+        enriched.sort(
+            key=lambda x: (
+                x["distance_km"] if x["distance_km"] is not None else float("inf"),
+                x["sort_priority"],
+            )
+        )
+
+        return {"submissions": enriched, "total": len(enriched)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching submissions: {str(e)}"
+        )
 
 
 # ── Analytics Data ────────────────────────────────────────────────────────

@@ -91,6 +91,29 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
     const [locating, setLocating] = useState(false)
     const [error, setError] = useState('')
 
+    // Auto-detect GPS on form load (only for new requests without existing location)
+    useEffect(() => {
+        if (!isEdit && latitude === null && longitude === null && navigator.geolocation) {
+            setLocating(true)
+            navigator.geolocation.getCurrentPosition(
+                async (pos) => {
+                    setLatitude(pos.coords.latitude)
+                    setLongitude(pos.coords.longitude)
+                    try {
+                        const res = await fetch(
+                            `https://nominatim.openstreetmap.org/reverse?lat=${pos.coords.latitude}&lon=${pos.coords.longitude}&format=json`
+                        )
+                        const data = await res.json()
+                        if (data.display_name) setAddressText(data.display_name)
+                    } catch { /* ignore */ }
+                    setLocating(false)
+                },
+                () => setLocating(false),
+                { enableHighAccuracy: true, timeout: 10000 }
+            )
+        }
+    }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
     // Add / remove items
     const addItem = useCallback(() => {
         setItems((prev) => [...prev, { id: generateId(), resource_type: '', quantity: 1, custom_name: '' }])

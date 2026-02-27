@@ -25,6 +25,7 @@ security = HTTPBearer()
 
 # ── GPS Utility ───────────────────────────────────────────────────────────────
 
+
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate great-circle distance between two GPS points in km."""
     R = 6371.0
@@ -38,8 +39,15 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # ── Status Flow ───────────────────────────────────────────────────────────────
 
 STATUS_ORDER = [
-    "pending", "approved", "availability_submitted", "under_review",
-    "assigned", "in_progress", "delivered", "completed", "closed",
+    "pending",
+    "approved",
+    "availability_submitted",
+    "under_review",
+    "assigned",
+    "in_progress",
+    "delivered",
+    "completed",
+    "closed",
 ]
 
 VALID_TRANSITIONS = {}
@@ -49,6 +57,7 @@ for i, s in enumerate(STATUS_ORDER):
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
+
 
 class ClaimRequestBody(BaseModel):
     estimated_delivery: Optional[str] = Field(
@@ -99,30 +108,43 @@ class InventoryItem(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _log_pulse(actor_id: str, target_id: str, action_type: str, description: str, metadata: dict = None):
+
+def _log_pulse(
+    actor_id: str,
+    target_id: str,
+    action_type: str,
+    description: str,
+    metadata: dict = None,
+):
     """Write to operational_pulse for audit trail."""
     try:
-        supabase_admin.table("operational_pulse").insert({
-            "actor_id": actor_id,
-            "target_id": target_id,
-            "action_type": action_type,
-            "description": description,
-            "metadata": metadata or {},
-        }).execute()
+        supabase_admin.table("operational_pulse").insert(
+            {
+                "actor_id": actor_id,
+                "target_id": target_id,
+                "action_type": action_type,
+                "description": description,
+                "metadata": metadata or {},
+            }
+        ).execute()
     except Exception as e:
         print(f"Pulse log error: {e}")
 
 
-def _send_notification(user_id: str, title: str, message: str, priority: str = "medium", data: dict = None):
+def _send_notification(
+    user_id: str, title: str, message: str, priority: str = "medium", data: dict = None
+):
     """Insert into the notifications table."""
     try:
-        supabase_admin.table("notifications").insert({
-            "user_id": user_id,
-            "title": title,
-            "message": message,
-            "priority": priority,
-            "data": data or {},
-        }).execute()
+        supabase_admin.table("notifications").insert(
+            {
+                "user_id": user_id,
+                "title": title,
+                "message": message,
+                "priority": priority,
+                "data": data or {},
+            }
+        ).execute()
     except Exception as e:
         print(f"Notification insert error: {e}")
 
@@ -152,6 +174,7 @@ def _enrich_with_victim(requests_list: list) -> list:
 
 # ================ AVAILABLE REQUESTS ================
 
+
 @router.get("/requests/available")
 async def list_available_requests(
     ngo=Depends(require_ngo),
@@ -159,19 +182,73 @@ async def list_available_requests(
     priority: Optional[str] = Query(
         None, description="Filter by priority: critical,high,medium,low"
     ),
+    ngo_latitude: Optional[float] = Query(
+        None, description="NGO GPS latitude for distance"
+    ),
+    ngo_longitude: Optional[float] = Query(
+        None, description="NGO GPS longitude for distance"
+    ),
+    sort: Optional[str] = Query(
+        "priority", description="Sort: priority, distance, created_at"
+    ),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """List all approved requests that have not been assigned yet."""
-    query = (
-        supabase_admin.table("resource_requests")
-        .select("*", count="exact")
-        .eq("status", "approved")
-        .is_("assigned_to", "null")
-        .order("priority", desc=True)
-        .order("created_at", desc=True)
-        .range(offset, offset + limit - 1)
+    """List all approved requests that have not been assigned yet.
+    Supports live GPS params for distance compute and distance-based sorting."""
+
+    ngo_id = str(ngo.get("id"))
+
+    # Resolve NGO GPS: prefer query params, fall back to stored metadata
+    n_lat = ngo_latitude
+    n_lon = ngo_longitude
+    ngo_user = (
+        supabase_admin.table("users")
+        .select("metadata")
+        .eq("id", ngo_id)
+        .maybe_single()
+        .execute()
     )
+    if n_lat is None or n_lon is None:
+        if ngo_user.data and ngo_user.data.get("metadata"):
+            n_lat = n_lat or ngo_user.data["metadata"].get("latitude")
+            n_lon = n_lon or ngo_user.data["metadata"].get("longitude")
+
+    # Store live GPS in metadata if provided
+    if ngo_latitude and ngo_longitude:
+        try:
+            meta = (ngo_user.data or {}).get("metadata") or {}
+            meta["latitude"] = ngo_latitude
+            meta["longitude"] = ngo_longitude
+            supabase_admin.table("users").update({"metadata": meta}).eq(
+                "id", ngo_id
+            ).execute()
+        except Exception:
+            pass
+
+    # For distance sorting, we need ALL matching records first, then sort, then paginate
+    # For priority sorting, DB handles it directly
+    needs_client_sort = sort == "distance" and n_lat and n_lon
+
+    if needs_client_sort:
+        # Fetch all matching records (no pagination yet)
+        query = (
+            supabase_admin.table("resource_requests")
+            .select("*", count="exact")
+            .eq("status", "approved")
+            .is_("assigned_to", "null")
+        )
+    else:
+        query = (
+            supabase_admin.table("resource_requests")
+            .select("*", count="exact")
+            .eq("status", "approved")
+            .is_("assigned_to", "null")
+            .order("priority", desc=True)
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+        )
+
     if resource_type:
         query = query.eq("resource_type", resource_type)
     if priority:
@@ -179,40 +256,53 @@ async def list_available_requests(
 
     resp = query.execute()
     base_requests = resp.data or []
-
-    # Also fetch requests where NGO already submitted availability
-    ngo_id = str(ngo.get("id"))
+    total_count = resp.count or 0
 
     requests = _enrich_with_victim(base_requests)
 
-    # Compute distance from NGO if NGO has GPS in metadata
-    ngo_user = supabase_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().execute()
-    ngo_lat = None
-    ngo_lon = None
-    if ngo_user.data and ngo_user.data.get("metadata"):
-        ngo_lat = ngo_user.data["metadata"].get("latitude")
-        ngo_lon = ngo_user.data["metadata"].get("longitude")
-
+    # Compute distance for all records
     for r in requests:
         r["distance_km"] = None
-        if ngo_lat and ngo_lon and r.get("latitude") and r.get("longitude"):
-            r["distance_km"] = round(haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"]), 2)
+        if n_lat and n_lon and r.get("latitude") and r.get("longitude"):
+            r["distance_km"] = round(
+                haversine_km(n_lat, n_lon, r["latitude"], r["longitude"]), 2
+            )
 
-        # Check if this NGO already submitted availability
-        pulse_check = (
-            supabase_admin.table("operational_pulse")
-            .select("id")
-            .eq("actor_id", ngo_id)
-            .eq("target_id", r["id"])
-            .eq("action_type", "ngo_availability_submitted")
-            .execute()
+    # Batch check availability submissions (avoid N+1 queries)
+    req_ids = [r["id"] for r in requests]
+    submitted_set = set()
+    if req_ids:
+        try:
+            pulse_resp = (
+                supabase_admin.table("operational_pulse")
+                .select("target_id")
+                .eq("actor_id", ngo_id)
+                .eq("action_type", "ngo_availability_submitted")
+                .in_("target_id", req_ids)
+                .execute()
+            )
+            submitted_set = {p["target_id"] for p in (pulse_resp.data or [])}
+        except Exception:
+            pass
+
+    for r in requests:
+        r["availability_submitted"] = r["id"] in submitted_set
+
+    # Sort and paginate for distance mode
+    if needs_client_sort:
+        requests.sort(
+            key=lambda r: (
+                r["distance_km"] if r["distance_km"] is not None else float("inf")
+            )
         )
-        r["availability_submitted"] = len(pulse_check.data or []) > 0
+        # Apply pagination after sorting
+        requests = requests[offset : offset + limit]
 
-    return {"requests": requests, "total": resp.count or 0}
+    return {"requests": requests, "total": total_count}
 
 
 # ================ SUBMIT AVAILABILITY ================
+
 
 @router.post("/requests/{request_id}/availability")
 async def submit_availability(
@@ -238,7 +328,7 @@ async def submit_availability(
     if req_status not in ("approved", "availability_submitted"):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot submit availability for request in '{req_status}' status. Must be 'approved'."
+            detail=f"Cannot submit availability for request in '{req_status}' status. Must be 'approved'.",
         )
 
     if existing.data.get("assigned_to"):
@@ -254,14 +344,26 @@ async def submit_availability(
         .execute()
     )
     if dup.data and len(dup.data) > 0:
-        raise HTTPException(status_code=400, detail="You have already submitted availability for this request")
+        raise HTTPException(
+            status_code=400,
+            detail="You have already submitted availability for this request",
+        )
 
     # Compute distance
     distance_km = None
-    if body.ngo_latitude and body.ngo_longitude and existing.data.get("latitude") and existing.data.get("longitude"):
+    if (
+        body.ngo_latitude
+        and body.ngo_longitude
+        and existing.data.get("latitude")
+        and existing.data.get("longitude")
+    ):
         distance_km = round(
-            haversine_km(body.ngo_latitude, body.ngo_longitude,
-                         existing.data["latitude"], existing.data["longitude"]),
+            haversine_km(
+                body.ngo_latitude,
+                body.ngo_longitude,
+                existing.data["latitude"],
+                existing.data["longitude"],
+            ),
             2,
         )
 
@@ -286,31 +388,47 @@ async def submit_availability(
 
     # Update request status to availability_submitted (if still approved)
     if req_status == "approved":
-        supabase_admin.table("resource_requests").update({
-            "status": "availability_submitted",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", request_id).execute()
+        supabase_admin.table("resource_requests").update(
+            {
+                "status": "availability_submitted",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", request_id).execute()
 
     # Update NGO user metadata with GPS
     if body.ngo_latitude and body.ngo_longitude:
         try:
-            current = supabase_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().execute()
+            current = (
+                supabase_admin.table("users")
+                .select("metadata")
+                .eq("id", ngo_id)
+                .maybe_single()
+                .execute()
+            )
             meta = (current.data or {}).get("metadata") or {}
             meta["latitude"] = body.ngo_latitude
             meta["longitude"] = body.ngo_longitude
-            supabase_admin.table("users").update({"metadata": meta}).eq("id", ngo_id).execute()
+            supabase_admin.table("users").update({"metadata": meta}).eq(
+                "id", ngo_id
+            ).execute()
         except Exception:
             pass
 
     # Notify admins
-    admin_users = supabase_admin.table("users").select("id").eq("role", "admin").execute()
-    for admin in (admin_users.data or []):
+    admin_users = (
+        supabase_admin.table("users").select("id").eq("role", "admin").execute()
+    )
+    for admin in admin_users.data or []:
         _send_notification(
             user_id=admin["id"],
             title="NGO Availability Submitted",
             message=f"NGO submitted availability for request {request_id[:8]}... ({body.available_quantity} units)",
             priority="high",
-            data={"request_id": request_id, "ngo_id": ngo_id, "type": "ngo_availability"},
+            data={
+                "request_id": request_id,
+                "ngo_id": ngo_id,
+                "type": "ngo_availability",
+            },
         )
 
     return {
@@ -347,6 +465,7 @@ async def get_availability(
 
 # ================ ASSIGNED REQUESTS ================
 
+
 @router.get("/requests/assigned")
 async def list_assigned_requests(
     ngo=Depends(require_ngo),
@@ -381,12 +500,18 @@ async def list_assigned_requests(
         .execute()
     )
     status_counts = {}
-    for r in (all_assigned.data or []):
+    for r in all_assigned.data or []:
         s = r["status"]
         status_counts[s] = status_counts.get(s, 0) + 1
 
     # Enrich with distance and availability data
-    ngo_user = supabase_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().execute()
+    ngo_user = (
+        supabase_admin.table("users")
+        .select("metadata")
+        .eq("id", ngo_id)
+        .maybe_single()
+        .execute()
+    )
     ngo_lat = None
     ngo_lon = None
     if ngo_user.data and ngo_user.data.get("metadata"):
@@ -396,20 +521,29 @@ async def list_assigned_requests(
     for r in requests:
         r["distance_km"] = None
         if ngo_lat and ngo_lon and r.get("latitude") and r.get("longitude"):
-            r["distance_km"] = round(haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"]), 2)
+            r["distance_km"] = round(
+                haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"]), 2
+            )
 
         # Progress percentage
-        current_idx = STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 0
+        current_idx = (
+            STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 0
+        )
         assigned_idx = STATUS_ORDER.index("assigned")
         completed_idx = STATUS_ORDER.index("completed")
         total_steps = completed_idx - assigned_idx
         steps_done = max(0, current_idx - assigned_idx)
         r["progress_pct"] = min(100, round((steps_done / max(1, total_steps)) * 100))
 
-    return {"requests": requests, "total": resp.count or 0, "status_counts": status_counts}
+    return {
+        "requests": requests,
+        "total": resp.count or 0,
+        "status_counts": status_counts,
+    }
 
 
 # ================ CLAIM REQUEST ================
+
 
 @router.post("/requests/{request_id}/claim")
 async def claim_request(
@@ -458,14 +592,19 @@ async def claim_request(
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to claim request")
 
-    _log_pulse(ngo_id, request_id, "ngo_request_claimed",
-               f"NGO claimed request {request_id[:8]}...",
-               {"notes": body.notes, "estimated_delivery": body.estimated_delivery})
+    _log_pulse(
+        ngo_id,
+        request_id,
+        "ngo_request_claimed",
+        f"NGO claimed request {request_id[:8]}...",
+        {"notes": body.notes, "estimated_delivery": body.estimated_delivery},
+    )
 
     return resp.data[0]
 
 
 # ================ UPDATE DELIVERY STATUS ================
+
 
 @router.put("/requests/{request_id}/delivery")
 async def update_delivery_status(
@@ -493,7 +632,10 @@ async def update_delivery_status(
     current_status = existing.data.get("status")
 
     if current_status in ("completed", "closed"):
-        raise HTTPException(status_code=400, detail=f"Request is already '{current_status}' and cannot be updated")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Request is already '{current_status}' and cannot be updated",
+        )
 
     # Enforce strict status flow
     expected_next = VALID_TRANSITIONS.get(current_status)
@@ -518,11 +660,18 @@ async def update_delivery_status(
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update delivery status")
 
-    _log_pulse(ngo_id, request_id, f"status_change_{body.new_status}",
-               f"Status changed: {current_status} → {body.new_status}",
-               {"proof_url": body.proof_url, "notes": body.notes,
-                "delivery_latitude": body.delivery_latitude,
-                "delivery_longitude": body.delivery_longitude})
+    _log_pulse(
+        ngo_id,
+        request_id,
+        f"status_change_{body.new_status}",
+        f"Status changed: {current_status} → {body.new_status}",
+        {
+            "proof_url": body.proof_url,
+            "notes": body.notes,
+            "delivery_latitude": body.delivery_latitude,
+            "delivery_longitude": body.delivery_longitude,
+        },
+    )
 
     # Notify victim
     try:
@@ -542,6 +691,7 @@ async def update_delivery_status(
 
 
 # ================ LEGACY STATUS UPDATE (keep backward compat) ================
+
 
 @router.put("/requests/{request_id}/status")
 async def update_fulfillment_status(
@@ -584,9 +734,13 @@ async def update_fulfillment_status(
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update request status")
 
-    _log_pulse(ngo_id, request_id, f"status_change_{body.status}",
-               f"Status changed to {body.status}",
-               {"proof_url": body.proof_url, "notes": body.notes})
+    _log_pulse(
+        ngo_id,
+        request_id,
+        f"status_change_{body.status}",
+        f"Status changed to {body.status}",
+        {"proof_url": body.proof_url, "notes": body.notes},
+    )
 
     try:
         await notify_request_status_change(
@@ -605,6 +759,7 @@ async def update_fulfillment_status(
 
 
 # ================ ENHANCED DASHBOARD STATS ================
+
 
 @router.get("/dashboard-stats")
 async def get_ngo_dashboard_stats(
@@ -641,7 +796,13 @@ async def get_ngo_dashboard_stats(
     )
 
     # NGO coordinates for distance calculation
-    ngo_user = supabase_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().execute()
+    ngo_user = (
+        supabase_admin.table("users")
+        .select("metadata")
+        .eq("id", ngo_id)
+        .maybe_single()
+        .execute()
+    )
     ngo_lat = None
     ngo_lon = None
     if ngo_user.data and ngo_user.data.get("metadata"):
@@ -651,7 +812,9 @@ async def get_ngo_dashboard_stats(
     total_distance = 0.0
     for r in assigned_requests:
         if ngo_lat and ngo_lon and r.get("latitude") and r.get("longitude"):
-            total_distance += haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"])
+            total_distance += haversine_km(
+                ngo_lat, ngo_lon, r["latitude"], r["longitude"]
+            )
 
     # Compute average response time (approval to assignment)
     response_times = []
@@ -666,7 +829,11 @@ async def get_ngo_dashboard_stats(
             except Exception:
                 pass
 
-    avg_response_time = round(sum(response_times) / max(1, len(response_times)), 1) if response_times else 0
+    avg_response_time = (
+        round(sum(response_times) / max(1, len(response_times)), 1)
+        if response_times
+        else 0
+    )
 
     # Status counts
     status_counts = {}
@@ -687,7 +854,8 @@ async def get_ngo_dashboard_stats(
         "in_progress": status_counts.get("in_progress", 0),
         "delivered": status_counts.get("delivered", 0),
         "completed": status_counts.get("completed", 0),
-        "active_deliveries": status_counts.get("in_progress", 0) + status_counts.get("assigned", 0),
+        "active_deliveries": status_counts.get("in_progress", 0)
+        + status_counts.get("assigned", 0),
         "urgent_requests": urgent_count,
         "avg_response_time_hours": avg_response_time,
         "total_distance_km": round(total_distance, 1),
@@ -699,6 +867,7 @@ async def get_ngo_dashboard_stats(
 
 
 # ================ NGO INVENTORY (available_resources) ================
+
 
 @router.get("/inventory")
 async def get_ngo_inventory(
@@ -732,17 +901,25 @@ async def get_ngo_inventory(
         "total_items": resp.count or 0,
         "total_quantity": sum(i.get("total_quantity", 0) for i in items),
         "reserved_quantity": sum(i.get("claimed_quantity", 0) for i in items),
-        "available_quantity": sum((i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) for i in items),
+        "available_quantity": sum(
+            (i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) for i in items
+        ),
         "low_stock_count": sum(
-            1 for i in items
-            if (i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) < max(1, i.get("total_quantity", 0) * 0.2)
+            1
+            for i in items
+            if (i.get("total_quantity", 0) - i.get("claimed_quantity", 0))
+            < max(1, i.get("total_quantity", 0) * 0.2)
         ),
     }
 
     # Enrich each item with available quantity
     for i in items:
-        i["available_quantity"] = i.get("total_quantity", 0) - i.get("claimed_quantity", 0)
-        i["is_low_stock"] = i["available_quantity"] < max(1, i.get("total_quantity", 0) * 0.2)
+        i["available_quantity"] = i.get("total_quantity", 0) - i.get(
+            "claimed_quantity", 0
+        )
+        i["is_low_stock"] = i["available_quantity"] < max(
+            1, i.get("total_quantity", 0) * 0.2
+        )
 
     return {"items": items, "summary": summary, "total": resp.count or 0}
 
@@ -775,8 +952,12 @@ async def add_inventory_item(
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to add inventory item")
 
-    _log_pulse(ngo_id, resp.data[0]["resource_id"], "inventory_added",
-               f"Added {body.total_quantity} {body.unit} of {body.title}")
+    _log_pulse(
+        ngo_id,
+        resp.data[0]["resource_id"],
+        "inventory_added",
+        f"Added {body.total_quantity} {body.unit} of {body.title}",
+    )
 
     return resp.data[0]
 
@@ -821,6 +1002,7 @@ async def update_inventory_item(
 
 # ================ AUDIT LOG ================
 
+
 @router.get("/audit-log")
 async def get_audit_log(
     ngo=Depends(require_ngo),
@@ -846,6 +1028,7 @@ async def get_audit_log(
 
 
 # ================ NOTIFICATIONS ================
+
 
 @router.get("/notifications")
 async def get_ngo_notifications(
@@ -892,14 +1075,18 @@ async def mark_notifications_read(
     ngo_id = str(ngo.get("id"))
 
     if notification_ids:
-        supabase_admin.table("notifications").update({
-            "read": True,
-            "read_at": datetime.now(timezone.utc).isoformat(),
-        }).in_("id", notification_ids).eq("user_id", ngo_id).execute()
+        supabase_admin.table("notifications").update(
+            {
+                "read": True,
+                "read_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).in_("id", notification_ids).eq("user_id", ngo_id).execute()
     else:
-        supabase_admin.table("notifications").update({
-            "read": True,
-            "read_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("user_id", ngo_id).eq("read", False).execute()
+        supabase_admin.table("notifications").update(
+            {
+                "read": True,
+                "read_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("user_id", ngo_id).eq("read", False).execute()
 
     return {"message": "Notifications marked as read"}

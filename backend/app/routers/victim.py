@@ -201,6 +201,30 @@ async def create_resource_request(
     if request_data.address_text:
         insert_data["address_text"] = request_data.address_text
 
+    # Fall back to victim's stored location if no GPS provided
+    if insert_data.get("latitude") is None or insert_data.get("longitude") is None:
+        try:
+            victim_user = (
+                supabase_admin.table("users")
+                .select("metadata")
+                .eq("id", victim_id)
+                .maybe_single()
+                .execute()
+            )
+            meta = (victim_user.data or {}).get("metadata") or {}
+            if meta.get("latitude") and meta.get("longitude"):
+                if insert_data.get("latitude") is None:
+                    insert_data["latitude"] = meta["latitude"]
+                if insert_data.get("longitude") is None:
+                    insert_data["longitude"] = meta["longitude"]
+                if not insert_data.get("address_text"):
+                    insert_data["address_text"] = meta.get("address") or None
+                print(
+                    f"📍 Using victim stored GPS: {meta['latitude']}, {meta['longitude']}"
+                )
+        except Exception as e:
+            print(f"⚠️  Failed to fetch victim location fallback: {e}")
+
     # Store NLP metadata (columns may not exist yet — handled gracefully)
     if nlp_classification:
         insert_data["nlp_classification"] = nlp_classification

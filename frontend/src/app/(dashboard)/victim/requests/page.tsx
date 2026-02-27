@@ -91,11 +91,13 @@ function TimeCountdown({ targetDate }: { targetDate: string }) {
 export default function VictimRequestStatusPage() {
     const { profile } = useAuth()
     const [expanded, setExpanded] = useState<string | null>(null)
+    const [page, setPage] = useState(1)
+    const pageSize = 20
 
     const { data, isLoading, refetch } = useQuery({
-        queryKey: ['victim-requests-status'],
+        queryKey: ['victim-requests-status', page],
         queryFn: async () => {
-            return getResourceRequests({ page_size: 50 })
+            return getResourceRequests({ page, page_size: pageSize })
         },
         refetchInterval: 15000,
     })
@@ -113,6 +115,8 @@ export default function VictimRequestStatusPage() {
     }, [refetch])
 
     const requests = data?.requests || (Array.isArray(data) ? data : [])
+    const total = data?.total || requests.length
+    const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
     if (isLoading) {
         return (
@@ -294,6 +298,34 @@ export default function VictimRequestStatusPage() {
                             </div>
                         )
                     })}
+                </div>
+            )}
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total} requests
+                    </p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            disabled={page <= 1}
+                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            className="h-9 px-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium disabled:opacity-40 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
+                        >
+                            Previous
+                        </button>
+                        <span className="text-sm text-slate-600 dark:text-slate-300 px-2">
+                            Page {page} of {totalPages}
+                        </span>
+                        <button
+                            disabled={page >= totalPages}
+                            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                            className="h-9 px-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium disabled:opacity-40 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
+                        >
+                            Next
+                        </button>
+                    </div>
                 </div>
             )}
         </div>

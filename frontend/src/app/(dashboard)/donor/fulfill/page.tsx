@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 import {
     Loader2, Search, Package, Heart, DollarSign,
     CheckCircle2, MapPin, Clock, ChevronLeft, ChevronRight,
-    AlertTriangle, HandHeart, RefreshCw
+    AlertTriangle, HandHeart, RefreshCw, Navigation
 } from 'lucide-react'
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -23,11 +23,37 @@ export default function DonorFulfillPage() {
     const [pledgeModal, setPledgeModal] = useState<any | null>(null)
     const [pledgeNote, setPledgeNote] = useState('')
     const [page, setPage] = useState(1)
+    const [sortBy, setSortBy] = useState<'priority' | 'distance'>('priority')
+    const [gps, setGps] = useState<{ lat: number; lon: number } | null>(null)
+    const [gpsStatus, setGpsStatus] = useState<'detecting' | 'success' | 'error'>('detecting')
+    const [pledgeError, setPledgeError] = useState('')
 
-    // Fetch approved / needs-help requests
+    // Auto-detect GPS on mount
+    useEffect(() => {
+        if (typeof navigator !== 'undefined' && navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    setGps({ lat: pos.coords.latitude, lon: pos.coords.longitude })
+                    setGpsStatus('success')
+                },
+                () => setGpsStatus('error'),
+                { enableHighAccuracy: true, timeout: 15000 }
+            )
+        } else {
+            setGpsStatus('error')
+        }
+    }, [])
+
+    // Fetch approved / needs-help requests (donor-accessible endpoint)
     const { data, isLoading, refetch } = useQuery({
-        queryKey: ['donor-fulfill', page],
-        queryFn: () => api.getAdminRequests({ status: 'approved', page, page_size: 20 }),
+        queryKey: ['donor-fulfill', page, gps?.lat, gps?.lon, sortBy],
+        queryFn: () => api.getDonorApprovedRequests({
+            page,
+            page_size: 20,
+            donor_latitude: gps?.lat,
+            donor_longitude: gps?.lon,
+            sort: sortBy,
+        }),
         refetchInterval: 30000,
     })
 
@@ -100,11 +126,33 @@ export default function DonorFulfillPage() {
                 </div>
             </div>
 
-            {/* Search */}
-            <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search requests by type, description..."
-                    className="w-full pl-10 pr-4 h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm focus:ring-2 focus:ring-pink-500 focus:outline-none" />
+            {/* Search + Sort Controls */}
+            <div className="flex flex-col sm:flex-row gap-3">
+                <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                    <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search requests by type, description..."
+                        className="w-full pl-10 pr-4 h-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm focus:ring-2 focus:ring-pink-500 focus:outline-none" />
+                </div>
+                <div className="flex gap-2 items-center">
+                    <button onClick={() => setSortBy('priority')}
+                        className={cn('px-3 py-2 rounded-lg text-xs font-medium border transition-all',
+                            sortBy === 'priority' ? 'bg-pink-600 text-white border-pink-600' : 'bg-white dark:bg-slate-900 text-slate-600 border-slate-200 dark:border-slate-700')}>
+                        By Priority
+                    </button>
+                    <button onClick={() => setSortBy('distance')}
+                        disabled={gpsStatus !== 'success'}
+                        className={cn('px-3 py-2 rounded-lg text-xs font-medium border transition-all',
+                            sortBy === 'distance' ? 'bg-pink-600 text-white border-pink-600' : 'bg-white dark:bg-slate-900 text-slate-600 border-slate-200 dark:border-slate-700',
+                            gpsStatus !== 'success' && 'opacity-40 cursor-not-allowed')}>
+                        <span className="flex items-center gap-1"><Navigation className="w-3 h-3" /> By Distance</span>
+                    </button>
+                    {gpsStatus === 'success' && (
+                        <span className="text-[10px] text-green-600 flex items-center gap-1"><Navigation className="w-3 h-3" /> GPS active</span>
+                    )}
+                    {gpsStatus === 'error' && (
+                        <span className="text-[10px] text-amber-500">GPS unavailable</span>
+                    )}
+                </div>
             </div>
 
             {/* Request cards - grid layout */}
@@ -132,16 +180,27 @@ export default function DonorFulfillPage() {
                                         {req.victim_name && <span>👤 {req.victim_name}</span>}
                                         <span>Qty: {req.quantity || 1}</span>
                                         {req.address_text && <span className="flex items-center gap-1"><MapPin className="w-3 h-3" />{req.address_text}</span>}
+                                        {req.distance_km !== null && req.distance_km !== undefined && (
+                                            <span className="flex items-center gap-1 text-cyan-600 font-medium">
+                                                <Navigation className="w-3 h-3" /> {req.distance_km} km
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             </div>
                             <div className="mt-4 pt-3 border-t border-slate-100 dark:border-white/5 flex items-center justify-between">
                                 <span className="text-[10px] text-slate-400">{new Date(req.created_at).toLocaleDateString()}</span>
-                                <button
-                                    onClick={() => setPledgeModal(req)}
-                                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xs font-semibold hover:from-pink-600 hover:to-rose-600 shadow-lg shadow-pink-500/20 transition-all group-hover:scale-105">
-                                    <Heart className="w-3.5 h-3.5" /> Pledge Support
-                                </button>
+                                {req.already_pledged ? (
+                                    <span className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-green-100 dark:bg-green-500/10 text-green-600 text-xs font-semibold">
+                                        <CheckCircle2 className="w-3.5 h-3.5" /> Pledged
+                                    </span>
+                                ) : (
+                                    <button
+                                        onClick={() => setPledgeModal(req)}
+                                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xs font-semibold hover:from-pink-600 hover:to-rose-600 shadow-lg shadow-pink-500/20 transition-all group-hover:scale-105">
+                                        <Heart className="w-3.5 h-3.5" /> Pledge Support
+                                    </button>
+                                )}
                             </div>
                         </div>
                     ))}
@@ -156,18 +215,23 @@ export default function DonorFulfillPage() {
                         <p className="text-sm text-slate-500 mb-4">
                             You're pledging to help with: <span className="font-semibold text-slate-700 dark:text-slate-300">{pledgeModal.resource_type}</span> (Qty: {pledgeModal.quantity || 1})
                         </p>
+                        {pledgeError && (
+                            <div className="mb-4 p-3 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20">
+                                <p className="text-xs text-red-600 dark:text-red-400 font-medium">{pledgeError}</p>
+                            </div>
+                        )}
                         <textarea value={pledgeNote} onChange={e => setPledgeNote(e.target.value)}
                             placeholder="Add a note about your pledge (optional)..."
                             rows={3}
                             className="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm mb-4 focus:ring-2 focus:ring-pink-500 focus:outline-none resize-none" />
                         <div className="flex gap-3">
-                            <button onClick={() => { setPledgeModal(null); setPledgeNote('') }}
+                            <button onClick={() => { setPledgeModal(null); setPledgeNote(''); setPledgeError('') }}
                                 className="flex-1 h-10 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-medium">
                                 Cancel
                             </button>
                             <button
                                 onClick={() => {
-                                    // Create a donation record linked to this request
+                                    setPledgeError('')
                                     api.createDonation({
                                         disaster_id: pledgeModal.disaster_id || null,
                                         request_id: pledgeModal.id,
@@ -177,10 +241,10 @@ export default function DonorFulfillPage() {
                                     }).then(() => {
                                         setPledgeModal(null)
                                         setPledgeNote('')
+                                        setPledgeError('')
                                         refetch()
-                                    }).catch(() => {
-                                        setPledgeModal(null)
-                                        setPledgeNote('')
+                                    }).catch((err: any) => {
+                                        setPledgeError(err?.message || 'Failed to submit pledge. Please try again.')
                                     })
                                 }}
                                 className="flex-1 h-10 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-sm font-semibold hover:from-pink-600 hover:to-rose-600">
