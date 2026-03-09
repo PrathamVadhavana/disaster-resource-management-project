@@ -58,10 +58,6 @@ Thumbs.db
 logs/
 *.log
 
-# ML model binaries (too large for GitHub)
+# ML model binaries too large for GitHub (>100MB)
 *.safetensors
-*.pt
-*.pth
-*.ckpt
-*.bin
 backend/ml/models/distilbert-crisis-urgency/checkpoints/
