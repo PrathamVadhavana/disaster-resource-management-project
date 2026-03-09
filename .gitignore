@@ -58,6 +58,5 @@ Thumbs.db
 logs/
 *.log
 
-# ML model binaries too large for GitHub (>100MB)
-*.safetensors
+# ML training checkpoints (not needed for inference)
 backend/ml/models/distilbert-crisis-urgency/checkpoints/
