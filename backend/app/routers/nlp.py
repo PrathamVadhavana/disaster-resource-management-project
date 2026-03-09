@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
-from app.database import supabase
+from app.database import db
+from app.dependencies import _verify_supabase_token
 from app.services.nlp_service import (
     classify_request,
     extract_urgency_signals,
@@ -21,17 +22,22 @@ from app.services.chatbot_service import (
     delete_session,
 )
 
+# Try to use ML-based NLP service for better classification
+try:
+    from ml.nlp_service import predict_priority as ml_predict_priority, extract_needs as ml_extract_needs
+    _has_ml_nlp = True
+except Exception:
+    _has_ml_nlp = False
+
 router = APIRouter()
 security = HTTPBearer()
 
 
 def _get_user_id(credentials: HTTPAuthorizationCredentials) -> str:
-    """Extract and verify user from bearer token."""
+    """Extract and verify user from Supabase bearer token."""
     try:
-        user = supabase.auth.get_user(credentials.credentials)
-        if not user or not user.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return user.user.id
+        decoded = _verify_supabase_token(credentials.credentials)
+        return decoded["uid"]
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
@@ -110,9 +116,37 @@ def classify_text(
     Auto-classify a victim request description.
     Returns resource type, priority recommendation, quantity estimate,
     and urgency signals with confidence scores.
-    Uses rule-based NLP with keyword/phrase analysis.
+    Uses ML-based DistilBERT when available, falls back to rule-based NLP.
     """
     _get_user_id(credentials)  # auth check
+
+    # Try ML-based classification first for better accuracy
+    if _has_ml_nlp:
+        try:
+            ml_priority = ml_predict_priority(body.description)
+            ml_needs = ml_extract_needs(body.description)
+            resource_types = [n["type"] for n in ml_needs] if ml_needs else []
+            urgency_signals = extract_urgency_signals(body.description)
+
+            was_escalated = False
+            if body.priority and ml_priority["priority"] != body.priority:
+                priority_order = ["low", "medium", "high", "critical"]
+                if priority_order.index(ml_priority["priority"]) > priority_order.index(body.priority):
+                    was_escalated = True
+
+            return JSONResponse(content={
+                "resource_types": resource_types or ([body.resource_type] if body.resource_type else []),
+                "resource_type_scores": {},
+                "recommended_priority": ml_priority["priority"],
+                "priority_confidence": ml_priority["confidence"],
+                "original_priority": body.priority,
+                "priority_was_escalated": was_escalated,
+                "estimated_quantity": ml_needs[0]["quantity"] if ml_needs else 1,
+                "urgency_signals": [{"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost} for s in urgency_signals],
+                "confidence": ml_priority["confidence"],
+            })
+        except Exception:
+            pass  # Fall through to rule-based
 
     result = classify_request(
         description=body.description,
@@ -210,7 +244,7 @@ async def override_classification(
     """
     user_id = _get_user_id(credentials)
 
-    from app.database import supabase_admin
+    from app.database import db_admin
 
     # Store the override as training feedback
     try:
@@ -235,15 +269,15 @@ async def override_classification(
         if update_fields:
             # Also mark that NLP was overridden
             update_fields["nlp_overridden"] = True
-            supabase_admin.table("resource_requests").update(update_fields).eq(
+            await db_admin.table("resource_requests").update(update_fields).eq(
                 "id", body.request_id
-            ).execute()
+            ).async_execute()
 
         # Log the override for training
         try:
-            supabase_admin.table("nlp_training_feedback").insert(
+            await db_admin.table("nlp_training_feedback").insert(
                 override_data
-            ).execute()
+            ).async_execute()
         except Exception as e:
             # Table may not exist yet — log but don't fail
             print(f"⚠️  Could not log NLP feedback (table may not exist): {e}")

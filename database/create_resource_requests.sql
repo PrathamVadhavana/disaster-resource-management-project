@@ -1,6 +1,6 @@
 -- ============================================================
 -- Resource Requests Table for Victim Module
--- Run this in Supabase SQL Editor
+-- Run this in your SQL client (psql, DBeaver, etc.)
 -- ============================================================
 
 -- Create the resource_requests table
@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS public.resource_requests (
   estimated_delivery timestamp with time zone,
   attachments jsonb DEFAULT '[]'::jsonb,
   rejection_reason text,
+
+  -- NLP priority scoring (DistilBERT)
+  nlp_priority text CHECK (nlp_priority IS NULL OR nlp_priority = ANY (ARRAY[
+    'critical'::text, 'high'::text, 'medium'::text, 'low'::text
+  ])),
+  nlp_confidence double precision CHECK (nlp_confidence IS NULL OR (nlp_confidence >= 0 AND nlp_confidence <= 1)),
+  manual_priority text CHECK (manual_priority IS NULL OR manual_priority = ANY (ARRAY[
+    'critical'::text, 'high'::text, 'medium'::text, 'low'::text
+  ])),
+  extracted_needs jsonb DEFAULT NULL,
+
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT resource_requests_pkey PRIMARY KEY (id),

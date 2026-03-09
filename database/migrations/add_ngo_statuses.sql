@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Migration: Add NGO delivery flow statuses to resource_requests
--- Run this in Supabase SQL Editor AFTER unpausing your project.
+-- Run this in your SQL client (psql, DBeaver, etc.).
 -- This adds the statuses needed for the NGO dashboard delivery tracking flow.
 -- ============================================================================
 

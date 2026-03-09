@@ -4,7 +4,8 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { victimDetailsSchema } from '@/types/auth';
 import type { z } from 'zod';
-import { createClient } from '@/lib/supabase/client';
+import { db } from '@/lib/db';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Loader2, MapPin } from 'lucide-react';
@@ -13,7 +14,6 @@ type VictimFormData = z.infer<typeof victimDetailsSchema>;
 
 export function VictimForm({ userId }: { userId: string }) {
     const router = useRouter();
-    const supabase = createClient();
     const [loading, setLoading] = useState(false);
 
     const form = useForm<VictimFormData>({
@@ -29,33 +29,29 @@ export function VictimForm({ userId }: { userId: string }) {
         setLoading(true);
         try {
             // 0. Ensure users row exists (FK parent for victim_details)
-            const { error: upsertErr } = await (supabase.from('users') as any)
-                .upsert({ id: userId, email: (await supabase.auth.getUser()).data.user?.email ?? '', role: 'victim' }, { onConflict: 'id' });
-            if (upsertErr) console.warn('users upsert warning:', upsertErr.message);
+            const sb = getSupabaseClient();
+            const { data: { session } } = await sb.auth.getSession();
+            await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'victim' });
 
             // 1. Insert victim details
-            const { error } = await (supabase.from('victim_details') as any).upsert({
+            await db.upsertDetails('victim_details', {
                 id: userId,
                 current_status: data.current_status,
                 needs: data.needs,
                 medical_needs: data.medical_needs || null
-            }, { onConflict: 'id' });
-
-            if (error) {
-                console.error('victim_details insert error:', error);
-                throw error;
-            }
+            });
 
             // 2. Mark profile as completed
-            await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
+            await db.updateProfile({ is_profile_completed: true });
 
-            // 3. Set role in user_metadata so middleware routes correctly
-            await supabase.auth.updateUser({ data: { role: 'victim' } });
+            // 3. Set cookies with Supabase access token
+            if (session) {
+                document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
+                document.cookie = `sb-role=victim; path=/; max-age=3600; SameSite=Lax`;
+            }
+            document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`;
 
-            // 4. Refresh the session so the JWT cookie contains the new role
-            await supabase.auth.refreshSession();
-
-            // 5. Hard redirect — ensures middleware reads the fresh JWT cookie
+            // 4. Hard redirect — ensures middleware reads the fresh cookies
             window.location.href = '/victim';
         } catch (error: any) {
             console.error('Onboarding submit error:', error);

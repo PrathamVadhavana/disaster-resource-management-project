@@ -2,14 +2,18 @@
 Notifications & Audit Trail service.
 Handles creating notifications for users when request statuses change,
 and recording audit trail entries for all request lifecycle events.
+Provides cross-role notification helpers so every workflow handoff
+triggers the right alerts.
 """
 
 from datetime import datetime, timezone
 from typing import Optional, List, Dict
 import logging
+import random
+import string
 import traceback
 
-from app.database import supabase_admin
+from app.database import db_admin
 
 logger = logging.getLogger("notification_service")
 
@@ -49,7 +53,7 @@ async def create_notification(
                 else None
             ),
         }
-        resp = supabase_admin.table("notifications").insert(record).execute()
+        resp = await db_admin.table("notifications").insert(record).async_execute()
         return resp.data[0] if resp.data else None
     except Exception as e:
         # Table might not exist yet — that's OK, we log and continue
@@ -80,7 +84,7 @@ async def create_audit_entry(
             "metadata": metadata or {},
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        resp = supabase_admin.table("request_audit_log").insert(record).execute()
+        resp = await db_admin.table("request_audit_log").insert(record).async_execute()
         return resp.data[0] if resp.data else None
     except Exception as e:
         logger.warning(f"Could not create audit entry (table may not exist): {e}")
@@ -91,11 +95,12 @@ async def get_request_audit_trail(request_id: str) -> List[Dict]:
     """Get the full audit trail for a request."""
     try:
         resp = (
-            supabase_admin.table("request_audit_log")
+            await db_admin.table("request_audit_log")
             .select("*")
             .eq("request_id", request_id)
             .order("created_at", desc=False)
-            .execute()
+            .limit(200)
+            .async_execute()
         )
         return resp.data or []
     except Exception as e:
@@ -111,7 +116,7 @@ async def get_user_notifications(
     """Get notifications for a user."""
     try:
         query = (
-            supabase_admin.table("notifications")
+            db_admin.table("notifications")
             .select("*")
             .eq("user_id", user_id)
             .order("created_at", desc=True)
@@ -119,7 +124,7 @@ async def get_user_notifications(
         )
         if unread_only:
             query = query.eq("read", False)
-        resp = query.execute()
+        resp = await query.async_execute()
         return resp.data or []
     except Exception as e:
         logger.warning(f"Could not fetch notifications: {e}")
@@ -132,13 +137,13 @@ async def mark_notifications_read(
     """Mark notifications as read. If no IDs given, mark all as read."""
     try:
         query = (
-            supabase_admin.table("notifications")
+            db_admin.table("notifications")
             .update({"read": True, "read_at": datetime.now(timezone.utc).isoformat()})
             .eq("user_id", user_id)
         )
         if notification_ids:
             query = query.in_("id", notification_ids)
-        resp = query.execute()
+        resp = await query.async_execute()
         return len(resp.data or [])
     except Exception as e:
         logger.warning(f"Could not mark notifications read: {e}")
@@ -149,11 +154,11 @@ async def get_unread_count(user_id: str) -> int:
     """Get count of unread notifications."""
     try:
         resp = (
-            supabase_admin.table("notifications")
+            await db_admin.table("notifications")
             .select("id", count="exact")
             .eq("user_id", user_id)
             .eq("read", False)
-            .execute()
+            .async_execute()
         )
         return resp.count or 0
     except Exception as e:
@@ -232,3 +237,117 @@ async def notify_request_status_change(
         new_status=new_status,
         details=details,
     )
+
+
+# ── Cross-role bulk notification helpers ──────────────────────────────────
+
+
+async def _get_users_by_role(role: str) -> List[Dict]:
+    """Return list of user dicts (id, full_name) for the given role.
+    Cached in-memory for 5 minutes to reduce database reads.
+    """
+    from app.core.query_cache import get_users_by_role_cached, set_users_by_role_cached
+
+    cached = get_users_by_role_cached(role)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = await db_admin.table("users").select("id, full_name").eq("role", role).limit(500).async_execute()
+        result = resp.data or []
+        set_users_by_role_cached(role, result)
+        return result
+    except Exception as e:
+        logger.warning(f"Could not fetch {role} users: {e}")
+        return []
+
+
+async def notify_all_admins(
+    title: str,
+    message: str,
+    notification_type: str = "info",
+    related_id: Optional[str] = None,
+    related_type: Optional[str] = None,
+):
+    """Send a notification to every admin user."""
+    admins = await _get_users_by_role("admin")
+    for admin in admins:
+        await create_notification(
+            user_id=admin["id"],
+            title=title,
+            message=message,
+            notification_type=notification_type,
+            related_id=related_id,
+            related_type=related_type,
+        )
+
+
+async def notify_all_by_role(
+    role: str,
+    title: str,
+    message: str,
+    notification_type: str = "info",
+    related_id: Optional[str] = None,
+    related_type: Optional[str] = None,
+):
+    """Send a notification to every user of the given role (batch insert)."""
+    users = await _get_users_by_role(role)
+    if not users:
+        return
+
+    from datetime import datetime, timezone
+
+    type_to_priority = {
+        "info": "low",
+        "success": "medium",
+        "warning": "high",
+        "error": "critical",
+        "request_update": "medium",
+    }
+
+    records = []
+    for u in users:
+        records.append({
+            "user_id": u["id"],
+            "title": title,
+            "message": message,
+            "priority": type_to_priority.get(notification_type, "medium"),
+            "read": False,
+            "data": {
+                "type": notification_type,
+                "related_id": related_id,
+                "related_type": related_type,
+            },
+            "action_url": f"/requests/{related_id}" if related_id else None,
+        })
+
+    # Single batch insert instead of N individual writes
+    if records:
+        try:
+            await db_admin.table("notifications").insert(records).async_execute()
+        except Exception as e:
+            logger.warning("Batch notification insert failed: %s", e)
+
+
+async def notify_user(
+    user_id: str,
+    title: str,
+    message: str,
+    notification_type: str = "info",
+    related_id: Optional[str] = None,
+    related_type: Optional[str] = None,
+):
+    """Convenience wrapper – notify a single user."""
+    await create_notification(
+        user_id=user_id,
+        title=title,
+        message=message,
+        notification_type=notification_type,
+        related_id=related_id,
+        related_type=related_type,
+    )
+
+
+def generate_delivery_code() -> str:
+    """Generate a 6-character alphanumeric delivery confirmation code."""
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=6))

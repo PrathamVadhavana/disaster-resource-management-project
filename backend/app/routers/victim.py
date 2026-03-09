@@ -7,10 +7,10 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json, traceback
 
-from app.database import supabase, supabase_admin
+from app.database import db, db_admin
 from app.schemas import (
     ResourceRequestCreate,
     ResourceRequestUpdate,
@@ -22,7 +22,20 @@ from app.services.nlp_service import (
     extract_urgency_signals,
     escalate_priority,
 )
-from app.services.notification_service import get_request_audit_trail
+from app.services.notification_service import (
+    get_request_audit_trail,
+    notify_all_admins,
+)
+from app.services.event_sourcing_service import emit_request_created
+from app.services.disaster_linking_service import auto_link_request
+
+# DistilBERT-backed NLP priority scoring (lazy-loaded, non-blocking)
+try:
+    from ml.nlp_service import predict_priority as nlp_predict_priority
+    from ml.nlp_service import extract_needs as nlp_extract_needs
+except ImportError:
+    nlp_predict_priority = None  # type: ignore[assignment]
+    nlp_extract_needs = None     # type: ignore[assignment]
 from app.dependencies import require_role
 
 router = APIRouter()
@@ -63,10 +76,19 @@ def _safe_row(row: dict) -> dict:
             row["attachments"] = json.loads(attachments)
         except (json.JSONDecodeError, TypeError):
             row["attachments"] = []
-    # Convert datetime objects to ISO strings if needed
-    for key in ("created_at", "updated_at", "estimated_delivery"):
+    # Ensure JSONB fields are lists (nlp_classification, urgency_signals, etc.)
+    for key in ("nlp_classification", "urgency_signals", "fulfillment_entries", "extracted_needs"):
         val = row.get(key)
-        if val is not None and isinstance(val, datetime):
+        if val is None:
+            pass  # leave as None
+        elif isinstance(val, str):
+            try:
+                row[key] = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                row[key] = []
+    # Convert ALL datetime objects to ISO strings (database returns datetime)
+    for key, val in list(row.items()):
+        if isinstance(val, datetime):
             row[key] = val.isoformat()
     return row
 
@@ -98,7 +120,7 @@ async def create_resource_request(
     # Map common DB category variants to valid resource types
     CATEGORY_ALIAS = {"Clothes": "Clothing"}
 
-    def _resolve_resource_type(raw_type: str) -> str:
+    async def _resolve_resource_type(raw_type: str) -> str:
         """Resolve a resource type string to a valid DB enum value.
         If it's already valid, return as-is. Otherwise, look it up
         in available_resources to find the parent category."""
@@ -110,11 +132,11 @@ async def create_resource_request(
         # Try to look up the category from available_resources by title
         try:
             ar_resp = (
-                supabase_admin.table("available_resources")
+                await db_admin.table("available_resources")
                 .select("category")
                 .eq("title", raw_type)
                 .maybe_single()
-                .execute()
+                .async_execute()
             )
             if ar_resp.data:
                 cat = ar_resp.data["category"]
@@ -134,7 +156,7 @@ async def create_resource_request(
         raw_type = (
             items_list[0]["resource_type"] if len(items_list) == 1 else "Multiple"
         )
-        primary_type = _resolve_resource_type(raw_type)
+        primary_type = await _resolve_resource_type(raw_type)
     else:
         total_qty = request_data.quantity
         primary_type = (
@@ -190,7 +212,10 @@ async def create_resource_request(
         "items": items_list,
         "priority": final_priority,
         "status": "pending",
+        "assigned_to": None,
         "attachments": request_data.attachments or [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     if request_data.description:
         insert_data["description"] = request_data.description
@@ -205,11 +230,11 @@ async def create_resource_request(
     if insert_data.get("latitude") is None or insert_data.get("longitude") is None:
         try:
             victim_user = (
-                supabase_admin.table("users")
+                await db_admin.table("users")
                 .select("metadata")
                 .eq("id", victim_id)
                 .maybe_single()
-                .execute()
+                .async_execute()
             )
             meta = (victim_user.data or {}).get("metadata") or {}
             if meta.get("latitude") and meta.get("longitude"):
@@ -233,10 +258,48 @@ async def create_resource_request(
     if nlp_classification:
         insert_data["ai_confidence"] = nlp_classification.get("confidence", 0)
 
+    # ── DistilBERT NLP priority scoring ────────────────────────────
+    # Run the fine-tuned model (if available) for a second opinion on
+    # priority.  When confidence > 0.85 the model overrides the manual
+    # priority.  Both values are persisted so reviewers can compare.
+    nlp_priority_result = None
+    extracted_needs_list = None
+    manual_priority = request_data.priority.value  # preserve original
+
+    if request_data.description:
+        try:
+            if nlp_predict_priority is not None:
+                nlp_priority_result = nlp_predict_priority(request_data.description)
+                insert_data["nlp_priority"] = nlp_priority_result["predicted_priority"]
+                insert_data["nlp_confidence"] = nlp_priority_result["confidence"]
+
+                # Override priority when model is highly confident
+                if nlp_priority_result["confidence"] > 0.85:
+                    final_priority = nlp_priority_result["predicted_priority"]
+                    insert_data["priority"] = final_priority
+                    print(
+                        f"🤖 DistilBERT override: "
+                        f"{manual_priority} → {final_priority} "
+                        f"(conf={nlp_priority_result['confidence']:.3f})"
+                    )
+        except Exception as e:
+            print(f"⚠️  DistilBERT priority prediction failed (non-blocking): {e}")
+
+        try:
+            if nlp_extract_needs is not None:
+                extracted_needs_list = nlp_extract_needs(request_data.description)
+                if extracted_needs_list:
+                    insert_data["extracted_needs"] = extracted_needs_list
+        except Exception as e:
+            print(f"⚠️  NLP needs extraction failed (non-blocking): {e}")
+
+    # Always store the manual priority for audit
+    insert_data["manual_priority"] = manual_priority
+
     try:
         print(f"📦 INSERT DATA: {json.dumps(insert_data, default=str)}")
         response = (
-            supabase_admin.table("resource_requests").insert(insert_data).execute()
+            await db_admin.table("resource_requests").insert(insert_data).async_execute()
         )
         if not response.data:
             raise HTTPException(
@@ -244,13 +307,49 @@ async def create_resource_request(
             )
         row = _safe_row(response.data[0])
         print(f"✅ CREATED: {row.get('id')}")
+
+        # ── Notify all admins about the new request ─────────
+        try:
+            await notify_all_admins(
+                title="📋 New Victim Request",
+                message=f"New {final_priority} priority request for {primary_type} from victim.",
+                notification_type="warning" if final_priority in ("critical", "high") else "info",
+                related_id=row.get("id"),
+                related_type="request",
+            )
+        except Exception as ne:
+            print(f"⚠️  Admin notification failed (non-blocking): {ne}")
+
+        # ── Auto-link to nearest active disaster ─────────
+        try:
+            link_result = await auto_link_request(row)
+            if link_result:
+                row["linked_disaster_id"] = link_result.get("disaster_id")
+                print(f"🌍 Auto-linked to disaster: {link_result.get('disaster_name')} ({link_result.get('distance_km')}km)")
+        except Exception as le:
+            print(f"⚠️  Disaster auto-link failed (non-blocking): {le}")
+
+        # ── Emit event sourcing event ─────────
+        try:
+            await emit_request_created(
+                request_id=row.get("id"),
+                victim_id=victim_id,
+                request_data={
+                    "resource_type": primary_type,
+                    "priority": final_priority,
+                    "quantity": total_qty,
+                },
+            )
+        except Exception as ee:
+            print(f"⚠️  Event sourcing emit failed (non-blocking): {ee}")
+
         return JSONResponse(content=row, status_code=201)
     except HTTPException:
         raise
     except Exception as e:
         print(f"❌ CREATE ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        # Try to extract detail from supabase/postgrest exceptions
+        # Try to extract detail from database exceptions
         detail = str(e)
         if hasattr(e, "message"):
             detail = e.message
@@ -264,7 +363,7 @@ async def create_resource_request(
 # ──────────────────────────────────────────────
 @router.get("/requests")
 async def list_resource_requests(
-    user: dict = Depends(require_role("victim", "admin", "volunteer", "donor")),
+    user: dict = Depends(require_role("victim", "admin", "volunteer", "donor", "ngo")),
     status: Optional[str] = Query(None, description="Filter by status"),
     resource_type: Optional[str] = Query(None, description="Filter by resource type"),
     priority: Optional[str] = Query(None, description="Filter by priority"),
@@ -281,7 +380,7 @@ async def list_resource_requests(
     role = user.get("role")
 
     try:
-        query = supabase_admin.table("resource_requests").select("*", count="exact")
+        query = db_admin.table("resource_requests").select("*", count="exact")
 
         # ── Role-Based Filtering ──
         if role == "victim":
@@ -293,6 +392,14 @@ async def list_resource_requests(
             query = query.or_(
                 f"is_verified.is.null,is_verified.eq.false,verified_by.eq.{user_id}"
             )
+        elif role == "ngo":
+            # NGOs see requests assigned to them + approved requests they can claim
+            query = query.or_(
+                f"assigned_to.eq.{user_id},status.eq.approved,status.eq.under_review"
+            )
+        elif role == "donor":
+            # Donors see approved/partially fulfilled requests they can contribute to
+            query = query.in_("status", ["approved", "under_review", "assigned"])
         # Admins see everything (no filter)
 
         if status:
@@ -310,7 +417,7 @@ async def list_resource_requests(
         offset = (page - 1) * page_size
         query = query.range(offset, offset + page_size - 1)
 
-        response = query.execute()
+        response = await query.async_execute()
         base_requests = response.data or []
 
         # Manual enrichment for assigned_user
@@ -318,10 +425,10 @@ async def list_resource_requests(
         user_map = {}
         if assigned_ids:
             u_resp = (
-                supabase_admin.table("users")
+                await db_admin.table("users")
                 .select("id, full_name, metadata")
                 .in_("id", assigned_ids)
-                .execute()
+                .async_execute()
             )
             for u in u_resp.data or []:
                 user_map[u["id"]] = u
@@ -335,14 +442,12 @@ async def list_resource_requests(
                 row["assigned_user"] = user_map.get(aid)
             final_requests.append(row)
 
-        return JSONResponse(
-            content={
-                "requests": final_requests,
-                "total": response.count or 0,
-                "page": page,
-                "page_size": page_size,
-            }
-        )
+        return {
+            "requests": final_requests,
+            "total": response.count or 0,
+            "page": page,
+            "page_size": page_size,
+        }
     except Exception as e:
         print(f"❌ LIST ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
@@ -365,14 +470,14 @@ async def get_resource_request(
 
     try:
         query = (
-            supabase_admin.table("resource_requests").select("*").eq("id", request_id)
+            db_admin.table("resource_requests").select("*").eq("id", request_id)
         )
 
         if role == "victim":
             query = query.eq("victim_id", user_id)
         # Admins, NGOs, and Volunteers can see the specific request if they have the ID
 
-        response = query.single().execute()
+        response = await query.single().async_execute()
 
         if not response.data:
             raise HTTPException(status_code=404, detail="Request not found")
@@ -399,12 +504,12 @@ async def get_request_timeline(
     # First, verify ownership if the user is a victim
     if user["role"] == "victim":
         resp = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("id")
             .eq("id", request_id)
             .eq("victim_id", victim_id)
             .maybe_single()
-            .execute()
+            .async_execute()
         )
         if not resp.data:
             raise HTTPException(
@@ -429,12 +534,12 @@ async def update_resource_request(
 
     try:
         existing = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("*")
             .eq("id", request_id)
             .eq("victim_id", victim_id)
             .single()
-            .execute()
+            .async_execute()
         )
 
         if not existing.data:
@@ -478,11 +583,11 @@ async def update_resource_request(
             return JSONResponse(content=_safe_row(existing.data))
 
         response = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .update(update_dict)
             .eq("id", request_id)
             .eq("victim_id", victim_id)
-            .execute()
+            .async_execute()
         )
 
         if not response.data:
@@ -511,12 +616,12 @@ async def delete_resource_request(
 
     try:
         existing = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("id, status")
             .eq("id", request_id)
             .eq("victim_id", victim_id)
             .single()
-            .execute()
+            .async_execute()
         )
 
         if not existing.data:
@@ -525,14 +630,14 @@ async def delete_resource_request(
         current_status = existing.data["status"]
 
         if current_status == "pending":
-            supabase_admin.table("resource_requests").delete().eq(
+            await db_admin.table("resource_requests").delete().eq(
                 "id", request_id
-            ).execute()
+            ).async_execute()
             return {"message": "Request deleted successfully"}
-        elif current_status in ("approved", "assigned", "in_progress"):
-            supabase_admin.table("resource_requests").update(
+        elif current_status in ("approved", "assigned", "in_progress", "under_review", "availability_submitted"):
+            await db_admin.table("resource_requests").update(
                 {"status": "rejected", "rejection_reason": "Cancelled by victim"}
-            ).eq("id", request_id).execute()
+            ).eq("id", request_id).async_execute()
             return {"message": "Request cancelled successfully"}
         else:
             raise HTTPException(
@@ -559,10 +664,10 @@ async def get_dashboard_stats(
 
     try:
         response = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("status, resource_type, priority")
             .eq("victim_id", victim_id)
-            .execute()
+            .async_execute()
         )
 
         requests = response.data or []
@@ -571,8 +676,10 @@ async def get_dashboard_stats(
             "total_requests": len(requests),
             "pending": sum(1 for r in requests if r["status"] == "pending"),
             "approved": sum(1 for r in requests if r["status"] == "approved"),
+            "under_review": sum(1 for r in requests if r["status"] == "under_review"),
             "assigned": sum(1 for r in requests if r["status"] == "assigned"),
             "in_progress": sum(1 for r in requests if r["status"] == "in_progress"),
+            "delivered": sum(1 for r in requests if r["status"] == "delivered"),
             "completed": sum(1 for r in requests if r["status"] == "completed"),
             "rejected": sum(1 for r in requests if r["status"] == "rejected"),
             "by_type": {},
@@ -606,7 +713,7 @@ async def get_available_resources(
 
     try:
         query = (
-            supabase_admin.table("available_resources")
+            db_admin.table("available_resources")
             .select(
                 "resource_id, category, resource_type, title, description, total_quantity, claimed_quantity, unit, address_text, status"
             )
@@ -617,7 +724,7 @@ async def get_available_resources(
         if category:
             query = query.eq("category", category)
 
-        response = query.order("category").execute()
+        response = await query.order("category").async_execute()
 
         resources = []
         for r in response.data or []:
@@ -647,3 +754,183 @@ async def get_available_resources(
         raise HTTPException(
             status_code=500, detail=f"Error fetching available resources: {str(e)}"
         )
+
+
+# ──────────────────────────────────────────────
+# FULFILLMENT TRACKING
+# ──────────────────────────────────────────────
+@router.get("/requests/{request_id}/fulfillment")
+async def get_request_fulfillment(
+    request_id: str,
+    user: dict = Depends(require_role("victim", "admin", "ngo", "donor")),
+):
+    """Get fulfillment progress for a specific request — shows which NGOs/donors are contributing."""
+    try:
+        query = db_admin.table("resource_requests").select(
+            "id, items, quantity, resource_type, status, fulfillment_entries, fulfillment_pct"
+        ).eq("id", request_id)
+
+        if user["role"] == "victim":
+            query = query.eq("victim_id", user["id"])
+
+        resp = await query.single().async_execute()
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        request_data = resp.data
+        fulfillment_entries = request_data.get("fulfillment_entries") or []
+        items = request_data.get("items") or []
+
+        # Compute per-item fulfillment breakdown
+        item_fulfillment = {}
+        for it in items:
+            rt = it.get("resource_type", "Custom")
+            item_fulfillment[rt] = {
+                "requested": it.get("quantity", 1),
+                "fulfilled": 0,
+                "providers": [],
+            }
+
+        for entry in fulfillment_entries:
+            for ri in (entry.get("resource_items") or []):
+                rt = ri.get("resource_type", "Custom")
+                if rt not in item_fulfillment:
+                    item_fulfillment[rt] = {"requested": 0, "fulfilled": 0, "providers": []}
+                item_fulfillment[rt]["fulfilled"] += ri.get("quantity", 0)
+                item_fulfillment[rt]["providers"].append({
+                    "name": entry.get("provider_name", "Anonymous"),
+                    "role": entry.get("provider_role", "unknown"),
+                    "quantity": ri.get("quantity", 0),
+                    "status": entry.get("status", "pledged"),
+                    "created_at": entry.get("created_at"),
+                })
+
+        return {
+            "request_id": request_id,
+            "status": request_data.get("status"),
+            "fulfillment_pct": request_data.get("fulfillment_pct", 0),
+            "total_requested": request_data.get("quantity", 1),
+            "item_fulfillment": item_fulfillment,
+            "entries": fulfillment_entries,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if "No rows found" in str(e) or "0 rows" in str(e):
+            raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# ──────────────────────────────────────────────
+# RESOURCE POOLING
+# ──────────────────────────────────────────────
+@router.get("/requests/{request_id}/resource-pool")
+async def get_resource_pool(
+    request_id: str,
+    user: dict = Depends(require_role("victim", "admin", "ngo", "donor")),
+):
+    """Get the resource pool for a request — shows all contributors grouped by role,
+    supporting NGO-NGO, donor-donor, and NGO-donor collaborative fulfillment."""
+    try:
+        query = db_admin.table("resource_requests").select(
+            "id, items, quantity, resource_type, status, fulfillment_entries, fulfillment_pct, disaster_id"
+        ).eq("id", request_id)
+
+        if user["role"] == "victim":
+            query = query.eq("victim_id", user["id"])
+
+        resp = await query.single().async_execute()
+        if not resp.data:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        request_data = resp.data
+        fulfillment_entries = request_data.get("fulfillment_entries") or []
+        items = request_data.get("items") or []
+        total_requested = sum(it.get("quantity", 1) for it in items) if items else request_data.get("quantity", 1)
+
+        # Group contributors by role
+        ngo_contributors = []
+        donor_contributors = []
+        for entry in fulfillment_entries:
+            contributor = {
+                "provider_id": entry.get("provider_id"),
+                "provider_name": entry.get("provider_name", "Anonymous"),
+                "donation_type": entry.get("donation_type", "resource"),
+                "amount": entry.get("amount", 0),
+                "resource_items": entry.get("resource_items") or [],
+                "status": entry.get("status", "pledged"),
+                "created_at": entry.get("created_at"),
+                "estimated_delivery_time": entry.get("estimated_delivery_time"),
+                "distance_km": entry.get("distance_km"),
+            }
+            role = entry.get("provider_role", "unknown")
+            if role == "ngo":
+                ngo_contributors.append(contributor)
+            elif role == "donor":
+                donor_contributors.append(contributor)
+
+        # Calculate per-item pool breakdown
+        item_pool = {}
+        for it in items:
+            rt = it.get("resource_type", "Custom")
+            item_pool[rt] = {
+                "requested": it.get("quantity", 1),
+                "fulfilled_by_ngo": 0,
+                "fulfilled_by_donor": 0,
+                "total_fulfilled": 0,
+                "gap": it.get("quantity", 1),
+            }
+
+        total_money = 0
+        for entry in fulfillment_entries:
+            role = entry.get("provider_role", "unknown")
+            for ri in (entry.get("resource_items") or []):
+                rt = ri.get("resource_type", "Custom")
+                qty = ri.get("quantity", 0)
+                if rt not in item_pool:
+                    item_pool[rt] = {"requested": 0, "fulfilled_by_ngo": 0, "fulfilled_by_donor": 0, "total_fulfilled": 0, "gap": 0}
+                if role == "ngo":
+                    item_pool[rt]["fulfilled_by_ngo"] += qty
+                elif role == "donor":
+                    item_pool[rt]["fulfilled_by_donor"] += qty
+                item_pool[rt]["total_fulfilled"] += qty
+            if entry.get("donation_type") in ("money", "both") and entry.get("amount", 0) > 0:
+                total_money += entry.get("amount", 0)
+
+        for rt in item_pool:
+            item_pool[rt]["gap"] = max(0, item_pool[rt]["requested"] - item_pool[rt]["total_fulfilled"])
+
+        # Determine pool type
+        has_ngo = len(ngo_contributors) > 0
+        has_donor = len(donor_contributors) > 0
+        if has_ngo and has_donor:
+            pool_type = "ngo_donor"
+        elif has_ngo and len(ngo_contributors) > 1:
+            pool_type = "ngo_ngo"
+        elif has_donor and len(donor_contributors) > 1:
+            pool_type = "donor_donor"
+        elif has_ngo:
+            pool_type = "single_ngo"
+        elif has_donor:
+            pool_type = "single_donor"
+        else:
+            pool_type = "none"
+
+        return {
+            "request_id": request_id,
+            "status": request_data.get("status"),
+            "fulfillment_pct": request_data.get("fulfillment_pct", 0),
+            "total_requested": total_requested,
+            "total_money": total_money,
+            "pool_type": pool_type,
+            "total_contributors": len(ngo_contributors) + len(donor_contributors),
+            "ngo_contributors": ngo_contributors,
+            "donor_contributors": donor_contributors,
+            "item_pool": item_pool,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if "No rows found" in str(e) or "0 rows" in str(e):
+            raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")

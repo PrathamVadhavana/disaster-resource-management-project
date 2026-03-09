@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { Activity, LogOut, LayoutDashboard, User } from 'lucide-react';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { cn } from '@/lib/utils';
@@ -21,25 +21,20 @@ export default function NavBar() {
     const [user, setUser] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [isScrolled, setIsScrolled] = useState(false);
-    const supabase = createClient();
+    const sb = getSupabaseClient();
     const router = useRouter();
 
     const dashboardHref = useMemo(() => {
-        const role = user?.user_metadata?.role as string | undefined;
-        return ROLE_DASHBOARD[role ?? ''] ?? '/victim';
+        // Read role from the sb-role cookie
+        const roleCookie = typeof document !== 'undefined'
+            ? document.cookie.split('; ').find(c => c.startsWith('sb-role='))?.split('=')[1]
+            : undefined;
+        return ROLE_DASHBOARD[roleCookie ?? ''] ?? '/victim';
     }, [user]);
 
     useEffect(() => {
-        // Check initial session
-        const checkSession = async () => {
-            const { data: { session } } = await supabase.auth.getSession();
-            setUser(session?.user ?? null);
-            setLoading(false);
-        };
-        checkSession();
-
-        // Listen for auth changes
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        // Supabase auth state listener
+        const { data: { subscription } } = sb.auth.onAuthStateChange((_event, session) => {
             setUser(session?.user ?? null);
             setLoading(false);
         });
@@ -54,10 +49,13 @@ export default function NavBar() {
             subscription.unsubscribe();
             window.removeEventListener('scroll', handleScroll);
         };
-    }, [supabase]);
+    }, [sb]);
 
     const handleSignOut = async () => {
-        await supabase.auth.signOut();
+        await sb.auth.signOut();
+        // Clear cookies
+        document.cookie = 'sb-token=; path=/; max-age=0';
+        document.cookie = 'sb-role=; path=/; max-age=0';
         setUser(null);
         router.push('/');
         router.refresh();

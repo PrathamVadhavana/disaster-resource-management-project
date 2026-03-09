@@ -3,7 +3,7 @@ Admin-only endpoints for user management, platform settings, platform stats,
 request management (approve/reject), and available resources.
 
 All endpoints verify the caller is an admin by checking their role
-in the ``users`` table. The ``supabase_admin`` client (service-role key)
+in the ``users`` table. The ``db_admin`` client (service-role key)
 is used so that Row-Level-Security is bypassed.
 """
 
@@ -13,9 +13,13 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timezone
 import json
+import logging
 import traceback
 
-from app.database import supabase, supabase_admin
+logger = logging.getLogger("admin_router")
+
+from app.database import db, db_admin
+from app.dependencies import _verify_supabase_token
 from app.services.notification_service import (
     notify_request_status_change,
     get_user_notifications,
@@ -23,8 +27,15 @@ from app.services.notification_service import (
     get_unread_count,
     get_request_audit_trail,
     create_audit_entry,
+    notify_all_by_role,
+    notify_user,
 )
 from app.dependencies import require_admin
+
+from app.services.event_sourcing_service import (
+    emit_request_status_changed,
+    emit_request_assigned,
+)
 
 router = APIRouter()
 security = HTTPBearer()
@@ -69,6 +80,9 @@ class ApproveRejectBody(BaseModel):
     assigned_to: Optional[str] = Field(
         None, description="User ID to assign to (NGO/donor)"
     )
+    assigned_role: Optional[str] = Field(
+        None, description="Role of the assignee: 'ngo' or 'donor'. Auto-detected if omitted."
+    )
     estimated_delivery: Optional[str] = Field(
         None, description="ISO date for estimated delivery"
     )
@@ -85,10 +99,11 @@ class AdminNoteBody(BaseModel):
 async def list_users(admin=Depends(require_admin)):
     """Return every user row (bypasses RLS via service-role client)."""
     resp = (
-        supabase_admin.table("users")
+        await db_admin.table("users")
         .select("*")
         .order("created_at", desc=True)
-        .execute()
+        .limit(500)
+        .async_execute()
     )
     return resp.data or []
 
@@ -104,11 +119,11 @@ async def update_user_role(
 
     # Store history in metadata
     metadata_resp = (
-        supabase_admin.table("users")
+        await db_admin.table("users")
         .select("metadata")
         .eq("id", user_id)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     existing_meta = (metadata_resp.data or {}).get("metadata") or {}
 
@@ -124,22 +139,17 @@ async def update_user_role(
     existing_meta["role_history"] = history
     updates["metadata"] = existing_meta
 
-    resp = supabase_admin.table("users").update(updates).eq("id", user_id).execute()
+    resp = await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Also update Supabase Auth metadata to keep sync (merging instead of overwriting)
+    # Also update Supabase auth metadata to keep role in sync
     try:
-        auth_user = supabase_admin.auth.admin.get_user_by_id(user_id)
-        current_auth_meta = auth_user.user.user_metadata or {}
-
-        current_auth_meta["role"] = body.role
-
-        supabase_admin.auth.admin.update_user_by_id(
-            user_id, attributes={"user_metadata": current_auth_meta}
-        )
+        from app.db_client import get_supabase_client
+        sb = get_supabase_client()
+        sb.auth.admin.update_user_by_id(user_id, {"app_metadata": {"role": body.role}})
     except Exception as e:
-        print(f"Warning: Failed to sync auth metadata: {e}")
+        print(f"Warning: Failed to sync Supabase auth metadata: {e}")
 
     return resp.data[0]
 
@@ -147,50 +157,58 @@ async def update_user_role(
 @router.post("/users/{user_id}/verify")
 async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_admin)):
     """Verify or reject an NGO/Donor/Volunteer account."""
+    logger.info("verify_user called: user_id=%s status=%s by admin=%s", user_id, body.status, admin.get("id"))
+
     if body.status not in ("verified", "rejected", "pending"):
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    # 1. Update the Users table (both column and metadata for compatibility)
-    metadata_resp = (
-        supabase_admin.table("users")
-        .select("metadata")
-        .eq("id", user_id)
-        .maybe_single()
-        .execute()
-    )
-    existing_meta = (metadata_resp.data or {}).get("metadata") or {}
-
-    existing_meta["verification_status"] = body.status
-    existing_meta["verification_notes"] = body.notes
-    existing_meta["verified_at"] = (
-        datetime.now(timezone.utc).isoformat() if body.status == "verified" else None
-    )
-    existing_meta["verified_by"] = admin.get("id")
-
-    updates = {
-        "verification_status": body.status,  # Top-level column
-        "metadata": existing_meta,  # JSONB metadata
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    resp = supabase_admin.table("users").update(updates).eq("id", user_id).execute()
-    if not resp.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # 2. Update Auth metadata (Merging carefully)
     try:
-        # Fetch current auth user to get existing metadata (roles etc)
-        auth_user = supabase_admin.auth.admin.get_user_by_id(user_id)
-        current_auth_meta = auth_user.user.user_metadata or {}
-
-        # Merge new status
-        current_auth_meta["verification_status"] = body.status
-
-        supabase_admin.auth.admin.update_user_by_id(
-            user_id, attributes={"user_metadata": current_auth_meta}
+        # 1. Update the Users table (both column and metadata for compatibility)
+        metadata_resp = (
+            await db_admin.table("users")
+            .select("metadata")
+            .eq("id", user_id)
+            .maybe_single()
+            .async_execute()
         )
+        existing_meta = (metadata_resp.data or {}).get("metadata") or {}
+
+        existing_meta["verification_status"] = body.status
+        existing_meta["verification_notes"] = body.notes
+        existing_meta["verified_at"] = (
+            datetime.now(timezone.utc).isoformat() if body.status == "verified" else None
+        )
+        existing_meta["verified_by"] = admin.get("id")
+
+        updates = {
+            "verification_status": body.status,  # Top-level column
+            "metadata": existing_meta,  # JSONB metadata
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        logger.info("Updating user %s with verification_status=%s", user_id, body.status)
+        resp = await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
+        if not resp.data:
+            logger.error("User %s not found during verification update", user_id)
+            raise HTTPException(status_code=404, detail="User not found")
+
+        logger.info("User %s verification updated successfully in DB", user_id)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Warning: Failed to sync auth metadata: {e}")
+        logger.error("Failed to update user %s verification in DB: %s", user_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database update failed: {str(e)}")
+
+    # 2. Update Supabase auth metadata with verification status
+    try:
+        from app.db_client import get_supabase_client
+        sb = get_supabase_client()
+        sb.auth.admin.update_user_by_id(user_id, {
+            "app_metadata": {"verification_status": body.status},
+        })
+        logger.info("Supabase auth metadata updated for user %s", user_id)
+    except Exception as e:
+        logger.warning("Failed to sync Supabase auth metadata for user %s: %s", user_id, e)
 
     return {
         "status": body.status,
@@ -205,7 +223,7 @@ async def delete_user(user_id: str, admin=Depends(require_admin)):
     if str(admin.get("id")) == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
-    resp = supabase_admin.table("users").delete().eq("id", user_id).execute()
+    resp = await db_admin.table("users").delete().eq("id", user_id).async_execute()
     return {"deleted": True}
 
 
@@ -216,11 +234,11 @@ async def delete_user(user_id: str, admin=Depends(require_admin)):
 async def get_settings(admin=Depends(require_admin)):
     """Get platform settings (single row)."""
     resp = (
-        supabase_admin.table("platform_settings")
+        await db_admin.table("platform_settings")
         .select("*")
         .eq("id", 1)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     if not resp.data:
         # Return defaults if the row doesn't exist yet
@@ -253,12 +271,12 @@ async def update_settings(body: PlatformSettingsBody, admin=Depends(require_admi
 
     # Upsert: update the single row
     resp = (
-        supabase_admin.table("platform_settings").update(updates).eq("id", 1).execute()
+        await db_admin.table("platform_settings").update(updates).eq("id", 1).async_execute()
     )
     if not resp.data:
         # Row might not exist – insert it
         updates["id"] = 1
-        resp = supabase_admin.table("platform_settings").insert(updates).execute()
+        resp = await db_admin.table("platform_settings").insert(updates).async_execute()
     return resp.data[0] if resp.data else updates
 
 
@@ -270,17 +288,30 @@ async def platform_stats():
     """Public endpoint returning aggregate platform stats for the landing page.
 
     No authentication required – these are public marketing metrics.
+    Cached for 5 minutes to minimize database reads.
     """
+    from app.core.query_cache import (
+        cache_get as mem_cache_get,
+        cache_set as mem_cache_set,
+        TTL_MEDIUM,
+    )
+
+    _cache_key = "admin:platform_stats"
+    cached = mem_cache_get(_cache_key)
+    if cached is not None:
+        return cached
+
     try:
         # Count total users
-        users_resp = supabase_admin.table("users").select("id", count="exact").execute()
+        users_resp = await db_admin.table("users").select("id", count="exact").limit(5000).async_execute()
         total_users = users_resp.count or 0
 
         # Count disasters
         disasters_resp = (
-            supabase_admin.table("disasters")
+            await db_admin.table("disasters")
             .select("id, status, casualties", count="exact")
-            .execute()
+            .limit(5000)
+            .async_execute()
         )
         total_disasters = disasters_resp.count or 0
         disaster_data = disasters_resp.data or []
@@ -294,9 +325,10 @@ async def platform_stats():
 
         # Count resources
         resources_resp = (
-            supabase_admin.table("resources")
+            await db_admin.table("resources")
             .select("id, status", count="exact")
-            .execute()
+            .limit(5000)
+            .async_execute()
         )
         total_resources = resources_resp.count or 0
         resource_data = resources_resp.data or []
@@ -308,33 +340,36 @@ async def platform_stats():
 
         # Count volunteers
         volunteers_resp = (
-            supabase_admin.table("users")
+            await db_admin.table("users")
             .select("id", count="exact")
             .eq("role", "volunteer")
-            .execute()
+            .limit(5000)
+            .async_execute()
         )
         total_volunteers = volunteers_resp.count or 0
 
         # Count NGOs
         ngos_resp = (
-            supabase_admin.table("users")
+            await db_admin.table("users")
             .select("id", count="exact")
             .eq("role", "ngo")
-            .execute()
+            .limit(5000)
+            .async_execute()
         )
         total_ngos = ngos_resp.count or 0
 
         # Count donations
         donations_resp = (
-            supabase_admin.table("donations")
+            await db_admin.table("donations")
             .select("amount")
             .eq("status", "completed")
-            .execute()
+            .limit(5000)
+            .async_execute()
         )
         donation_data = donations_resp.data or []
         total_donated = sum(float(d.get("amount", 0)) for d in donation_data)
 
-        return {
+        result = {
             "lives_impacted": max(
                 total_casualties_helped, total_users * 3
             ),  # Estimate: each user impacts ~3 people
@@ -351,6 +386,9 @@ async def platform_stats():
                 45 if resolved_disasters == 0 else max(15, 90 - resolved_disasters * 2)
             ),
         }
+
+        mem_cache_set(_cache_key, result, TTL_MEDIUM)
+        return result
     except Exception:
         # Graceful fallback if tables don't exist yet
         return {
@@ -376,12 +414,12 @@ async def get_testimonials():
     """Public endpoint returning active testimonials for the landing page."""
     try:
         resp = (
-            supabase_admin.table("testimonials")
+            await db_admin.table("testimonials")
             .select("id, author_name, author_role, quote, image_url")
             .eq("is_active", True)
             .order("sort_order")
             .limit(6)
-            .execute()
+            .async_execute()
         )
         return resp.data or []
     except Exception:
@@ -396,12 +434,12 @@ async def recent_incidents():
     """Public endpoint returning the latest active disasters for the map preview."""
     try:
         resp = (
-            supabase_admin.table("disasters")
+            await db_admin.table("disasters")
             .select("*")
             .eq("status", "active")
             .order("created_at", desc=True)
             .limit(6)
-            .execute()
+            .async_execute()
         )
         base_data = resp.data or []
 
@@ -412,10 +450,10 @@ async def recent_incidents():
         location_map = {}
         if location_ids:
             loc_resp = (
-                supabase_admin.table("locations")
+                await db_admin.table("locations")
                 .select("id, latitude, longitude, name, city, country")
                 .in_("id", location_ids)
-                .execute()
+                .async_execute()
             )
             for loc in loc_resp.data or []:
                 location_map[loc["id"]] = loc
@@ -491,7 +529,7 @@ async def list_all_requests(
     Admin-only — bypasses RLS."""
     try:
         # Fetch basic requests without joins to avoid "schema cache" errors
-        query = supabase_admin.table("resource_requests").select("*", count="exact")
+        query = db_admin.table("resource_requests").select("*", count="exact")
 
         if status:
             query = query.eq("status", status)
@@ -514,7 +552,7 @@ async def list_all_requests(
         offset = (page - 1) * page_size
         query = query.range(offset, offset + page_size - 1)
 
-        response = query.execute()
+        response = await query.async_execute()
         base_requests = response.data or []
 
         # Manual enrichment for victim and assigned_user
@@ -528,12 +566,30 @@ async def list_all_requests(
         user_map = {}
         if user_ids:
             users_resp = (
-                supabase_admin.table("users")
+                await db_admin.table("users")
                 .select("id, full_name, email, metadata")
                 .in_("id", list(user_ids))
-                .execute()
+                .async_execute()
             )
             for u in users_resp.data or []:
+                user_map[u["id"]] = u
+
+        # Also collect provider IDs from fulfillment_entries for multi-contributor display
+        fe_user_ids = set()
+        for r in base_requests:
+            for entry in (r.get("fulfillment_entries") or []):
+                pid = entry.get("provider_id")
+                if pid and pid not in user_ids:
+                    fe_user_ids.add(pid)
+
+        if fe_user_ids:
+            fe_resp = (
+                await db_admin.table("users")
+                .select("id, full_name, email, metadata")
+                .in_("id", list(fe_user_ids))
+                .async_execute()
+            )
+            for u in fe_resp.data or []:
                 user_map[u["id"]] = u
 
         # Clean and flatten results for frontend
@@ -551,13 +607,29 @@ async def list_all_requests(
             aid = row.get("assigned_to")
             row["assigned_user"] = user_map.get(aid)
 
+            # Build assigned_users list from fulfillment_entries (multi-contributor)
+            contributors = []
+            seen_ids = set()
+            for entry in (row.get("fulfillment_entries") or []):
+                pid = entry.get("provider_id")
+                if pid and pid not in seen_ids:
+                    seen_ids.add(pid)
+                    u_info = user_map.get(pid, {})
+                    contributors.append({
+                        "id": pid,
+                        "full_name": entry.get("provider_name") or u_info.get("full_name") or "Unknown",
+                        "role": entry.get("provider_role") or "unknown",
+                    })
+            row["assigned_users"] = contributors
+
             requests.append(row)
 
         # Stats overview
         all_resp = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("status", count="exact")
-            .execute()
+            .limit(5000)
+            .async_execute()
         )
         status_counts = {}
         for row in all_resp.data or []:
@@ -587,11 +659,11 @@ async def get_request_detail(
     """Get a single resource request with full detail — admin only."""
     try:
         response = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("*")
             .eq("id", request_id)
             .single()
-            .execute()
+            .async_execute()
         )
         if not response.data:
             raise HTTPException(status_code=404, detail="Request not found")
@@ -603,11 +675,11 @@ async def get_request_detail(
         if vid:
             try:
                 user_resp = (
-                    supabase_admin.table("users")
+                    await db_admin.table("users")
                     .select("id, full_name, email, phone, role")
                     .eq("id", vid)
                     .maybe_single()
-                    .execute()
+                    .async_execute()
                 )
                 if user_resp.data:
                     row["victim_name"] = user_resp.data.get("full_name") or "Unknown"
@@ -643,11 +715,11 @@ async def approve_reject_request(
     try:
         # Verify request exists
         existing = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("*")
             .eq("id", request_id)
             .single()
-            .execute()
+            .async_execute()
         )
         if not existing.data:
             raise HTTPException(status_code=404, detail="Request not found")
@@ -668,34 +740,64 @@ async def approve_reject_request(
             ):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot approve request with status '{current_status}'. Only pending, rejected, or availability_submitted requests can be approved.",
+                    detail=f"Cannot approve request with status '{current_status}'. Only pending, rejected, under_review, or availability_submitted requests can be approved.",
                 )
             # If NGO submitted availability, approve means assign to that NGO
             if current_status in ("availability_submitted", "under_review"):
                 update_fields["status"] = "assigned"
-                update_fields["assigned_role"] = "ngo"
                 # Find the NGO that submitted availability
                 if body.assigned_to:
                     update_fields["assigned_to"] = body.assigned_to
+                    # Detect role of the assignee dynamically
+                    if body.assigned_role:
+                        update_fields["assigned_role"] = body.assigned_role
+                    else:
+                        try:
+                            assignee = (
+                                await db_admin.table("users")
+                                .select("role")
+                                .eq("id", body.assigned_to)
+                                .maybe_single()
+                                .async_execute()
+                            )
+                            update_fields["assigned_role"] = (assignee.data or {}).get("role", "ngo")
+                        except Exception:
+                            update_fields["assigned_role"] = "ngo"
                 else:
                     # Auto-assign to the first NGO that submitted availability
                     ngo_pulse = (
-                        supabase_admin.table("operational_pulse")
+                        await db_admin.table("operational_pulse")
                         .select("actor_id")
                         .eq("target_id", request_id)
                         .eq("action_type", "ngo_availability_submitted")
                         .order("created_at", desc=False)
                         .limit(1)
-                        .execute()
+                        .async_execute()
                     )
                     if ngo_pulse.data:
                         update_fields["assigned_to"] = ngo_pulse.data[0]["actor_id"]
+                        update_fields["assigned_role"] = "ngo"
             else:
                 update_fields["status"] = "approved"
             update_fields["rejection_reason"] = None  # Clear any previous rejection
             if body.assigned_to:
                 update_fields["assigned_to"] = body.assigned_to
                 update_fields["status"] = "assigned"
+                # Detect assigned role dynamically
+                if body.assigned_role:
+                    update_fields["assigned_role"] = body.assigned_role
+                elif "assigned_role" not in update_fields:
+                    try:
+                        assignee = (
+                            await db_admin.table("users")
+                            .select("role")
+                            .eq("id", body.assigned_to)
+                            .maybe_single()
+                            .async_execute()
+                        )
+                        update_fields["assigned_role"] = (assignee.data or {}).get("role", "ngo")
+                    except Exception:
+                        update_fields["assigned_role"] = "ngo"
             if body.estimated_delivery:
                 update_fields["estimated_delivery"] = body.estimated_delivery
 
@@ -708,10 +810,10 @@ async def approve_reject_request(
             update_fields["rejection_reason"] = body.rejection_reason
 
         response = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .update(update_fields)
             .eq("id", request_id)
-            .execute()
+            .async_execute()
         )
 
         if not response.data:
@@ -738,8 +840,72 @@ async def approve_reject_request(
                 rejection_reason=body.rejection_reason,
                 admin_note=body.admin_note,
             )
+
+            resource_type = existing.data.get("resource_type", "resources")
+
+            # ── Notify NGOs & Donors when a request is approved ──
+            if new_status == "approved":
+                await notify_all_by_role(
+                    role="ngo",
+                    title="🆕 New Approved Request",
+                    message=f"A {existing.data.get('priority', 'medium')} priority request for {resource_type} has been approved and needs fulfillment.",
+                    notification_type="info",
+                    related_id=request_id,
+                    related_type="request",
+                )
+                await notify_all_by_role(
+                    role="donor",
+                    title="🆕 New Approved Request",
+                    message=f"A {existing.data.get('priority', 'medium')} priority request for {resource_type} has been approved. You can pledge support.",
+                    notification_type="info",
+                    related_id=request_id,
+                    related_type="request",
+                )
+                # ── Notify volunteers when a "Volunteers" request is approved ──
+                if resource_type == "Volunteers":
+                    await notify_all_by_role(
+                        role="volunteer",
+                        title="🙋 Volunteers Needed",
+                        message=f"A {existing.data.get('priority', 'medium')} priority request for volunteers has been approved. Check your dashboard for available assignments.",
+                        notification_type="warning",
+                        related_id=request_id,
+                        related_type="request",
+                    )
+
+            # ── Notify the assigned NGO when request is assigned ──
+            assigned_to = update_fields.get("assigned_to")
+            if new_status == "assigned" and assigned_to:
+                await notify_user(
+                    user_id=assigned_to,
+                    title="📦 Request Assigned to You",
+                    message=f"You have been assigned a {existing.data.get('priority', 'medium')} priority request for {resource_type}. Please begin fulfillment.",
+                    notification_type="warning",
+                    related_id=request_id,
+                    related_type="request",
+                )
+
         except Exception as ne:
             logger.warning(f"Notification failed (non-critical): {ne}")
+
+        # ── Emit event sourcing events ──
+        try:
+            await emit_request_status_changed(
+                request_id=request_id,
+                old_status=current_status,
+                new_status=new_status,
+                changed_by=admin.get("id"),
+                reason=body.admin_note or body.rejection_reason,
+            )
+            assigned_to = update_fields.get("assigned_to")
+            if new_status == "assigned" and assigned_to:
+                await emit_request_assigned(
+                    request_id=request_id,
+                    assigned_to=assigned_to,
+                    assigned_by=admin.get("id"),
+                    assigned_role=update_fields.get("assigned_role", "ngo"),
+                )
+        except Exception as ee:
+            logger.warning(f"Event sourcing failed (non-critical): {ee}")
 
         return {
             "message": f"Request {body.action}d successfully",
@@ -794,10 +960,10 @@ async def update_request_status(
             update_fields["estimated_delivery"] = body["estimated_delivery"]
 
         response = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .update(update_fields)
             .eq("id", request_id)
-            .execute()
+            .async_execute()
         )
         if not response.data:
             raise HTTPException(status_code=404, detail="Request not found")
@@ -824,7 +990,7 @@ async def list_available_resources(
 ):
     """List all available resources across all providers. Admin only."""
     try:
-        query = supabase_admin.table("available_resources").select("*", count="exact")
+        query = db_admin.table("available_resources").select("*", count="exact")
 
         if category:
             query = query.eq("category", category)
@@ -840,7 +1006,7 @@ async def list_available_resources(
         offset = (page - 1) * page_size
         query = query.range(offset, offset + page_size - 1)
 
-        response = query.execute()
+        response = await query.async_execute()
 
         resources = []
         for r in response.data or []:
@@ -858,10 +1024,10 @@ async def list_available_resources(
         if provider_ids:
             try:
                 users_resp = (
-                    supabase_admin.table("users")
+                    await db_admin.table("users")
                     .select("id, full_name, email, role")
                     .in_("id", provider_ids)
-                    .execute()
+                    .async_execute()
                 )
                 for u in users_resp.data or []:
                     provider_names[u["id"]] = {
@@ -881,10 +1047,10 @@ async def list_available_resources(
 
         # Category summary
         all_resp = (
-            supabase_admin.table("available_resources")
+            await db_admin.table("available_resources")
             .select("category, total_quantity, claimed_quantity")
             .eq("is_active", True)
-            .execute()
+            .async_execute()
         )
         category_summary = {}
         for row in all_resp.data or []:
@@ -912,10 +1078,6 @@ async def list_available_resources(
 
 # ── Notifications & Audit Trail ───────────────────────────────────────────
 
-import logging
-
-logger = logging.getLogger("admin_router")
-
 
 @router.get("/notifications")
 async def list_notifications(
@@ -925,8 +1087,8 @@ async def list_notifications(
 ):
     """Get notifications for the authenticated user. Works for any role."""
     try:
-        user = supabase.auth.get_user(credentials.credentials)
-        user_id = user.user.id
+        decoded = _verify_supabase_token(credentials.credentials)
+        user_id = decoded["uid"]
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
@@ -944,8 +1106,8 @@ async def mark_read(
 ):
     """Mark notifications as read."""
     try:
-        user = supabase.auth.get_user(credentials.credentials)
-        user_id = user.user.id
+        decoded = _verify_supabase_token(credentials.credentials)
+        user_id = decoded["uid"]
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
@@ -974,23 +1136,23 @@ async def get_ngo_submissions(
     try:
         # Fetch NGO availability submissions from operational_pulse
         ngo_resp = (
-            supabase_admin.table("operational_pulse")
+            await db_admin.table("operational_pulse")
             .select("*")
             .eq("target_id", request_id)
             .eq("action_type", "ngo_availability_submitted")
             .order("created_at", desc=True)
-            .execute()
+            .async_execute()
         )
         ngo_submissions = ngo_resp.data or []
 
         # Fetch donor pledge submissions from operational_pulse
         donor_resp = (
-            supabase_admin.table("operational_pulse")
+            await db_admin.table("operational_pulse")
             .select("*")
             .eq("target_id", request_id)
             .eq("action_type", "donor_pledge_submitted")
             .order("created_at", desc=True)
-            .execute()
+            .async_execute()
         )
         donor_submissions = donor_resp.data or []
 
@@ -1004,10 +1166,10 @@ async def get_ngo_submissions(
         user_map = {}
         if all_ids:
             users_resp = (
-                supabase_admin.table("users")
+                await db_admin.table("users")
                 .select("id, full_name, email, phone, role, metadata")
                 .in_("id", all_ids)
-                .execute()
+                .async_execute()
             )
             for u in users_resp.data or []:
                 user_map[u["id"]] = u
@@ -1075,11 +1237,11 @@ async def get_request_trends(
 
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         resp = (
-            supabase_admin.table("resource_requests")
+            await db_admin.table("resource_requests")
             .select("id, status, priority, resource_type, created_at")
             .gte("created_at", since)
             .order("created_at")
-            .execute()
+            .async_execute()
         )
 
         requests = resp.data or []
@@ -1170,11 +1332,11 @@ async def export_data(
 
         if data_type == "requests":
             resp = (
-                supabase_admin.table("resource_requests")
+                await db_admin.table("resource_requests")
                 .select("*")
                 .order("created_at", desc=True)
                 .limit(5000)
-                .execute()
+                .async_execute()
             )
             rows = resp.data or []
             writer.writerow(
@@ -1213,10 +1375,10 @@ async def export_data(
 
         elif data_type == "resources":
             resp = (
-                supabase_admin.table("available_resources")
+                await db_admin.table("available_resources")
                 .select("*")
                 .limit(5000)
-                .execute()
+                .async_execute()
             )
             rows = resp.data or []
             writer.writerow(
@@ -1255,10 +1417,10 @@ async def export_data(
 
         elif data_type == "users":
             resp = (
-                supabase_admin.table("users")
+                await db_admin.table("users")
                 .select("id, full_name, email, phone, role, created_at, updated_at")
                 .limit(5000)
-                .execute()
+                .async_execute()
             )
             rows = resp.data or []
             writer.writerow(
@@ -1311,15 +1473,15 @@ async def detect_duplicate_requests(
         from datetime import timedelta
 
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        resp = (
-            supabase_admin.table("resource_requests")
+        resp = await (
+            db_admin.table("resource_requests")
             .select(
                 "id, victim_id, resource_type, quantity, description, status, created_at"
             )
             .gte("created_at", since)
             .order("victim_id")
             .order("created_at")
-            .execute()
+            .async_execute()
         )
 
         rows = resp.data or []
@@ -1386,3 +1548,371 @@ async def get_admin_model_info(admin=Depends(require_admin)):
         return {"error": "ML service not initialized"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Fairness Frontier ─────────────────────────────────────────────────────────
+
+
+class FairnessApplyBody(BaseModel):
+    """Body for applying a specific Pareto-frontier allocation plan."""
+
+    plan_index: int = Field(..., ge=0, le=9, description="Index of the plan on the frontier (0–9)")
+    disaster_id: Optional[str] = Field(None, description="Disaster to allocate for")
+
+
+@router.get("/fairness-frontier")
+async def get_fairness_frontier(
+    disaster_id: Optional[str] = Query(None, description="Disaster ID to compute frontier for"),
+    max_distance_km: float = Query(500.0, ge=1, description="Max resource distance in km"),
+    admin=Depends(require_admin),
+):
+    """
+    Return 10 allocation plans on the Pareto frontier between
+    pure-efficiency (index 0) and pure-equity (index 9).
+
+    Each plan includes efficiency_score, equity_score, gini,
+    zone-level allocations, and any fairness adjustments applied.
+    """
+    try:
+        from ml.fair_allocator import (
+            compute_pareto_frontier,
+            FairAllocationPlan,
+        )
+        from ml.fairness_metrics import (
+            ZoneDemographics,
+            ZoneAllocation,
+            HistoricalRecord,
+        )
+        from app.services.allocation_engine import (
+            AvailableResource,
+            ResourceNeed,
+            PriorityWeights,
+        )
+        from datetime import datetime, timezone
+
+        # ── Fetch resources ──
+        res_resp = await db_admin.table("resources").select("*").eq("status", "available").async_execute()
+        resource_rows = res_resp.data or []
+
+        # ── Fetch active needs (resource_requests with status pending/approved) ──
+        needs_resp = (
+            await db_admin.table("resource_requests")
+            .select("*")
+            .async_execute()
+        )
+        need_rows = [
+            r for r in (needs_resp.data or [])
+            if r.get("status") in ("pending", "approved", "in_progress")
+        ]
+
+        # If disaster_id given, filter
+        if disaster_id:
+            resource_rows = [
+                r for r in resource_rows
+                if r.get("disaster_id") == disaster_id or not r.get("disaster_id")
+            ]
+            need_rows = [
+                r for r in need_rows
+                if r.get("disaster_id") == disaster_id
+            ]
+
+        # ── Fetch locations for coordinate mapping ──
+        loc_resp = await db_admin.table("locations").select("*").async_execute()
+        loc_map = {l["id"]: l for l in (loc_resp.data or [])}
+
+        # ── Build AvailableResource list ──
+        resources = []
+        for r in resource_rows:
+            loc = loc_map.get(r.get("location_id", ""), {})
+            exp_str = r.get("expiry_date")
+            exp_date = None
+            if exp_str:
+                try:
+                    exp_date = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            resources.append(
+                AvailableResource(
+                    id=r["id"],
+                    resource_type=r.get("type", r.get("resource_type", "other")),
+                    quantity=float(r.get("quantity", 0)),
+                    priority=int(r.get("priority", 5)),
+                    location_lat=float(loc.get("latitude", 0)),
+                    location_lng=float(loc.get("longitude", 0)),
+                    location_id=r.get("location_id", ""),
+                    expiry_date=exp_date,
+                )
+            )
+
+        # ── Build ResourceNeed list ──
+        needs = []
+        for n in need_rows:
+            loc = loc_map.get(n.get("location_id", ""), {})
+            needs.append(
+                ResourceNeed(
+                    need_type=n.get("resource_type", "other"),
+                    quantity=float(n.get("quantity", 1)),
+                    urgency=float(n.get("nlp_priority", n.get("urgency", 5))),
+                    zone_lat=float(loc.get("latitude", 0)),
+                    zone_lng=float(loc.get("longitude", 0)),
+                )
+            )
+
+        # ── Build zone demographics from locations ──
+        zones = []
+        for loc in (loc_resp.data or []):
+            meta = loc.get("metadata") or {}
+            pop = int(loc.get("population", 0) or 0)
+            zones.append(
+                ZoneDemographics(
+                    zone_id=loc["id"],
+                    zone_name=loc.get("name", ""),
+                    latitude=float(loc.get("latitude", 0)),
+                    longitude=float(loc.get("longitude", 0)),
+                    population=pop,
+                    elderly_ratio=float(meta.get("elderly_ratio", 0.12)),
+                    children_ratio=float(meta.get("children_ratio", 0.2)),
+                    medical_needs_ratio=float(meta.get("medical_needs_ratio", 0.08)),
+                    ngo_count_within_20km=int(meta.get("ngo_count_within_20km", 10)),
+                    is_rural=bool(meta.get("is_rural", loc.get("type") == "region")),
+                )
+            )
+
+        # ── Build historical records (best-effort from past allocations) ──
+        hist_records: list = []
+        try:
+            alloc_log_resp = await db_admin.table("allocation_log").select("*").async_execute()
+            for row in (alloc_log_resp.data or []):
+                hist_records.append(
+                    HistoricalRecord(
+                        disaster_id=row.get("disaster_id", ""),
+                        zone_id=row.get("zone_id", row.get("location_id", "")),
+                        resources_received=float(row.get("quantity", 0)),
+                        median_resources=float(row.get("median_quantity", 0)),
+                    )
+                )
+        except Exception:
+            pass  # table may not exist yet
+
+        # ── Compute Pareto frontier ──
+        frontier = compute_pareto_frontier(
+            resources=resources,
+            needs=needs,
+            zones=zones,
+            historical_records=hist_records,
+            max_distance_km=max_distance_km,
+            disaster_id=disaster_id,
+        )
+
+        return {
+            "disaster_id": disaster_id,
+            "total_resources": len(resources),
+            "total_needs": len(needs),
+            "total_zones": len(zones),
+            "plans": [
+                {
+                    "plan_index": p.plan_index,
+                    "equity_weight": p.equity_weight,
+                    "efficiency_score": p.efficiency_score,
+                    "equity_score": p.equity_score,
+                    "gini": p.gini,
+                    "allocation_count": len(p.allocations),
+                    "zone_allocations": p.zone_allocations,
+                    "adjustments_applied": p.adjustments_applied,
+                    "allocations": p.allocations[:50],  # cap for response size
+                }
+                for p in frontier.plans
+            ],
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to compute fairness frontier: {str(e)}")
+
+
+@router.post("/fairness-frontier/apply")
+async def apply_fairness_plan(
+    body: FairnessApplyBody,
+    admin=Depends(require_admin),
+):
+    """
+    Execute the chosen Pareto-frontier allocation plan.
+
+    Re-computes the frontier, selects the plan at ``plan_index``,
+    and marks resources as allocated in the database.
+    """
+    try:
+        from ml.fair_allocator import compute_pareto_frontier
+        from ml.fairness_metrics import (
+            ZoneDemographics,
+            ZoneAllocation,
+            HistoricalRecord,
+        )
+        from app.services.allocation_engine import AvailableResource, ResourceNeed
+        from datetime import datetime, timezone
+
+        # Re-fetch data (same logic as GET endpoint)
+        res_resp = await db_admin.table("resources").select("*").eq("status", "available").async_execute()
+        resource_rows = res_resp.data or []
+        needs_resp = await db_admin.table("resource_requests").select("*").async_execute()
+        need_rows = [
+            r for r in (needs_resp.data or [])
+            if r.get("status") in ("pending", "approved", "in_progress")
+        ]
+        if body.disaster_id:
+            resource_rows = [
+                r for r in resource_rows
+                if r.get("disaster_id") == body.disaster_id or not r.get("disaster_id")
+            ]
+            need_rows = [
+                r for r in need_rows
+                if r.get("disaster_id") == body.disaster_id
+            ]
+
+        loc_resp = await db_admin.table("locations").select("*").async_execute()
+        loc_map = {l["id"]: l for l in (loc_resp.data or [])}
+
+        resources = []
+        for r in resource_rows:
+            loc = loc_map.get(r.get("location_id", ""), {})
+            resources.append(
+                AvailableResource(
+                    id=r["id"],
+                    resource_type=r.get("type", r.get("resource_type", "other")),
+                    quantity=float(r.get("quantity", 0)),
+                    priority=int(r.get("priority", 5)),
+                    location_lat=float(loc.get("latitude", 0)),
+                    location_lng=float(loc.get("longitude", 0)),
+                    location_id=r.get("location_id", ""),
+                )
+            )
+
+        needs = []
+        for n in need_rows:
+            loc = loc_map.get(n.get("location_id", ""), {})
+            needs.append(
+                ResourceNeed(
+                    need_type=n.get("resource_type", "other"),
+                    quantity=float(n.get("quantity", 1)),
+                    urgency=float(n.get("nlp_priority", n.get("urgency", 5))),
+                    zone_lat=float(loc.get("latitude", 0)),
+                    zone_lng=float(loc.get("longitude", 0)),
+                )
+            )
+
+        zones = []
+        for loc in (loc_resp.data or []):
+            meta = loc.get("metadata") or {}
+            zones.append(
+                ZoneDemographics(
+                    zone_id=loc["id"],
+                    zone_name=loc.get("name", ""),
+                    latitude=float(loc.get("latitude", 0)),
+                    longitude=float(loc.get("longitude", 0)),
+                    population=int(loc.get("population", 0) or 0),
+                    elderly_ratio=float(meta.get("elderly_ratio", 0.12)),
+                    children_ratio=float(meta.get("children_ratio", 0.2)),
+                    medical_needs_ratio=float(meta.get("medical_needs_ratio", 0.08)),
+                    ngo_count_within_20km=int(meta.get("ngo_count_within_20km", 10)),
+                    is_rural=bool(meta.get("is_rural", loc.get("type") == "region")),
+                )
+            )
+
+        hist_records: list = []
+        try:
+            alloc_log_resp = await db_admin.table("allocation_log").select("*").async_execute()
+            for row in (alloc_log_resp.data or []):
+                hist_records.append(
+                    HistoricalRecord(
+                        disaster_id=row.get("disaster_id", ""),
+                        zone_id=row.get("zone_id", row.get("location_id", "")),
+                        resources_received=float(row.get("quantity", 0)),
+                        median_resources=float(row.get("median_quantity", 0)),
+                    )
+                )
+        except Exception:
+            pass
+
+        frontier = compute_pareto_frontier(
+            resources=resources,
+            needs=needs,
+            zones=zones,
+            historical_records=hist_records,
+            disaster_id=body.disaster_id,
+        )
+
+        if body.plan_index >= len(frontier.plans):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Plan index {body.plan_index} out of range (0–{len(frontier.plans)-1})",
+            )
+
+        chosen = frontier.plans[body.plan_index]
+
+        # Mark resources as allocated in DB
+        applied = 0
+        for alloc in chosen.allocations:
+            rid = alloc.get("resource_id")
+            if not rid:
+                continue
+            try:
+                await db_admin.table("resources").update({
+                    "status": "allocated",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", rid).async_execute()
+                applied += 1
+            except Exception as e:
+                logger.warning("Failed to mark resource %s allocated: %s", rid, e)
+
+        # Store fairness audit
+        try:
+            from ml.fair_allocator import generate_fairness_audit
+            from ml.fairness_metrics import ZoneAllocation as ZA
+            zone_allocs = [
+                ZA(zone_id=zid, allocated_quantity=qty)
+                for zid, qty in chosen.zone_allocations.items()
+            ]
+            audit = generate_fairness_audit(
+                zones=zones,
+                allocations=zone_allocs,
+                historical_records=hist_records,
+                disaster_id=body.disaster_id,
+            )
+            audit["plan_index"] = body.plan_index
+            audit["applied_by"] = admin.get("id") if isinstance(admin, dict) else None
+            audit["applied_at"] = datetime.now(timezone.utc).isoformat()
+            await db_admin.table("fairness_audits").insert(audit).async_execute()
+        except Exception as e:
+            logger.warning("Failed to store fairness audit: %s", e)
+
+        return {
+            "status": "applied",
+            "plan_index": body.plan_index,
+            "resources_allocated": applied,
+            "efficiency_score": chosen.efficiency_score,
+            "equity_score": chosen.equity_score,
+            "gini": chosen.gini,
+            "adjustments_applied": chosen.adjustments_applied,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to apply plan: {str(e)}")
+
+
+@router.get("/fairness-audit")
+async def get_fairness_audit(
+    disaster_id: Optional[str] = Query(None),
+    limit: int = Query(10, ge=1, le=100),
+    admin=Depends(require_admin),
+):
+    """Retrieve stored fairness audit reports."""
+    try:
+        query = db_admin.table("fairness_audits").select("*").order("applied_at", desc=True).limit(limit)
+        if disaster_id:
+            query = query.eq("disaster_id", disaster_id)
+        resp = await query.async_execute()
+        return {"audits": resp.data or [], "count": len(resp.data or [])}
+    except Exception as e:
+        logger.warning("Failed to fetch fairness audits: %s", e)
+        return {"audits": [], "count": 0}

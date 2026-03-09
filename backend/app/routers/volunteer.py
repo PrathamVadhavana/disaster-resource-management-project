@@ -11,8 +11,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timezone
 
-from app.database import supabase, supabase_admin
+from app.database import db, db_admin
 from app.dependencies import require_volunteer, require_verified_volunteer
+from app.services.notification_service import notify_all_admins
 
 router = APIRouter()
 security = HTTPBearer()
@@ -50,11 +51,11 @@ async def get_volunteer_profile(
     """Get the volunteer's extended profile (skills, availability, etc.)."""
     user_id = str(volunteer.get("id"))
     resp = (
-        supabase_admin.table("volunteer_profiles")
+        await db_admin.table("volunteer_profiles")
         .select("*")
         .eq("user_id", user_id)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     if not resp.data:
         # Auto-create default profile
@@ -65,7 +66,7 @@ async def get_volunteer_profile(
             "availability_status": "available",
         }
         insert_resp = (
-            supabase_admin.table("volunteer_profiles").insert(profile).execute()
+            await db_admin.table("volunteer_profiles").insert(profile).async_execute()
         )
         return insert_resp.data[0] if insert_resp.data else profile
     return resp.data
@@ -83,21 +84,21 @@ async def update_volunteer_profile(
 
     # Ensure profile exists first
     existing = (
-        supabase_admin.table("volunteer_profiles")
+        await db_admin.table("volunteer_profiles")
         .select("id")
         .eq("user_id", user_id)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     if not existing.data:
         update_data["user_id"] = user_id
-        resp = supabase_admin.table("volunteer_profiles").insert(update_data).execute()
+        resp = await db_admin.table("volunteer_profiles").insert(update_data).async_execute()
     else:
         resp = (
-            supabase_admin.table("volunteer_profiles")
+            await db_admin.table("volunteer_profiles")
             .update(update_data)
             .eq("user_id", user_id)
-            .execute()
+            .async_execute()
         )
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update profile")
@@ -113,12 +114,12 @@ async def list_available_assignments(
     # This might be further refined with specific task boards from DB,
     # but for now we list active disasters.
     resp = (
-        supabase_admin.table("disasters")
+        await db_admin.table("disasters")
         .select("id, title, description, location_id, severity, status, created_at")
         .eq("status", "active")
         .order("created_at", desc=True)
         .limit(limit)
-        .execute()
+        .async_execute()
     )
     assignments = resp.data or []
 
@@ -128,10 +129,10 @@ async def list_available_assignments(
     )
     if location_ids:
         loc_resp = (
-            supabase_admin.table("locations")
+            await db_admin.table("locations")
             .select("id, name")
             .in_("id", location_ids)
-            .execute()
+            .async_execute()
         )
         loc_map = {loc["id"]: loc.get("name") for loc in (loc_resp.data or [])}
         for a in assignments:
@@ -147,12 +148,12 @@ async def get_active_deployment(
     """Get the current active check-in (deployment) for the volunteer."""
     user_id = str(volunteer.get("id"))
     resp = (
-        supabase_admin.table("volunteer_ops")
+        await db_admin.table("volunteer_ops")
         .select("*")
         .eq("user_id", user_id)
         .eq("status", "active")
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     if not resp.data:
         return {"active_deployment": None}
@@ -162,11 +163,11 @@ async def get_active_deployment(
     did = op.get("disaster_id")
     if did:
         d_resp = (
-            supabase_admin.table("disasters")
+            await db_admin.table("disasters")
             .select("title, location_id, severity")
             .eq("id", did)
             .maybe_single()
-            .execute()
+            .async_execute()
         )
         if d_resp.data:
             op["disaster_title"] = d_resp.data.get("title", "Unknown")
@@ -174,11 +175,11 @@ async def get_active_deployment(
             lid = d_resp.data.get("location_id")
             if lid:
                 loc_resp = (
-                    supabase_admin.table("locations")
+                    await db_admin.table("locations")
                     .select("name")
                     .eq("id", lid)
                     .maybe_single()
-                    .execute()
+                    .async_execute()
                 )
                 if loc_resp.data:
                     op["location_name"] = loc_resp.data.get("name")
@@ -196,11 +197,11 @@ async def volunteer_check_in(
 
     # Verify no active deployments
     active = (
-        supabase_admin.table("volunteer_ops")
+        await db_admin.table("volunteer_ops")
         .select("id")
         .eq("user_id", user_id)
         .eq("status", "active")
-        .execute()
+        .async_execute()
     )
     if active.data:
         raise HTTPException(
@@ -220,9 +221,22 @@ async def volunteer_check_in(
         "updated_at": now,
     }
 
-    resp = supabase_admin.table("volunteer_ops").insert(row).execute()
+    resp = await db_admin.table("volunteer_ops").insert(row).async_execute()
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to check in")
+
+    # Notify admins about volunteer check-in
+    try:
+        vol_name = volunteer.get("full_name") or volunteer.get("email") or "A volunteer"
+        await notify_all_admins(
+            title="✅ Volunteer Checked In",
+            message=f"{vol_name} checked in to disaster {body.disaster_id[:8]}... — Task: {body.task_description}",
+            notification_type="info",
+            related_id=body.disaster_id,
+            related_type="disaster",
+        )
+    except Exception:
+        pass
 
     return resp.data[0]
 
@@ -237,12 +251,12 @@ async def volunteer_check_out(
     user_id = str(volunteer.get("id"))
 
     existing = (
-        supabase_admin.table("volunteer_ops")
+        await db_admin.table("volunteer_ops")
         .select("*")
         .eq("id", op_id)
         .eq("user_id", user_id)
         .single()
-        .execute()
+        .async_execute()
     )
 
     if not existing.data:
@@ -274,11 +288,24 @@ async def volunteer_check_out(
     }
 
     resp = (
-        supabase_admin.table("volunteer_ops").update(updates).eq("id", op_id).execute()
+        await db_admin.table("volunteer_ops").update(updates).eq("id", op_id).async_execute()
     )
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to check out")
+
+    # Notify admins about volunteer check-out
+    try:
+        vol_name = volunteer.get("full_name") or volunteer.get("email") or "A volunteer"
+        await notify_all_admins(
+            title="🏁 Volunteer Checked Out",
+            message=f"{vol_name} checked out after {hours_worked}h. Notes: {body.notes or 'None'}",
+            notification_type="info",
+            related_id=existing.data.get("disaster_id"),
+            related_type="disaster",
+        )
+    except Exception:
+        pass
 
     return resp.data[0]
 
@@ -292,10 +319,10 @@ async def get_volunteer_dashboard_stats(
 
     # Active ops and hours
     resp = (
-        supabase_admin.table("volunteer_ops")
+        await db_admin.table("volunteer_ops")
         .select("status, hours_worked")
         .eq("user_id", user_id)
-        .execute()
+        .async_execute()
     )
     ops = resp.data or []
 
@@ -305,10 +332,10 @@ async def get_volunteer_dashboard_stats(
 
     # Get certifications count
     cert_resp = (
-        supabase_admin.table("volunteer_certifications")
+        await db_admin.table("volunteer_certifications")
         .select("id")
         .eq("user_id", user_id)
-        .execute()
+        .async_execute()
     )
     cert_count = len(cert_resp.data or [])
 

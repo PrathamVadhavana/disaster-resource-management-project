@@ -11,7 +11,7 @@ import asyncio
 from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List
 
-from app.database import supabase_admin
+from app.database import db_admin
 from app.core.phase5_config import phase5_config
 
 logger = logging.getLogger("outcome_service")
@@ -49,11 +49,11 @@ class OutcomeTrackingService:
         if prediction_id:
             try:
                 resp = (
-                    supabase_admin.table("predictions")
+                    await db_admin.table("predictions")
                     .select("*")
                     .eq("id", prediction_id)
                     .single()
-                    .execute()
+                    .async_execute()
                 )
                 pred = resp.data
                 if pred:
@@ -120,7 +120,7 @@ class OutcomeTrackingService:
                 record["area_error_pct"] = round((actual_a - pred_a) / pred_a * 100, 2)
 
         try:
-            resp = supabase_admin.table("outcome_tracking").insert(record).execute()
+            resp = await db_admin.table("outcome_tracking").insert(record).async_execute()
             stored = resp.data[0] if resp.data else record
             logger.info(f"Outcome logged for disaster {disaster_id}, type {prediction_type}")
             return stored
@@ -142,11 +142,11 @@ class OutcomeTrackingService:
             # Get resolved disasters from the last 30 days
             since = (datetime.utcnow() - timedelta(days=30)).isoformat()
             disasters_resp = (
-                supabase_admin.table("disasters")
+                await db_admin.table("disasters")
                 .select("id, type, severity, casualties, estimated_damage, start_date, end_date")
                 .eq("status", "resolved")
                 .gte("updated_at", since)
-                .execute()
+                .async_execute()
             )
             disasters = disasters_resp.data or []
 
@@ -155,19 +155,19 @@ class OutcomeTrackingService:
 
                 # Get predictions for this disaster
                 pred_resp = (
-                    supabase_admin.table("predictions")
+                    await db_admin.table("predictions")
                     .select("id, prediction_type, predicted_severity, predicted_casualties, affected_area_km, features, model_version")
                     .eq("disaster_id", disaster_id)
-                    .execute()
+                    .async_execute()
                 )
                 predictions = pred_resp.data or []
 
                 # Check if outcomes already exist
                 existing_resp = (
-                    supabase_admin.table("outcome_tracking")
+                    await db_admin.table("outcome_tracking")
                     .select("prediction_id")
                     .eq("disaster_id", disaster_id)
-                    .execute()
+                    .async_execute()
                 )
                 existing_pred_ids = {r["prediction_id"] for r in (existing_resp.data or []) if r.get("prediction_id")}
 
@@ -218,11 +218,11 @@ class OutcomeTrackingService:
         for ptype in types_to_evaluate:
             try:
                 resp = (
-                    supabase_admin.table("outcome_tracking")
+                    await db_admin.table("outcome_tracking")
                     .select("*")
                     .eq("prediction_type", ptype)
                     .gte("created_at", since)
-                    .execute()
+                    .async_execute()
                 )
                 outcomes = resp.data or []
 
@@ -253,7 +253,7 @@ class OutcomeTrackingService:
                 # Store report
                 db_record = {k: v for k, v in report.items()}
                 try:
-                    db_resp = supabase_admin.table("model_evaluation_reports").insert(db_record).execute()
+                    db_resp = await db_admin.table("model_evaluation_reports").insert(db_record).async_execute()
                     stored = db_resp.data[0] if db_resp.data else db_record
                     reports.append(stored)
                 except Exception as e:
@@ -404,7 +404,7 @@ class OutcomeTrackingService:
     ) -> List[Dict]:
         """Get outcome tracking records."""
         query = (
-            supabase_admin.table("outcome_tracking")
+            db_admin.table("outcome_tracking")
             .select("*")
             .order("created_at", desc=True)
             .range(offset, offset + limit - 1)
@@ -414,7 +414,7 @@ class OutcomeTrackingService:
         if prediction_type:
             query = query.eq("prediction_type", prediction_type)
 
-        resp = query.execute()
+        resp = await query.async_execute()
         return resp.data or []
 
     async def get_evaluation_reports(
@@ -424,7 +424,7 @@ class OutcomeTrackingService:
     ) -> List[Dict]:
         """Get model evaluation reports."""
         query = (
-            supabase_admin.table("model_evaluation_reports")
+            db_admin.table("model_evaluation_reports")
             .select("*")
             .order("report_date", desc=True)
             .limit(limit)
@@ -432,7 +432,7 @@ class OutcomeTrackingService:
         if model_type:
             query = query.eq("model_type", model_type)
 
-        resp = query.execute()
+        resp = await query.async_execute()
         return resp.data or []
 
     async def get_accuracy_summary(self) -> Dict:
@@ -440,12 +440,12 @@ class OutcomeTrackingService:
         summary = {}
         for ptype in ["severity", "spread", "impact"]:
             resp = (
-                supabase_admin.table("model_evaluation_reports")
+                await db_admin.table("model_evaluation_reports")
                 .select("*")
                 .eq("model_type", ptype)
                 .order("report_date", desc=True)
                 .limit(1)
-                .execute()
+                .async_execute()
             )
             if resp.data:
                 latest = resp.data[0]

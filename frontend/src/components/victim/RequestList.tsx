@@ -10,7 +10,12 @@ import { Search, Filter, ChevronLeft, ChevronRight, Loader2, Plus, X, Sparkles }
 import Link from 'next/link'
 import { formatDistanceToNow } from 'date-fns'
 
-const STATUSES = ['pending', 'approved', 'assigned', 'in_progress', 'completed', 'rejected']
+const STATUSES = ['pending', 'approved', 'under_review', 'availability_submitted', 'assigned', 'in_progress', 'delivered', 'completed', 'closed', 'rejected']
+const STATUS_LABELS: Record<string, string> = {
+    pending: 'Pending', approved: 'Approved', under_review: 'Under Review',
+    availability_submitted: 'Resources Ready', assigned: 'Assigned', in_progress: 'In Progress',
+    delivered: 'Delivered', completed: 'Completed', closed: 'Closed', rejected: 'Rejected',
+}
 const TYPES = ['Food', 'Water', 'Medical', 'Shelter', 'Clothing', 'Financial Aid', 'Evacuation', 'Volunteers', 'Custom', 'Multiple']
 const PRIORITIES = ['critical', 'high', 'medium', 'low']
 
@@ -133,7 +138,7 @@ export function RequestList() {
                                 className="w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-sm"
                             >
                                 <option value="">All</option>
-                                {STATUSES.map((s) => <option key={s} value={s}>{s.replace('_', ' ')}</option>)}
+                                {STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABELS[s] || s.replace(/_/g, ' ')}</option>)}
                             </select>
                         </div>
                         <div>

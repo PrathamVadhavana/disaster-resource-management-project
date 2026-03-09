@@ -3,8 +3,9 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getVictimProfile, updateVictimProfile, type VictimProfile } from '@/lib/api/victim'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { Loader2, MapPin, Save, CheckCircle2 } from 'lucide-react'
+import { Loader2, MapPin, Save, CheckCircle2, ArrowRightLeft } from 'lucide-react'
 
 const STATUS_OPTIONS = [
     { value: 'safe', label: 'Safe', emoji: '✅', color: 'border-emerald-300 bg-emerald-50 text-emerald-700', darkColor: 'dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-400' },
@@ -255,6 +256,24 @@ export function ProfileSection() {
                     Save Profile
                 </button>
             </form>
+
+            {/* Role Switching */}
+            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5">
+                    <h2 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                        <ArrowRightLeft className="w-4 h-4" /> Switch Role
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">Change your active role on the platform</p>
+                </div>
+                <div className="p-5 flex gap-3">
+                    {(['donor', 'volunteer'] as const).map(role => (
+                        <button key={role} onClick={() => { api.switchRole(role).then(() => { window.location.href = '/' }) }}
+                            className="flex-1 py-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 transition-all capitalize">
+                            Switch to {role}
+                        </button>
+                    ))}
+                </div>
+            </div>
         </div>
     )
 }

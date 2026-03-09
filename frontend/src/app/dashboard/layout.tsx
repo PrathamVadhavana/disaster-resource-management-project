@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { getSupabaseClient } from '@/lib/supabase/client'
 import { cn } from '@/lib/utils'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import {
@@ -20,23 +20,22 @@ const NAV_ITEMS = [
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
-  const supabase = createClient()
+  const sb = getSupabaseClient()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [user, setUser] = useState<any>(null)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
-    })
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+    const { data: { subscription } } = sb.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
     })
     return () => subscription.unsubscribe()
-  }, [supabase])
+  }, [sb])
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut()
+    await sb.auth.signOut()
+    document.cookie = 'sb-token=; path=/; max-age=0'
+    document.cookie = 'sb-role=; path=/; max-age=0'
     router.push('/')
   }
 
@@ -45,9 +44,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     return pathname.startsWith(href)
   }
 
-  const userMeta = user?.user_metadata || {}
-  const displayName = userMeta.full_name || userMeta.name || user?.email?.split('@')[0] || 'Admin'
-  const role = userMeta.role || 'admin'
+  const userMeta = {} as any
+  const displayName = user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'Admin'
+  const role = typeof document !== 'undefined'
+    ? document.cookie.split('; ').find((c: string) => c.startsWith('sb-role='))?.split('=')[1] || 'admin'
+    : 'admin'
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950">

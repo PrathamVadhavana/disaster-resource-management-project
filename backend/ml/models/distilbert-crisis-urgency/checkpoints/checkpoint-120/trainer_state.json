@@ -1,0 +1,66 @@
+{
+  "best_global_step": 120,
+  "best_metric": 1.0,
+  "best_model_checkpoint": "C:\\Users\\borda\\Desktop\\disaster-resource-management-project\\backend\\ml\\models\\distilbert-crisis-urgency\\checkpoints\\checkpoint-120",
+  "epoch": 1.0,
+  "eval_steps": 500,
+  "global_step": 120,
+  "is_hyper_param_search": false,
+  "is_local_process_zero": true,
+  "is_world_process_zero": true,
+  "log_history": [
+    {
+      "epoch": 0.4166666666666667,
+      "grad_norm": 2.062763214111328,
+      "learning_rate": 1.314814814814815e-05,
+      "loss": 1.0443928527832032,
+      "step": 50
+    },
+    {
+      "epoch": 0.8333333333333334,
+      "grad_norm": 0.9289392232894897,
+      "learning_rate": 3.88888888888889e-06,
+      "loss": 0.2763224601745605,
+      "step": 100
+    },
+    {
+      "epoch": 1.0,
+      "eval_accuracy": 1.0,
+      "eval_loss": 0.09347669035196304,
+      "eval_runtime": 44.8428,
+      "eval_samples_per_second": 10.704,
+      "eval_steps_per_second": 0.335,
+      "step": 120
+    }
+  ],
+  "logging_steps": 50,
+  "max_steps": 120,
+  "num_input_tokens_seen": 0,
+  "num_train_epochs": 1,
+  "save_steps": 500,
+  "stateful_callbacks": {
+    "EarlyStoppingCallback": {
+      "args": {
+        "early_stopping_patience": 2,
+        "early_stopping_threshold": 0.0
+      },
+      "attributes": {
+        "early_stopping_patience_counter": 0
+      }
+    },
+    "TrainerControl": {
+      "args": {
+        "should_epoch_stop": false,
+        "should_evaluate": false,
+        "should_log": false,
+        "should_save": true,
+        "should_training_stop": true
+      },
+      "attributes": {}
+    }
+  },
+  "total_flos": 63586619228160.0,
+  "train_batch_size": 16,
+  "trial_name": null,
+  "trial_params": null
+}

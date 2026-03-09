@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import date, datetime, timezone
 
-from app.database import supabase, supabase_admin
+from app.database import db, db_admin
 from app.dependencies import get_current_user_id
 
 router = APIRouter()
@@ -55,11 +55,11 @@ def _compute_status(expiry_date: Optional[str]) -> str:
 async def list_certifications(user_id: str = Depends(get_current_user_id)):
     """List all certifications for the authenticated volunteer."""
     resp = (
-        supabase_admin.table("volunteer_certifications")
+        await db_admin.table("volunteer_certifications")
         .select("*")
         .eq("user_id", user_id)
         .order("created_at", desc=True)
-        .execute()
+        .async_execute()
     )
     rows = resp.data or []
     # Recompute status based on current date
@@ -80,7 +80,7 @@ async def create_certification(body: CertificationCreate, user_id: str = Depends
         "expiry_date": body.expiry_date,
         "status": status,
     }
-    resp = supabase_admin.table("volunteer_certifications").insert(row).execute()
+    resp = await db_admin.table("volunteer_certifications").insert(row).async_execute()
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to create certification")
     return resp.data[0]
@@ -103,11 +103,11 @@ async def update_certification(cert_id: str, body: CertificationUpdate, user_id:
         raise HTTPException(status_code=400, detail="No fields to update")
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     resp = (
-        supabase_admin.table("volunteer_certifications")
+        await db_admin.table("volunteer_certifications")
         .update(updates)
         .eq("id", cert_id)
         .eq("user_id", user_id)
-        .execute()
+        .async_execute()
     )
     if not resp.data:
         raise HTTPException(status_code=404, detail="Certification not found")
@@ -118,10 +118,10 @@ async def update_certification(cert_id: str, body: CertificationUpdate, user_id:
 async def delete_certification(cert_id: str, user_id: str = Depends(get_current_user_id)):
     """Delete a certification."""
     resp = (
-        supabase_admin.table("volunteer_certifications")
+        await db_admin.table("volunteer_certifications")
         .delete()
         .eq("id", cert_id)
         .eq("user_id", user_id)
-        .execute()
+        .async_execute()
     )
     return {"deleted": True}

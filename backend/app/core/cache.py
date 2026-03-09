@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 _redis_client = None
 _redis_available = False
+_redis_checked = False
 
 CACHE_TTL_SHORT = 60          # 1 minute  – volatile data (disasters list)
 CACHE_TTL_MEDIUM = 300        # 5 minutes – predictions, forecasts
@@ -31,8 +32,8 @@ class _DateTimeEncoder(json.JSONEncoder):
 
 async def _get_redis():
     """Lazy-init Redis connection."""
-    global _redis_client, _redis_available
-    if _redis_client is not None:
+    global _redis_client, _redis_available, _redis_checked
+    if _redis_checked:
         return _redis_client
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -46,11 +47,13 @@ async def _get_redis():
         # Quick connectivity check
         await _redis_client.ping()
         _redis_available = True
+        _redis_checked = True
         logger.info("Redis cache connected: %s", redis_url)
     except Exception as exc:
         logger.warning("Redis unavailable (%s) – caching disabled", exc)
         _redis_client = None
         _redis_available = False
+        _redis_checked = True
     return _redis_client
 
 

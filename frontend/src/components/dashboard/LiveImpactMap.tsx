@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, CircleMarker, useMap } from 'react-leaflet'
 import { Icon, LatLngBounds } from 'leaflet'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { supabase } from '@/lib/supabase'
 import { useRealtimeEvents, useRealtimeAlerts, IngestedEvent } from '@/hooks/use-realtime-events'
 import { api } from '@/lib/api'
 import 'leaflet/dist/leaflet.css'
@@ -57,7 +56,7 @@ function FitBounds({ bounds }: { bounds: LatLngBounds | null }) {
 export default function LiveImpactMap() {
   const queryClient = useQueryClient()
 
-  // Live events from Supabase Realtime
+  // Live events from SSE Realtime
   const { events: liveEvents, connected } = useRealtimeEvents({ maxEvents: 300 })
   const { alerts, latestCritical, dismissCritical } = useRealtimeAlerts()
 

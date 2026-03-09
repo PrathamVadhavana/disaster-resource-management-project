@@ -1,0 +1,15 @@
+Model: distilbert-base-uncased fine-tuned on CrisisNLP
+Train samples: 1920  |  Test samples: 480
+Epochs: 1  |  Batch size: 16  |  LR: 2e-05
+Max length: 128
+
+              precision    recall  f1-score   support
+
+    critical     1.0000    1.0000    1.0000       120
+        high     1.0000    1.0000    1.0000       120
+      medium     1.0000    1.0000    1.0000       120
+         low     1.0000    1.0000    1.0000       120
+
+    accuracy                         1.0000       480
+   macro avg     1.0000    1.0000    1.0000       480
+weighted avg     1.0000    1.0000    1.0000       480

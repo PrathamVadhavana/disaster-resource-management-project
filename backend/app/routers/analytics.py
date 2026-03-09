@@ -1,6 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.dependencies import require_admin, require_ngo, require_role
-from app.database import supabase_admin
+from app.database import db_admin
+from app.core.query_cache import (
+    cache_get as mem_cache_get,
+    cache_set as mem_cache_set,
+    TTL_SHORT,
+    TTL_MEDIUM,
+)
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 import traceback
@@ -17,33 +23,36 @@ async def get_platform_summary(user=Depends(require_role("admin", "ngo"))):
     Accessible by Admin and NGOs.
     """
     try:
-        # Get total counts from various tables
-        # Note: In a production app, these would be cached or use dedicated aggregate tables
-        
+        # Check in-memory cache first (2 min TTL for summary stats)
+        _cache_key = "analytics:platform_summary"
+        cached = mem_cache_get(_cache_key)
+        if cached is not None:
+            return cached
+
         # 1. Total active disasters
-        disasters_resp = supabase_admin.table("disasters").select("id", count="exact").eq("status", "active").execute()
+        disasters_resp = await db_admin.table("disasters").select("id", count="exact").eq("status", "active").limit(1000).async_execute()
         active_disasters = disasters_resp.count or 0
         
         # 2. Total resource requests (all time vs pending)
-        requests_resp = supabase_admin.table("resource_requests").select("id, status").execute()
+        requests_resp = await db_admin.table("resource_requests").select("id, status").limit(5000).async_execute()
         requests = requests_resp.data or []
         total_requests = len(requests)
         pending_requests = len([r for r in requests if r["status"] == "pending"])
         fulfilled_requests = len([r for r in requests if r["status"] in ("completed", "delivered", "satisfied")])
 
         # 3. Verification stats
-        verif_resp = supabase_admin.table("request_verifications").select("verification_status").execute()
+        verif_resp = await db_admin.table("request_verifications").select("verification_status").limit(5000).async_execute()
         verifs = verif_resp.data or []
         trusted_count = len([v for v in verifs if v["verification_status"] == "trusted"])
         false_alarms = len([v for v in verifs if v["verification_status"] == "false_alarm"])
 
         # 4. Donor involvement
-        pledges_resp = supabase_admin.table("donor_pledges").select("quantity_pledged").execute()
+        pledges_resp = await db_admin.table("donor_pledges").select("quantity_pledged").limit(5000).async_execute()
         pledges = pledges_resp.data or []
         total_units_pledged = sum([p["quantity_pledged"] for p in pledges])
 
         # 5. Volunteer mobilization
-        mobilization_resp = supabase_admin.table("ngo_mobilization").select("id", count="exact").execute()
+        mobilization_resp = await db_admin.table("ngo_mobilization").select("id", count="exact").limit(1000).async_execute()
         total_missions = mobilization_resp.count or 0
 
         return {
@@ -70,6 +79,9 @@ async def get_platform_summary(user=Depends(require_role("admin", "ngo"))):
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+
+        mem_cache_set(_cache_key, result, TTL_MEDIUM)
+        return result
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -81,8 +93,8 @@ async def get_volunteer_analytics(user=Depends(require_admin)):
     """
     try:
         # Join verifications with users to see who is active
-        # Since Supabase simple joins are limited, we'll aggregate in Python for this demo
-        verif_resp = supabase_admin.table("request_verifications").select("volunteer_id, verification_status").execute()
+        # Aggregate in Python for simplicity
+        verif_resp = await db_admin.table("request_verifications").select("volunteer_id, verification_status").limit(5000).async_execute()
         verifs = verif_resp.data or []
         
         volunteer_stats = {}
@@ -101,7 +113,7 @@ async def get_volunteer_analytics(user=Depends(require_admin)):
             return []
             
         user_ids = list(volunteer_stats.keys())[:50] # Limit to 50
-        users_resp = supabase_admin.table("users").select("id, full_name, email").in_("id", user_ids).execute()
+        users_resp = await db_admin.table("users").select("id, full_name, email").in_("id", user_ids).async_execute()
         user_map = {u["id"]: u for u in (users_resp.data or [])}
         
         result = []
@@ -131,7 +143,7 @@ async def get_resource_burn_rate(days: int = Query(30, ge=1, le=365), user=Depen
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         
         # Get requests created in the window
-        req_resp = supabase_admin.table("resource_requests").select("created_at, resource_type, quantity, status").gte("created_at", since).execute()
+        req_resp = await db_admin.table("resource_requests").select("created_at, resource_type, quantity, status").gte("created_at", since).limit(5000).async_execute()
         reqs = req_resp.data or []
         
         # Group by day
@@ -155,7 +167,7 @@ async def get_geospatial_impact(user=Depends(require_admin)):
     Get density of requests for mapping/heatmap.
     """
     try:
-        resp = supabase_admin.table("resource_requests").select("id, latitude, longitude, resource_type, priority, status").not_.is_("latitude", "null").execute()
+        resp = await db_admin.table("resource_requests").select("id, latitude, longitude, resource_type, priority, status").not_.is_("latitude", "null").limit(2000).async_execute()
         data = resp.data or []
         
         # Optional: bucket by simple grid for performance if data is huge
@@ -177,7 +189,7 @@ async def export_interactivity_data(
         writer = csv.writer(output)
         
         if table == "verifications":
-            resp = supabase_admin.table("request_verifications").select("*").order("created_at", desc=True).execute()
+            resp = await db_admin.table("request_verifications").select("*").order("created_at", desc=True).limit(5000).async_execute()
             rows = resp.data or []
             writer.writerow(["ID", "Request ID", "Volunteer ID", "Status", "Notes", "Lat", "Long", "Created At"])
             for r in rows:
@@ -185,7 +197,7 @@ async def export_interactivity_data(
                                r.get("field_notes"), r.get("latitude_at_verification"), r.get("longitude_at_verification"), r.get("created_at")])
         
         elif table == "pledges":
-            resp = supabase_admin.table("donor_pledges").select("*").order("created_at", desc=True).execute()
+            resp = await db_admin.table("donor_pledges").select("*").order("created_at", desc=True).limit(5000).async_execute()
             rows = resp.data or []
             writer.writerow(["ID", "Request ID", "Donor ID", "Quantity", "Status", "Created At"])
             for r in rows:
@@ -193,7 +205,7 @@ async def export_interactivity_data(
                                r.get("status"), r.get("created_at")])
                                
         elif table == "missions":
-            resp = supabase_admin.table("ngo_mobilization").select("*").order("created_at", desc=True).execute()
+            resp = await db_admin.table("ngo_mobilization").select("*").order("created_at", desc=True).limit(5000).async_execute()
             rows = resp.data or []
             writer.writerow(["ID", "NGO ID", "Title", "Required Vols", "Status", "Created At"])
             for r in rows:
@@ -201,7 +213,7 @@ async def export_interactivity_data(
                                r.get("status"), r.get("created_at")])
                                
         elif table == "pulse":
-            resp = supabase_admin.table("operational_pulse").select("*").order("created_at", desc=True).limit(2000).execute()
+            resp = await db_admin.table("operational_pulse").select("*").order("created_at", desc=True).limit(2000).async_execute()
             rows = resp.data or []
             writer.writerow(["ID", "Actor ID", "Action", "Description", "Created At"])
             for r in rows:

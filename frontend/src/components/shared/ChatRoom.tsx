@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import { Loader2, Send, MessageSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { format } from 'date-fns'
@@ -22,7 +22,6 @@ export function ChatRoom({ disasterId, currentUserId }: { disasterId: string, cu
     const [content, setContent] = useState('')
     const queryClient = useQueryClient()
     const bottomRef = useRef<HTMLDivElement>(null)
-    const supabase = createClient()
 
     const { data: messages, isLoading } = useQuery<ChatMessage[]>({
         queryKey: ['disaster-chat', disasterId],
@@ -42,24 +41,20 @@ export function ChatRoom({ disasterId, currentUserId }: { disasterId: string, cu
     }, [messages])
 
     useEffect(() => {
-        const channel = supabase.channel(`chat-${disasterId}`)
-            .on(
-                'postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'disaster_messages', filter: `disaster_id=eq.${disasterId}` },
-                (payload) => {
-                    const newMsg = payload.new as ChatMessage;
-                    queryClient.setQueryData(['disaster-chat', disasterId], (old: ChatMessage[] | undefined) => {
-                        if (!old) return [newMsg]
-                        return [...old, newMsg]
-                    })
-                }
-            )
-            .subscribe()
+        const unsub = subscribeToTable('disaster_messages', (evt) => {
+            if (evt.type !== 'INSERT') return
+            const newMsg = evt.row as ChatMessage
+            if (newMsg.disaster_id !== disasterId) return
+            queryClient.setQueryData(['disaster-chat', disasterId], (old: ChatMessage[] | undefined) => {
+                if (!old) return [newMsg]
+                return [...old, newMsg]
+            })
+        })
 
         return () => {
-            supabase.removeChannel(channel)
+            unsub()
         }
-    }, [disasterId, queryClient, supabase])
+    }, [disasterId, queryClient])
 
     const isMessageFromSelf = (msg: ChatMessage) => {
         // As fallback just check user_id if passed, or matching role formatting logic

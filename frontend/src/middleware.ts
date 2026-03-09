@@ -1,5 +1,17 @@
-import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+
+/**
+ * Edge-compatible middleware using auth token cookies.
+ *
+ * The AuthProvider sets two cookies on every auth state change:
+ *   - sb-token  (the Supabase access token)
+ *   - sb-role   (the user role extracted client-side)
+ *
+ * We intentionally do NOT verify the JWT here (Edge runtime has limited
+ * crypto support). The token is verified by the FastAPI backend on every
+ * API call. The middleware only decides whether to allow/redirect based
+ * on cookie presence + role claim.
+ */
 
 export async function middleware(request: NextRequest) {
     let response = NextResponse.next({
@@ -8,57 +20,10 @@ export async function middleware(request: NextRequest) {
         },
     })
 
-    // The correct pattern for @supabase/ssr middleware in Next.js 14/15
-    const supabase = createServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        {
-            cookies: {
-                getAll() {
-                    return request.cookies.getAll()
-                },
-                setAll(cookiesToSet: Array<{ name: string; value: string; options?: Record<string, unknown> }>) {
-                    cookiesToSet.forEach(({ name, value }: { name: string; value: string }) => request.cookies.set(name, value))
-                    response = NextResponse.next({
-                        request,
-                    })
-                    cookiesToSet.forEach(({ name, value, options }: { name: string; value: string; options?: Record<string, unknown> }) =>
-                        response.cookies.set(name, value, options as any)
-                    )
-                },
-            },
-        }
-    )
-
-    // Validate the session — treat errors as unauthenticated
-    const { data: { user }, error: userError } = await supabase.auth.getUser()
-    if (userError) {
-        // Session is invalid / expired — clear stale cookies so the browser
-        // doesn't keep sending them on every request
-        const loginUrl = new URL('/login', request.url)
-        const res = NextResponse.redirect(loginUrl)
-        // Remove all supabase auth cookies so the next request is clean
-        request.cookies.getAll().forEach(({ name }) => {
-            if (name.startsWith('sb-')) {
-                res.cookies.delete(name)
-            }
-        })
-        // Only redirect away from public pages
-        const path = request.nextUrl.pathname
-        if (
-            path === '/' ||
-            path.startsWith('/auth') ||
-            path.startsWith('/login') ||
-            path.startsWith('/signup') ||
-            path.startsWith('/_next') ||
-            path.startsWith('/api') ||
-            path.includes('.')
-        ) {
-            return response
-        }
-        return res
-    }
-    const path = request.nextUrl.pathname
+    const token = request.cookies.get('sb-token')?.value
+    const role  = request.cookies.get('sb-role')?.value
+    const profileCompleted = request.cookies.get('profile-completed')?.value
+    const path  = request.nextUrl.pathname
 
     // Helper: get the correct dashboard path for a role
     function dashboardFor(r?: string): string {
@@ -83,9 +48,7 @@ export async function middleware(request: NextRequest) {
         path.includes('.')
     ) {
         // Redirect authenticated users away from auth pages
-        if (user && (path.startsWith('/login') || path.startsWith('/signup'))) {
-            const role = user.user_metadata?.role
-            // If they have a role, send to their dashboard; otherwise send to onboarding
+        if (token && (path.startsWith('/login') || path.startsWith('/signup'))) {
             if (role) {
                 return NextResponse.redirect(new URL(dashboardFor(role), request.url))
             }
@@ -94,22 +57,23 @@ export async function middleware(request: NextRequest) {
         return response
     }
 
-    // 1. Authenticated Check
-    if (!user) {
+    // 1. Authenticated Check — no token means not logged in
+    if (!token) {
         return NextResponse.redirect(new URL('/login', request.url))
     }
 
     // 2. Role Check & Routing
-    const role = user.user_metadata?.role
-
     // If user has no role, force them to onboarding (unless they are already there)
     if (!role && path !== '/onboarding') {
         return NextResponse.redirect(new URL('/onboarding', request.url))
     }
 
     // Allow /onboarding — the page itself checks is_profile_completed via AuthProvider
-    // and redirects completed users to their dashboard. We cannot check DB from edge middleware.
+    // But if user already completed their profile, redirect them to their dashboard
     if (path === '/onboarding') {
+        if (role && profileCompleted === 'true') {
+            return NextResponse.redirect(new URL(dashboardFor(role), request.url))
+        }
         return response
     }
 
@@ -139,9 +103,6 @@ export async function middleware(request: NextRequest) {
         return NextResponse.redirect(new URL(dashboardFor(role), request.url))
     }
 
-    // Non-admin routes are handled by default case above
-    // or explicitly per role if needed in the future.
-
     // Legacy /dashboard — redirect to role-specific dashboard
     if (path.startsWith('/dashboard')) {
         const target = dashboardFor(role)
@@ -154,9 +115,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-    // Match all request paths except for the ones starting with:
-    // - _next/static (static files)
-    // - _next/image (image optimization files)
-    // - favicon.ico (favicon file)
     matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
 }

@@ -1,7 +1,7 @@
 'use client'
 
-import { useEffect, useState, useCallback, useRef } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useEffect, useState, useCallback } from 'react'
+import { subscribeToTable, type RealtimeEvent } from '@/lib/realtime'
 import { useQueryClient } from '@tanstack/react-query'
 
 /**
@@ -46,7 +46,7 @@ interface UseRealtimeEventsOptions {
 }
 
 /**
- * Hook: subscribe to live ingested_events via Supabase Realtime.
+ * Hook: subscribe to live ingested_events via SSE realtime.
  */
 export function useRealtimeEvents(options: UseRealtimeEventsOptions = {}) {
   const { eventType, maxEvents = 200 } = options
@@ -55,35 +55,26 @@ export function useRealtimeEvents(options: UseRealtimeEventsOptions = {}) {
   const queryClient = useQueryClient()
 
   useEffect(() => {
-    // Build channel with optional filter
-    let channelBuilder = supabase
-      .channel('ingested-events-live')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'ingested_events',
-          ...(eventType ? { filter: `event_type=eq.${eventType}` } : {}),
-        },
-        (payload) => {
-          const newEvent = payload.new as IngestedEvent
-          setEvents((prev) => {
-            const updated = [newEvent, ...prev]
-            return updated.slice(0, maxEvents)
-          })
-          // Invalidate related queries so dashboards refresh
-          queryClient.invalidateQueries({ queryKey: ['disasters'] })
-          queryClient.invalidateQueries({ queryKey: ['predictions'] })
-        }
-      )
+    setConnected(true)
 
-    const channel = channelBuilder.subscribe((status) => {
-      setConnected(status === 'SUBSCRIBED')
+    const unsub = subscribeToTable('ingested_events', (evt: RealtimeEvent) => {
+      if (evt.type !== 'INSERT') return
+      const newEvent = evt.row as IngestedEvent
+      // Optional client-side filter by event type
+      if (eventType && newEvent.event_type !== eventType) return
+
+      setEvents((prev) => {
+        const updated = [newEvent, ...prev]
+        return updated.slice(0, maxEvents)
+      })
+      // Invalidate related queries so dashboards refresh
+      queryClient.invalidateQueries({ queryKey: ['disasters'] })
+      queryClient.invalidateQueries({ queryKey: ['predictions'] })
     })
 
     return () => {
-      supabase.removeChannel(channel)
+      unsub()
+      setConnected(false)
     }
   }, [eventType, maxEvents, queryClient])
 
@@ -100,27 +91,17 @@ export function useRealtimeAlerts() {
   const [latestCritical, setLatestCritical] = useState<AlertNotification | null>(null)
 
   useEffect(() => {
-    const channel = supabase
-      .channel('alert-notifications-live')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'alert_notifications',
-        },
-        (payload) => {
-          const alert = payload.new as AlertNotification
-          setAlerts((prev) => [alert, ...prev].slice(0, 100))
-          if (alert.severity === 'critical') {
-            setLatestCritical(alert)
-          }
-        }
-      )
-      .subscribe()
+    const unsub = subscribeToTable('alert_notifications', (evt: RealtimeEvent) => {
+      if (evt.type !== 'INSERT') return
+      const alert = evt.row as AlertNotification
+      setAlerts((prev) => [alert, ...prev].slice(0, 100))
+      if (alert.severity === 'critical') {
+        setLatestCritical(alert)
+      }
+    })
 
     return () => {
-      supabase.removeChannel(channel)
+      unsub()
     }
   }, [])
 

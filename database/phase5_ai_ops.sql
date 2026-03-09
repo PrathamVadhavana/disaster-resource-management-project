@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS nl_query_log (
     query_text      TEXT NOT NULL,                       -- The natural language question
     query_type      TEXT,                                -- 'data_query', 'analysis', 'recommendation', 'chart'
     tools_called    JSONB DEFAULT '[]'::jsonb,           -- Tool-use calls made
-    sql_generated   TEXT,                                -- Any SQL/Supabase queries generated
+    sql_generated   TEXT,                                -- Any SQL queries generated
     response_text   TEXT,                                -- Formatted response
     response_data   JSONB DEFAULT '{}'::jsonb,           -- Structured data for charts
     model_used      TEXT DEFAULT 'rule-based',
@@ -169,7 +169,9 @@ COMMENT ON TABLE model_evaluation_reports IS
   'Weekly automated model evaluation reports that feed back into the retraining pipeline.';
 
 
--- 6. Enable Realtime on new tables
+-- 6. (Optional) Enable Realtime on new tables
+-- The following block is only needed for Supabase-hosted databases.
+/*
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -193,6 +195,7 @@ BEGIN
         ALTER PUBLICATION supabase_realtime ADD TABLE outcome_tracking;
     END IF;
 END $$;
+*/
 
 
 -- 7. RLS policies

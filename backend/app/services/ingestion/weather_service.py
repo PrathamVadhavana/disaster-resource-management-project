@@ -15,7 +15,8 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import ingestion_config as cfg
-from app.database import supabase_admin
+from app.database import db_admin
+from app.services.ingestion import memory_store
 from app.services.ingestion.mock_data_service import generate_mock_weather
 
 logger = logging.getLogger("ingestion.weather")
@@ -82,8 +83,12 @@ class WeatherService:
     # ── internals ───────────────────────────────────────────────────
 
     async def _get_tracked_locations(self) -> List[Dict[str, Any]]:
-        resp = supabase_admin.table("locations").select("id, name, latitude, longitude").execute()
-        return resp.data or []
+        try:
+            resp = await db_admin.table("locations").select("id, name, latitude, longitude").async_execute()
+            return resp.data or []
+        except Exception as e:
+            logger.warning("Failed to fetch tracked locations: %s", e)
+            return []
 
     async def _fetch_current(self, client: httpx.AsyncClient, loc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         lat = loc.get("latitude")
@@ -121,7 +126,7 @@ class WeatherService:
         }
 
     async def _store_observations(self, observations: List[Dict[str, Any]]) -> None:
-        supabase_admin.table("weather_observations").insert(observations).execute()
+        memory_store.add_weather_observations(observations)
 
     # ── Utility: build prediction features from latest weather ──────
 
@@ -131,18 +136,9 @@ class WeatherService:
         Return the latest weather observation for a location as a dict
         formatted for PredictionInput.features.
         """
-        resp = (
-            supabase_admin
-            .table("weather_observations")
-            .select("*")
-            .eq("location_id", location_id)
-            .order("observed_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if not resp.data:
+        row = memory_store.latest_weather_for_location(location_id)
+        if not row:
             return {}
-        row = resp.data[0]
         return {
             "temperature": row.get("temperature_c", 25),
             "humidity": row.get("humidity_pct", 50),

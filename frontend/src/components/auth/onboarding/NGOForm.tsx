@@ -4,7 +4,8 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ngoDetailsSchema } from '@/types/auth'; // Ensure this matches schema export
 import type { z } from 'zod';
-import { createClient } from '@/lib/supabase/client';
+import { db } from '@/lib/db';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Loader2 } from 'lucide-react';
@@ -13,7 +14,6 @@ type NGOFormData = z.infer<typeof ngoDetailsSchema>;
 
 export function NGOForm({ userId }: { userId: string }) {
     const router = useRouter();
-    const supabase = createClient();
     const [loading, setLoading] = useState(false);
 
     const form = useForm<NGOFormData>({
@@ -30,35 +30,31 @@ export function NGOForm({ userId }: { userId: string }) {
         setLoading(true);
         try {
             // 0. Ensure users row exists (FK parent for ngo_details)
-            const { error: upsertErr } = await (supabase.from('users') as any)
-                .upsert({ id: userId, email: (await supabase.auth.getUser()).data.user?.email ?? '', role: 'ngo' }, { onConflict: 'id' });
-            if (upsertErr) console.warn('users upsert warning:', upsertErr.message);
+            const sb = getSupabaseClient();
+            const { data: { session } } = await sb.auth.getSession();
+            await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'ngo' });
 
             // 1. Insert NGO details
-            const { error } = await (supabase.from('ngo_details') as any).upsert({
+            await db.upsertDetails('ngo_details', {
                 id: userId,
                 organization_name: data.organization_name,
                 registration_number: data.registration_number,
                 operating_sectors: data.operating_sectors,
                 website: data.website || null,
                 verification_status: 'pending'
-            }, { onConflict: 'id' });
+            });
 
-            if (error) {
-                console.error('ngo_details insert error:', error);
-                throw error;
+            await db.updateProfile({ is_profile_completed: true });
+
+            // Set cookies with Supabase access token
+            if (session) {
+                document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
+                document.cookie = `sb-role=ngo; path=/; max-age=3600; SameSite=Lax`;
             }
+            document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`;
 
-            await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
-
-            // Set role in user_metadata so middleware routes correctly
-            await supabase.auth.updateUser({ data: { role: 'ngo' } });
-
-            // Refresh the session so the JWT cookie contains the new role
-            await supabase.auth.refreshSession();
-
-            // Hard redirect — ensures middleware reads the fresh JWT cookie
-            window.location.href = '/dashboard';
+            // Hard redirect — ensures middleware reads the fresh cookies
+            window.location.href = '/ngo';
         } catch (error: any) {
             console.error('NGO onboarding submit error:', error);
             alert('Failed to save details: ' + (error?.message || 'Unknown error'));

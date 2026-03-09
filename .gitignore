@@ -42,6 +42,8 @@ dist/
 .env
 .env.local
 .env.*.local
+backend/.env
+frontend/.env.local
 
 # Database
 *.db
@@ -55,3 +57,11 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
+# ML model binaries (too large for GitHub)
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+backend/ml/models/distilbert-crisis-urgency/checkpoints/

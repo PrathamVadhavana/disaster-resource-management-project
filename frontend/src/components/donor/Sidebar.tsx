@@ -7,7 +7,7 @@ import { useAuth } from '@/lib/auth-provider'
 import { useTheme } from 'next-themes'
 import {
     LayoutDashboard, Heart, TrendingUp, Globe, Receipt,
-    LogOut, ChevronLeft, Menu, Sun, Moon, HandHeart,
+    LogOut, ChevronLeft, Menu, Sun, Moon, HandHeart, User,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { NotificationBell } from '@/components/shared/NotificationBell'
@@ -20,6 +20,7 @@ const navItems = [
     { href: '/donor/impact', label: 'Impact Report', icon: TrendingUp },
     { href: '/donor/causes', label: 'Discover Causes', icon: Globe },
     { href: '/donor/receipts', label: 'Tax Receipts', icon: Receipt },
+    { href: '/donor/profile', label: 'Profile', icon: User },
 ]
 
 export function DonorSidebar() {

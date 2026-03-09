@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import {
     Loader2, Search, Package, Plus, AlertTriangle,
     RefreshCw, X, CheckCircle2, Archive, TrendingDown,
@@ -29,14 +29,10 @@ export default function NGOInventoryPage() {
     })
 
     useEffect(() => {
-        const supabase = createClient()
-        const channel = supabase
-            .channel('ngo-inventory-rt')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'available_resources' }, () => {
-                qc.invalidateQueries({ queryKey: ['ngo-inventory'] })
-            })
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+        const unsub = subscribeToTable('available_resources', () => {
+            qc.invalidateQueries({ queryKey: ['ngo-inventory'] })
+        })
+        return () => { unsub() }
     }, [qc])
 
     const addMutation = useMutation({

@@ -15,7 +15,7 @@ export function AccountSwitcher() {
     if (!user || !profile) return null
 
     const primaryRole = profile.role || 'victim'
-    const additionalRoles = (user.user_metadata?.additional_roles as string[]) || []
+    const additionalRoles: string[] = [] // Additional roles from Supabase custom claims if needed
 
     // De-duplicate and get all accessible roles
     const allRoles = Array.from(new Set([primaryRole, ...additionalRoles]))

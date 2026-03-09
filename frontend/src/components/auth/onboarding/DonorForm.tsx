@@ -4,7 +4,8 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { donorDetailsSchema } from '@/types/auth';
 import type { z } from 'zod';
-import { createClient } from '@/lib/supabase/client';
+import { db } from '@/lib/db';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Loader2, Heart } from 'lucide-react';
@@ -26,7 +27,6 @@ const CAUSES = [
 
 export function DonorForm({ userId }: { userId: string }) {
     const router = useRouter();
-    const supabase = createClient();
     const [loading, setLoading] = useState(false);
 
     const form = useForm<DonorFormData>({
@@ -41,25 +41,25 @@ export function DonorForm({ userId }: { userId: string }) {
     const onSubmit = async (data: DonorFormData) => {
         setLoading(true);
         try {
-            const { error: upsertErr } = await (supabase.from('users') as any)
-                .upsert({ id: userId, email: (await supabase.auth.getUser()).data.user?.email ?? '', role: 'donor' }, { onConflict: 'id' });
-            if (upsertErr) console.warn('users upsert warning:', upsertErr.message);
+            const sb = getSupabaseClient();
+            const { data: { session } } = await sb.auth.getSession();
+            await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'donor' });
 
-            const { error } = await (supabase.from('donor_details') as any).upsert({
+            await db.upsertDetails('donor_details', {
                 id: userId,
                 donor_type: data.donor_type,
                 preferred_causes: data.preferred_causes,
                 tax_id: data.tax_id || null,
-            }, { onConflict: 'id' });
+            });
 
-            if (error) {
-                console.error('donor_details insert error:', error);
-                throw error;
+            await db.updateProfile({ is_profile_completed: true });
+
+            // Set cookies with Supabase access token
+            if (session) {
+                document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
+                document.cookie = `sb-role=donor; path=/; max-age=3600; SameSite=Lax`;
             }
-
-            await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
-            await supabase.auth.updateUser({ data: { role: 'donor' } });
-            await supabase.auth.refreshSession();
+            document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`;
             window.location.href = '/donor';
         } catch (error: any) {
             console.error('Donor onboarding error:', error);

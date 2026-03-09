@@ -16,9 +16,14 @@ from typing import Optional, List
 from datetime import datetime, timezone
 import math
 
-from app.database import supabase, supabase_admin
+from app.database import db, db_admin
 from app.dependencies import require_ngo, require_verified_ngo
-from app.services.notification_service import notify_request_status_change
+from app.services.notification_service import (
+    notify_request_status_change,
+    notify_all_admins,
+    notify_user,
+    generate_delivery_code,
+)
 
 router = APIRouter()
 security = HTTPBearer()
@@ -109,7 +114,7 @@ class InventoryItem(BaseModel):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _log_pulse(
+async def _log_pulse(
     actor_id: str,
     target_id: str,
     action_type: str,
@@ -118,7 +123,7 @@ def _log_pulse(
 ):
     """Write to operational_pulse for audit trail."""
     try:
-        supabase_admin.table("operational_pulse").insert(
+        await db_admin.table("operational_pulse").insert(
             {
                 "actor_id": actor_id,
                 "target_id": target_id,
@@ -126,17 +131,17 @@ def _log_pulse(
                 "description": description,
                 "metadata": metadata or {},
             }
-        ).execute()
+        ).async_execute()
     except Exception as e:
         print(f"Pulse log error: {e}")
 
 
-def _send_notification(
+async def _send_notification(
     user_id: str, title: str, message: str, priority: str = "medium", data: dict = None
 ):
     """Insert into the notifications table."""
     try:
-        supabase_admin.table("notifications").insert(
+        await db_admin.table("notifications").insert(
             {
                 "user_id": user_id,
                 "title": title,
@@ -144,21 +149,21 @@ def _send_notification(
                 "priority": priority,
                 "data": data or {},
             }
-        ).execute()
+        ).async_execute()
     except Exception as e:
         print(f"Notification insert error: {e}")
 
 
-def _enrich_with_victim(requests_list: list) -> list:
+async def _enrich_with_victim(requests_list: list) -> list:
     """Add victim name / phone / email to a list of request dicts."""
     victim_ids = [r["victim_id"] for r in requests_list if r.get("victim_id")]
     user_map = {}
     if victim_ids:
         users_resp = (
-            supabase_admin.table("users")
+            await db_admin.table("users")
             .select("id, full_name, email, phone")
             .in_("id", victim_ids)
-            .execute()
+            .async_execute()
         )
         for u in users_resp.data or []:
             user_map[u["id"]] = u
@@ -203,11 +208,11 @@ async def list_available_requests(
     n_lat = ngo_latitude
     n_lon = ngo_longitude
     ngo_user = (
-        supabase_admin.table("users")
+        await db_admin.table("users")
         .select("metadata")
         .eq("id", ngo_id)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     if n_lat is None or n_lon is None:
         if ngo_user.data and ngo_user.data.get("metadata"):
@@ -220,45 +225,42 @@ async def list_available_requests(
             meta = (ngo_user.data or {}).get("metadata") or {}
             meta["latitude"] = ngo_latitude
             meta["longitude"] = ngo_longitude
-            supabase_admin.table("users").update({"metadata": meta}).eq(
+            await db_admin.table("users").update({"metadata": meta}).eq(
                 "id", ngo_id
-            ).execute()
+            ).async_execute()
         except Exception:
             pass
 
-    # For distance sorting, we need ALL matching records first, then sort, then paginate
-    # For priority sorting, DB handles it directly
-    needs_client_sort = sort == "distance" and n_lat and n_lon
+    # Priority mapping for proper ordering (lower = more urgent)
+    _PRIO_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
-    if needs_client_sort:
-        # Fetch all matching records (no pagination yet)
-        query = (
-            supabase_admin.table("resource_requests")
-            .select("*", count="exact")
-            .eq("status", "approved")
-            .is_("assigned_to", "null")
-        )
-    else:
-        query = (
-            supabase_admin.table("resource_requests")
-            .select("*", count="exact")
-            .eq("status", "approved")
-            .is_("assigned_to", "null")
-            .order("priority", desc=True)
-            .order("created_at", desc=True)
-            .range(offset, offset + limit - 1)
-        )
+    # Both distance and priority need client-side sorting (priority because
+    # alphabetical ordering puts "critical" after "medium"), so always fetch
+    # all matching records and sort/paginate client-side.
+    needs_client_sort = True
+
+    query = (
+        db_admin.table("resource_requests")
+        .select("*", count="exact")
+        .in_("status", ["approved", "availability_submitted", "under_review"])
+    )
 
     if resource_type:
         query = query.eq("resource_type", resource_type)
     if priority:
         query = query.eq("priority", priority)
 
-    resp = query.execute()
-    base_requests = resp.data or []
-    total_count = resp.count or 0
+    resp = await query.async_execute()
+    # Show unassigned requests OR partially fulfilled ones (where donors have
+    # contributed but an NGO hasn't claimed yet for delivery)
+    base_requests = [
+        r for r in (resp.data or [])
+        if not r.get("assigned_to")
+        or r.get("status") == "under_review"
+    ]
+    total_count = len(base_requests)
 
-    requests = _enrich_with_victim(base_requests)
+    requests = await _enrich_with_victim(base_requests)
 
     # Compute distance for all records
     for r in requests:
@@ -274,12 +276,12 @@ async def list_available_requests(
     if req_ids:
         try:
             pulse_resp = (
-                supabase_admin.table("operational_pulse")
+                await db_admin.table("operational_pulse")
                 .select("target_id")
                 .eq("actor_id", ngo_id)
                 .eq("action_type", "ngo_availability_submitted")
                 .in_("target_id", req_ids)
-                .execute()
+                .async_execute()
             )
             submitted_set = {p["target_id"] for p in (pulse_resp.data or [])}
         except Exception:
@@ -288,15 +290,23 @@ async def list_available_requests(
     for r in requests:
         r["availability_submitted"] = r["id"] in submitted_set
 
-    # Sort and paginate for distance mode
-    if needs_client_sort:
+    # Sort and paginate client-side
+    if sort == "distance" and n_lat and n_lon:
         requests.sort(
             key=lambda r: (
                 r["distance_km"] if r["distance_km"] is not None else float("inf")
             )
         )
-        # Apply pagination after sorting
-        requests = requests[offset : offset + limit]
+    else:
+        # Sort by priority (critical first) then by created_at descending
+        requests.sort(
+            key=lambda r: (
+                _PRIO_ORDER.get(r.get("priority", "low"), 99),
+                -(datetime.fromisoformat(r["created_at"]).timestamp() if r.get("created_at") else 0),
+            )
+        )
+    # Apply pagination after sorting
+    requests = requests[offset : offset + limit]
 
     return {"requests": requests, "total": total_count}
 
@@ -315,33 +325,34 @@ async def submit_availability(
 
     # Verify request exists and is approved
     existing = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .select("*")
         .eq("id", request_id)
         .single()
-        .execute()
+        .async_execute()
     )
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
 
     req_status = existing.data.get("status")
-    if req_status not in ("approved", "availability_submitted"):
+    if req_status not in ("approved", "availability_submitted", "under_review"):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot submit availability for request in '{req_status}' status. Must be 'approved'.",
+            detail=f"Cannot submit availability for request in '{req_status}' status. Must be 'approved' or 'under_review'.",
         )
 
-    if existing.data.get("assigned_to"):
-        raise HTTPException(status_code=400, detail="Request is already assigned")
+    # Allow multiple NGOs to contribute — only block if request is fully assigned and in-progress
+    if existing.data.get("assigned_to") and req_status in ("in_progress", "delivered", "completed"):
+        raise HTTPException(status_code=400, detail="Request is already in progress and cannot accept new availability")
 
     # Prevent duplicate submission
     dup = (
-        supabase_admin.table("operational_pulse")
+        await db_admin.table("operational_pulse")
         .select("id")
         .eq("actor_id", ngo_id)
         .eq("target_id", request_id)
         .eq("action_type", "ngo_availability_submitted")
-        .execute()
+        .async_execute()
     )
     if dup.data and len(dup.data) > 0:
         raise HTTPException(
@@ -368,7 +379,7 @@ async def submit_availability(
         )
 
     # Log availability in operational_pulse
-    _log_pulse(
+    await _log_pulse(
         actor_id=ngo_id,
         target_id=request_id,
         action_type="ngo_availability_submitted",
@@ -386,40 +397,70 @@ async def submit_availability(
         },
     )
 
-    # Update request status to availability_submitted (if still approved)
-    if req_status == "approved":
-        supabase_admin.table("resource_requests").update(
+    # Update request status and track fulfillment
+    if req_status in ("approved", "availability_submitted", "under_review"):
+        # Track partial fulfillment
+        fulfillment_entries = existing.data.get("fulfillment_entries") or []
+        ngo_name = ngo.get("full_name") or ngo.get("email") or "NGO"
+        entry = {
+            "provider_id": ngo_id,
+            "provider_name": ngo_name,
+            "provider_role": "ngo",
+            "donation_type": "resource",
+            "amount": 0,
+            "resource_items": [{"resource_type": existing.data.get("resource_type", "Custom"), "quantity": body.available_quantity}],
+            "status": "availability_submitted",
+            "estimated_delivery_time": body.estimated_delivery_time,
+            "distance_km": distance_km,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        fulfillment_entries.append(entry)
+
+        # Calculate fulfillment percentage
+        request_items = existing.data.get("items") or []
+        total_requested = sum(it.get("quantity", 1) for it in request_items) if request_items else existing.data.get("quantity", 1)
+        total_fulfilled = sum(
+            ri.get("quantity", 0)
+            for fe in fulfillment_entries
+            for ri in (fe.get("resource_items") or [])
+        )
+        fulfillment_pct = min(100, round((total_fulfilled / max(total_requested, 1)) * 100))
+
+        new_status = "under_review" if fulfillment_pct < 100 else "availability_submitted"
+        await db_admin.table("resource_requests").update(
             {
-                "status": "availability_submitted",
+                "status": new_status,
+                "fulfillment_entries": fulfillment_entries,
+                "fulfillment_pct": fulfillment_pct,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        ).eq("id", request_id).execute()
+        ).eq("id", request_id).async_execute()
 
     # Update NGO user metadata with GPS
     if body.ngo_latitude and body.ngo_longitude:
         try:
             current = (
-                supabase_admin.table("users")
+                await db_admin.table("users")
                 .select("metadata")
                 .eq("id", ngo_id)
                 .maybe_single()
-                .execute()
+                .async_execute()
             )
             meta = (current.data or {}).get("metadata") or {}
             meta["latitude"] = body.ngo_latitude
             meta["longitude"] = body.ngo_longitude
-            supabase_admin.table("users").update({"metadata": meta}).eq(
+            await db_admin.table("users").update({"metadata": meta}).eq(
                 "id", ngo_id
-            ).execute()
+            ).async_execute()
         except Exception:
             pass
 
     # Notify admins
     admin_users = (
-        supabase_admin.table("users").select("id").eq("role", "admin").execute()
+        await db_admin.table("users").select("id").eq("role", "admin").async_execute()
     )
     for admin in admin_users.data or []:
-        _send_notification(
+        await _send_notification(
             user_id=admin["id"],
             title="NGO Availability Submitted",
             message=f"NGO submitted availability for request {request_id[:8]}... ({body.available_quantity} units)",
@@ -430,6 +471,21 @@ async def submit_availability(
                 "type": "ngo_availability",
             },
         )
+
+    # Notify victim that an NGO has offered to help
+    victim_id = existing.data.get("victim_id")
+    if victim_id:
+        try:
+            await notify_user(
+                user_id=victim_id,
+                title="🤝 A Responder Has Offered Help",
+                message=f"An NGO has submitted availability for your {existing.data.get('resource_type', 'resource')} request. An admin will assign them shortly.",
+                notification_type="info",
+                related_id=request_id,
+                related_type="request",
+            )
+        except Exception:
+            pass
 
     return {
         "message": "Availability submitted successfully",
@@ -447,20 +503,65 @@ async def get_availability(
     ngo_id = str(ngo.get("id"))
 
     resp = (
-        supabase_admin.table("operational_pulse")
+        await db_admin.table("operational_pulse")
         .select("*")
         .eq("actor_id", ngo_id)
         .eq("target_id", request_id)
         .eq("action_type", "ngo_availability_submitted")
         .order("created_at", desc=True)
         .limit(1)
-        .execute()
+        .async_execute()
     )
 
     if not resp.data:
         return {"submitted": False, "data": None}
 
     return {"submitted": True, "data": resp.data[0]}
+
+
+@router.get("/requests/{request_id}/pool")
+async def get_request_pool_ngo(
+    request_id: str, ngo=Depends(require_ngo)
+):
+    """View resource pool for a request — shows all NGO and donor contributors."""
+    resp = (
+        await db_admin.table("resource_requests")
+        .select("id, items, quantity, resource_type, status, fulfillment_entries, fulfillment_pct")
+        .eq("id", request_id)
+        .in_("status", ["approved", "assigned", "availability_submitted", "under_review", "in_progress", "delivered", "completed"])
+        .single()
+        .async_execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    entries = resp.data.get("fulfillment_entries") or []
+    items = resp.data.get("items") or []
+
+    ngo_list, donor_list = [], []
+    for e in entries:
+        info = {
+            "provider_name": e.get("provider_name", "Anonymous"),
+            "donation_type": e.get("donation_type", "resource"),
+            "amount": e.get("amount", 0),
+            "resource_items": e.get("resource_items") or [],
+            "status": e.get("status", "pledged"),
+            "created_at": e.get("created_at"),
+        }
+        if e.get("provider_role") == "ngo":
+            ngo_list.append(info)
+        else:
+            donor_list.append(info)
+
+    total_requested = sum(it.get("quantity", 1) for it in items) if items else resp.data.get("quantity", 1)
+    return {
+        "request_id": request_id,
+        "fulfillment_pct": resp.data.get("fulfillment_pct", 0),
+        "total_requested": total_requested,
+        "total_contributors": len(entries),
+        "ngo_contributors": ngo_list,
+        "donor_contributors": donor_list,
+    }
 
 
 # ================ ASSIGNED REQUESTS ================
@@ -475,29 +576,33 @@ async def list_assigned_requests(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """List requests currently assigned to this NGO."""
+    """List requests currently assigned to this NGO (via assigned_to or fulfillment_entries)."""
     ngo_id = str(ngo.get("id"))
+
+    # Match by direct assignment OR as contributor in fulfillment_entries
+    or_filter = f'assigned_to.eq.{ngo_id},fulfillment_entries.cs.[{{"provider_id":"{ngo_id}"}}]'
+
     query = (
-        supabase_admin.table("resource_requests")
+        db_admin.table("resource_requests")
         .select("*", count="exact")
-        .eq("assigned_to", ngo_id)
+        .or_(or_filter)
         .order("updated_at", desc=True)
         .range(offset, offset + limit - 1)
     )
     if status:
         query = query.eq("status", status)
 
-    resp = query.execute()
+    resp = await query.async_execute()
     base_requests = resp.data or []
 
-    requests = _enrich_with_victim(base_requests)
+    requests = await _enrich_with_victim(base_requests)
 
     # Compute status counts
     all_assigned = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .select("status")
-        .eq("assigned_to", ngo_id)
-        .execute()
+        .or_(or_filter)
+        .async_execute()
     )
     status_counts = {}
     for r in all_assigned.data or []:
@@ -506,11 +611,11 @@ async def list_assigned_requests(
 
     # Enrich with distance and availability data
     ngo_user = (
-        supabase_admin.table("users")
+        await db_admin.table("users")
         .select("metadata")
         .eq("id", ngo_id)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     ngo_lat = None
     ngo_lon = None
@@ -555,23 +660,25 @@ async def claim_request(
     ngo_id = str(ngo.get("id"))
 
     existing = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .select("*")
         .eq("id", request_id)
         .single()
-        .execute()
+        .async_execute()
     )
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
 
-    if existing.data.get("status") != "approved":
+    if existing.data.get("status") not in ("approved", "availability_submitted", "under_review"):
         raise HTTPException(
-            status_code=400, detail="Only 'approved' requests can be claimed"
+            status_code=400, detail="Only 'approved', 'availability_submitted', or 'under_review' requests can be claimed"
         )
 
-    if existing.data.get("assigned_to"):
-        raise HTTPException(status_code=400, detail="Request is already assigned")
+    # Block only if already assigned to a different NGO
+    current_assignee = existing.data.get("assigned_to")
+    if current_assignee and current_assignee != ngo_id and existing.data.get("assigned_role") == "ngo":
+        raise HTTPException(status_code=400, detail="Request is already assigned to another NGO")
 
     updates = {
         "status": "assigned",
@@ -583,16 +690,16 @@ async def claim_request(
         updates["estimated_delivery"] = body.estimated_delivery
 
     resp = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .update(updates)
         .eq("id", request_id)
-        .execute()
+        .async_execute()
     )
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to claim request")
 
-    _log_pulse(
+    await _log_pulse(
         ngo_id,
         request_id,
         "ngo_request_claimed",
@@ -616,18 +723,22 @@ async def update_delivery_status(
     ngo_id = str(ngo.get("id"))
 
     existing = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .select("*")
         .eq("id", request_id)
         .single()
-        .execute()
+        .async_execute()
     )
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
 
     if existing.data.get("assigned_to") != ngo_id:
-        raise HTTPException(status_code=403, detail="Not assigned to this request")
+        # Check if NGO is at least a contributor via fulfillment_entries
+        fulfillment_entries = existing.data.get("fulfillment_entries") or []
+        is_contributor = any(fe.get("provider_id") == ngo_id for fe in fulfillment_entries)
+        if not is_contributor:
+            raise HTTPException(status_code=403, detail="Not assigned to this request")
 
     current_status = existing.data.get("status")
 
@@ -650,17 +761,23 @@ async def update_delivery_status(
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Generate delivery confirmation code when status becomes "delivered"
+    delivery_code = None
+    if body.new_status == "delivered":
+        delivery_code = generate_delivery_code()
+        updates["delivery_confirmation_code"] = delivery_code
+
     resp = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .update(updates)
         .eq("id", request_id)
-        .execute()
+        .async_execute()
     )
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update delivery status")
 
-    _log_pulse(
+    await _log_pulse(
         ngo_id,
         request_id,
         f"status_change_{body.new_status}",
@@ -684,8 +801,53 @@ async def update_delivery_status(
             admin_id=ngo_id,
             admin_note=body.notes,
         )
+
+        # Send delivery code to victim when delivered
+        if body.new_status == "delivered" and delivery_code and existing.data.get("victim_id"):
+            await notify_user(
+                user_id=existing.data["victim_id"],
+                title="📦 Delivery Arrived — Confirm Receipt",
+                message=f"Your {existing.data.get('resource_type', 'resource')} has been delivered. Confirmation code: {delivery_code}. Share this code with the deliverer to complete the handoff.",
+                notification_type="success",
+                related_id=request_id,
+                related_type="request",
+            )
+
     except Exception as e:
         print(f"Error notifying victim: {e}")
+
+    # Notify admins about delivery status change
+    try:
+        await notify_all_admins(
+            title=f"🚚 Delivery Status: {body.new_status.replace('_', ' ').title()}",
+            message=f"Request {request_id[:8]}... status changed: {current_status} → {body.new_status}",
+            notification_type="info",
+            related_id=request_id,
+            related_type="request",
+        )
+    except Exception:
+        pass
+
+    # On completion, notify the donor who pledged (if any)
+    if body.new_status == "completed":
+        try:
+            donor_resp = (
+                await db_admin.table("donations")
+                .select("user_id")
+                .eq("request_id", request_id)
+                .async_execute()
+            )
+            for d in donor_resp.data or []:
+                await notify_user(
+                    user_id=d["user_id"],
+                    title="🎉 Your Donation Made an Impact!",
+                    message=f"The request you pledged support for ({existing.data.get('resource_type', 'resources')}) has been completed. Thank you!",
+                    notification_type="success",
+                    related_id=request_id,
+                    related_type="request",
+                )
+        except Exception:
+            pass
 
     return resp.data[0]
 
@@ -703,11 +865,11 @@ async def update_fulfillment_status(
     ngo_id = str(ngo.get("id"))
 
     existing = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .select("*")
         .eq("id", request_id)
         .single()
-        .execute()
+        .async_execute()
     )
 
     if not existing.data:
@@ -725,16 +887,16 @@ async def update_fulfillment_status(
     }
 
     resp = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .update(updates)
         .eq("id", request_id)
-        .execute()
+        .async_execute()
     )
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update request status")
 
-    _log_pulse(
+    await _log_pulse(
         ngo_id,
         request_id,
         f"status_change_{body.status}",
@@ -770,38 +932,40 @@ async def get_ngo_dashboard_stats(
 
     # All requests assigned to NGO
     assigned_resp = (
-        supabase_admin.table("resource_requests")
+        await db_admin.table("resource_requests")
         .select("status, priority, created_at, updated_at, latitude, longitude")
         .eq("assigned_to", ngo_id)
-        .execute()
+        .async_execute()
     )
     assigned_requests = assigned_resp.data or []
 
-    # All approved requests (available)
+    # All approved requests (available) — filter client-side because
+    # IS NULL check won't match documents where the field is absent
     approved_resp = (
-        supabase_admin.table("resource_requests")
-        .select("id", count="exact")
+        await db_admin.table("resource_requests")
+        .select("id, assigned_to", count="exact")
         .eq("status", "approved")
-        .is_("assigned_to", "null")
-        .execute()
+        .async_execute()
     )
+    approved_resp.data = [r for r in (approved_resp.data or []) if not r.get("assigned_to")]
+    approved_resp.count = len(approved_resp.data)
 
     # Availability submissions by this NGO
     avail_resp = (
-        supabase_admin.table("operational_pulse")
+        await db_admin.table("operational_pulse")
         .select("id", count="exact")
         .eq("actor_id", ngo_id)
         .eq("action_type", "ngo_availability_submitted")
-        .execute()
+        .async_execute()
     )
 
     # NGO coordinates for distance calculation
     ngo_user = (
-        supabase_admin.table("users")
+        await db_admin.table("users")
         .select("metadata")
         .eq("id", ngo_id)
         .maybe_single()
-        .execute()
+        .async_execute()
     )
     ngo_lat = None
     ngo_lon = None
@@ -881,7 +1045,7 @@ async def get_ngo_inventory(
     ngo_id = str(ngo.get("id"))
 
     query = (
-        supabase_admin.table("available_resources")
+        db_admin.table("available_resources")
         .select("*", count="exact")
         .eq("provider_id", ngo_id)
         .eq("provider_role", "ngo")
@@ -893,7 +1057,7 @@ async def get_ngo_inventory(
     if status:
         query = query.eq("status", status)
 
-    resp = query.execute()
+    resp = await query.async_execute()
     items = resp.data or []
 
     # Compute summary
@@ -947,12 +1111,12 @@ async def add_inventory_item(
         "is_active": True,
     }
 
-    resp = supabase_admin.table("available_resources").insert(insert_data).execute()
+    resp = await db_admin.table("available_resources").insert(insert_data).async_execute()
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to add inventory item")
 
-    _log_pulse(
+    await _log_pulse(
         ngo_id,
         resp.data[0]["resource_id"],
         "inventory_added",
@@ -973,12 +1137,12 @@ async def update_inventory_item(
     ngo_id = str(ngo.get("id"))
 
     existing = (
-        supabase_admin.table("available_resources")
+        await db_admin.table("available_resources")
         .select("*")
         .eq("resource_id", resource_id)
         .eq("provider_id", ngo_id)
         .single()
-        .execute()
+        .async_execute()
     )
 
     if not existing.data:
@@ -991,10 +1155,10 @@ async def update_inventory_item(
         updates["status"] = status
 
     resp = (
-        supabase_admin.table("available_resources")
+        await db_admin.table("available_resources")
         .update(updates)
         .eq("resource_id", resource_id)
-        .execute()
+        .async_execute()
     )
 
     return resp.data[0] if resp.data else {"message": "Updated"}
@@ -1014,7 +1178,7 @@ async def get_audit_log(
     ngo_id = str(ngo.get("id"))
 
     query = (
-        supabase_admin.table("operational_pulse")
+        db_admin.table("operational_pulse")
         .select("*", count="exact")
         .eq("actor_id", ngo_id)
         .order("created_at", desc=True)
@@ -1023,7 +1187,7 @@ async def get_audit_log(
     if action_type:
         query = query.eq("action_type", action_type)
 
-    resp = query.execute()
+    resp = await query.async_execute()
     return {"entries": resp.data or [], "total": resp.count or 0}
 
 
@@ -1040,7 +1204,7 @@ async def get_ngo_notifications(
     ngo_id = str(ngo.get("id"))
 
     query = (
-        supabase_admin.table("notifications")
+        db_admin.table("notifications")
         .select("*")
         .eq("user_id", ngo_id)
         .order("created_at", desc=True)
@@ -1049,15 +1213,15 @@ async def get_ngo_notifications(
     if unread_only:
         query = query.eq("read", False)
 
-    resp = query.execute()
+    resp = await query.async_execute()
 
     # Count unread
     unread_resp = (
-        supabase_admin.table("notifications")
+        await db_admin.table("notifications")
         .select("id", count="exact")
         .eq("user_id", ngo_id)
         .eq("read", False)
-        .execute()
+        .async_execute()
     )
 
     return {
@@ -1075,18 +1239,18 @@ async def mark_notifications_read(
     ngo_id = str(ngo.get("id"))
 
     if notification_ids:
-        supabase_admin.table("notifications").update(
+        await db_admin.table("notifications").update(
             {
                 "read": True,
                 "read_at": datetime.now(timezone.utc).isoformat(),
             }
-        ).in_("id", notification_ids).eq("user_id", ngo_id).execute()
+        ).in_("id", notification_ids).eq("user_id", ngo_id).async_execute()
     else:
-        supabase_admin.table("notifications").update(
+        await db_admin.table("notifications").update(
             {
                 "read": True,
                 "read_at": datetime.now(timezone.utc).isoformat(),
             }
-        ).eq("user_id", ngo_id).eq("read", False).execute()
+        ).eq("user_id", ngo_id).eq("read", False).async_execute()
 
     return {"message": "Notifications marked as read"}

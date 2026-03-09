@@ -6,7 +6,7 @@ import { useAuth } from '@/lib/auth-provider'
 import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import { useState, useEffect } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import {
     Loader2, AlertTriangle, Clock, CheckCircle2, TrendingUp,
     ArrowRight, Package, MapPin, Activity, ListOrdered,
@@ -41,7 +41,7 @@ export function NGODashboardOverview() {
     const [mounted, setMounted] = useState(false)
     useEffect(() => { setMounted(true) }, [])
 
-    const { data: stats, isLoading: sLoad } = useQuery({
+    const { data: stats, isLoading: sLoad, isError: sError } = useQuery({
         queryKey: ['ngo-enhanced-stats'],
         queryFn: () => api.getNgoStats(),
         refetchInterval: 15000,
@@ -67,17 +67,13 @@ export function NGODashboardOverview() {
 
     // Realtime sync
     useEffect(() => {
-        const supabase = createClient()
-        const channel = supabase
-            .channel('ngo-dashboard-rt')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'resource_requests' }, () => {
-                // Will trigger re-renders via React Query
-            })
-            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, () => {
-                // Notification sound/visual
-            })
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+        const unsub1 = subscribeToTable('resource_requests', () => {
+            // Will trigger re-renders via React Query
+        })
+        const unsub2 = subscribeToTable('notifications', () => {
+            // Notification sound/visual
+        })
+        return () => { unsub1(); unsub2() }
     }, [])
 
     const disasterList = Array.isArray(disasters) ? disasters : []
@@ -88,6 +84,16 @@ export function NGODashboardOverview() {
     const unreadCount = notifData?.unread_count || 0
 
     const isLoading = sLoad
+
+    if (sError) {
+        return (
+            <div className="flex flex-col items-center justify-center h-64 gap-4">
+                <AlertTriangle className="w-10 h-10 text-amber-500" />
+                <p className="text-sm text-slate-500">Unable to load dashboard data.</p>
+                <button onClick={() => window.location.reload()} className="text-sm text-blue-500 hover:underline">Retry</button>
+            </div>
+        )
+    }
 
     if (isLoading) {
         return (

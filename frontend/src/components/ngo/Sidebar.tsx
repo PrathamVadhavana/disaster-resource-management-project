@@ -10,7 +10,7 @@ import { api } from '@/lib/api'
 import {
     LayoutDashboard, ListOrdered, Package, Map, Users,
     LogOut, ChevronLeft, Menu, Sun, Moon, Building2,
-    CheckSquare, Truck, Bell,
+    CheckSquare, Truck, Bell, User,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { NotificationBell } from '@/components/shared/NotificationBell'
@@ -23,6 +23,7 @@ const navItems = [
     { href: '/ngo/inventory', label: 'Resource Inventory', icon: Package },
     { href: '/ngo/live-map', label: 'Live Map', icon: Map },
     { href: '/ngo/team', label: 'Team', icon: Users },
+    { href: '/ngo/profile', label: 'Profile', icon: User },
 ]
 
 export function NGOSidebar() {

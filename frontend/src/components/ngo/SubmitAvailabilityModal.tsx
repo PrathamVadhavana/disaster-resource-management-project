@@ -15,8 +15,13 @@ interface Props {
 
 export function SubmitAvailabilityModal({ request, onClose }: Props) {
     const qc = useQueryClient()
+    // Calculate remaining quantity needed
+    const totalRequested = request.quantity || 1
+    const alreadyFulfilled = Math.round((request.fulfillment_pct || 0) * totalRequested / 100)
+    const remaining = Math.max(1, totalRequested - alreadyFulfilled)
+
     const [form, setForm] = useState({
-        available_quantity: request.quantity || 1,
+        available_quantity: remaining,
         estimated_delivery_time: '',
         assigned_team: '',
         vehicle_type: '',
@@ -110,18 +115,20 @@ export function SubmitAvailabilityModal({ request, onClose }: Props) {
                     {/* Available Quantity */}
                     <div>
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
-                            <Truck className="w-3.5 h-3.5" /> Available Quantity
+                            <Truck className="w-3.5 h-3.5" /> {request.resource_type === 'Volunteers' ? 'Number of Volunteers' : 'Available Quantity'}
                         </label>
                         <input type="number" min="1" value={form.available_quantity}
                             onChange={(e) => setForm({ ...form, available_quantity: parseInt(e.target.value) || 1 })} required
                             className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                        <p className="text-[10px] text-slate-400 mt-1">Requested: {request.quantity || 'N/A'}</p>
+                        <p className="text-[10px] text-slate-400 mt-1">
+                            Requested: {totalRequested} — Already fulfilled: {alreadyFulfilled} — Remaining: {remaining}
+                        </p>
                     </div>
 
                     {/* Estimated Delivery Time */}
                     <div>
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
-                            <Clock className="w-3.5 h-3.5" /> Estimated Delivery Time
+                            <Clock className="w-3.5 h-3.5" /> {request.resource_type === 'Volunteers' ? 'Available From' : 'Estimated Delivery Time'}
                         </label>
                         <input type="datetime-local" value={form.estimated_delivery_time}
                             onChange={(e) => setForm({ ...form, estimated_delivery_time: e.target.value })} required
@@ -132,15 +139,16 @@ export function SubmitAvailabilityModal({ request, onClose }: Props) {
                         {/* Assigned Team */}
                         <div>
                             <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
-                                <Users className="w-3.5 h-3.5" /> Assigned Team
+                                <Users className="w-3.5 h-3.5" /> {request.resource_type === 'Volunteers' ? 'Team / Group Name' : 'Assigned Team'}
                             </label>
                             <input type="text" value={form.assigned_team}
                                 onChange={(e) => setForm({ ...form, assigned_team: e.target.value })}
-                                placeholder="e.g. Alpha Team"
+                                placeholder={request.resource_type === 'Volunteers' ? 'e.g. Relief Volunteers Group' : 'e.g. Alpha Team'}
                                 className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                         </div>
 
-                        {/* Vehicle Type */}
+                        {/* Vehicle Type — hide for volunteer requests */}
+                        {request.resource_type !== 'Volunteers' && (
                         <div>
                             <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
                                 <Truck className="w-3.5 h-3.5" /> Vehicle Type
@@ -158,6 +166,7 @@ export function SubmitAvailabilityModal({ request, onClose }: Props) {
                                 <option value="other">Other</option>
                             </select>
                         </div>
+                        )}
                     </div>
 
                     {/* GPS Coordinates */}

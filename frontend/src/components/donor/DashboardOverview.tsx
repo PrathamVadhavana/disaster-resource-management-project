@@ -7,14 +7,14 @@ import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import {
     Loader2, Heart, TrendingUp, Globe, DollarSign,
-    ArrowRight, Target, BarChart3, Sparkles, Users
+    ArrowRight, Target, BarChart3, Sparkles, Users, AlertTriangle
 } from 'lucide-react'
 import { DonorInteractivityFeed } from './InteractivityFeed'
 
 export function DonorDashboardOverview() {
     const { profile } = useAuth()
 
-    const { data: disasters, isLoading: dLoad } = useQuery({
+    const { data: disasters, isLoading: dLoad, isError: dError } = useQuery({
         queryKey: ['donor-disasters'],
         queryFn: () => api.getDisasters({ status: 'active', limit: 20 }),
         refetchInterval: 60000,
@@ -37,6 +37,17 @@ export function DonorDashboardOverview() {
     const activeDisasters = disasterList.filter((d: any) => d.status === 'active')
 
     const isLoading = dLoad || uLoad
+    const isError = dError
+
+    if (isError) {
+        return (
+            <div className="flex flex-col items-center justify-center h-64 gap-4">
+                <AlertTriangle className="w-10 h-10 text-amber-500" />
+                <p className="text-sm text-slate-500">Unable to load dashboard data.</p>
+                <button onClick={() => window.location.reload()} className="text-sm text-blue-500 hover:underline">Retry</button>
+            </div>
+        )
+    }
 
     if (isLoading) {
         return (

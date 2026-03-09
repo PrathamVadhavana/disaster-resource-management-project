@@ -7,7 +7,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
 import traceback
 
-from app.database import supabase, supabase_admin
+from app.database import db, db_admin
+from app.dependencies import _verify_supabase_token
 from app.schemas import VictimProfileUpdate
 
 router = APIRouter()
@@ -15,12 +16,10 @@ security = HTTPBearer()
 
 
 def _get_victim_id(credentials: HTTPAuthorizationCredentials) -> str:
-    """Extract and verify victim user from bearer token"""
+    """Extract and verify victim user from Supabase bearer token"""
     try:
-        user = supabase.auth.get_user(credentials.credentials)
-        if not user or not user.user:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return user.user.id
+        decoded = _verify_supabase_token(credentials.credentials)
+        return decoded["uid"]
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
@@ -52,11 +51,11 @@ async def get_victim_profile(
 
     try:
         user_resp = (
-            supabase_admin.table("users")
+            await db_admin.table("users")
             .select("*")
             .eq("id", victim_id)
             .single()
-            .execute()
+            .async_execute()
         )
 
         if not user_resp.data:
@@ -68,11 +67,11 @@ async def get_victim_profile(
         victim_data = {}
         try:
             details_resp = (
-                supabase_admin.table("victim_details")
+                await db_admin.table("victim_details")
                 .select("*")
                 .eq("id", victim_id)
                 .single()
-                .execute()
+                .async_execute()
             )
             if details_resp.data:
                 victim_data = details_resp.data
@@ -113,28 +112,28 @@ async def update_victim_profile(
 
         # Update users table
         if user_fields:
-            supabase_admin.table("users").update(user_fields).eq("id", victim_id).execute()
+            await db_admin.table("users").update(user_fields).eq("id", victim_id).async_execute()
 
         # Upsert victim_details
         if victim_fields:
             existing = None
             try:
                 existing_resp = (
-                    supabase_admin.table("victim_details")
+                    await db_admin.table("victim_details")
                     .select("id")
                     .eq("id", victim_id)
                     .single()
-                    .execute()
+                    .async_execute()
                 )
                 existing = existing_resp.data
             except Exception:
                 pass
 
             if existing:
-                supabase_admin.table("victim_details").update(victim_fields).eq("id", victim_id).execute()
+                await db_admin.table("victim_details").update(victim_fields).eq("id", victim_id).async_execute()
             else:
                 victim_fields["id"] = victim_id
-                supabase_admin.table("victim_details").insert(victim_fields).execute()
+                await db_admin.table("victim_details").insert(victim_fields).async_execute()
 
         # Return updated profile
         return await get_victim_profile(credentials)
@@ -165,21 +164,21 @@ async def update_victim_location(
         existing = None
         try:
             existing_resp = (
-                supabase_admin.table("victim_details")
+                await db_admin.table("victim_details")
                 .select("id")
                 .eq("id", victim_id)
                 .single()
-                .execute()
+                .async_execute()
             )
             existing = existing_resp.data
         except Exception:
             pass
 
         if existing:
-            supabase_admin.table("victim_details").update(location_data).eq("id", victim_id).execute()
+            await db_admin.table("victim_details").update(location_data).eq("id", victim_id).async_execute()
         else:
             location_data["id"] = victim_id
-            supabase_admin.table("victim_details").insert(location_data).execute()
+            await db_admin.table("victim_details").insert(location_data).async_execute()
 
         return {"message": "Location updated successfully", "latitude": latitude, "longitude": longitude}
     except Exception as e:

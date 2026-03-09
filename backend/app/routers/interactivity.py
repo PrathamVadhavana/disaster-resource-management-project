@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
-from app.database import supabase_admin
+from app.database import db_admin
 from app.dependencies import get_current_user, require_role
 from app.schemas import (
     RequestVerificationCreate, RequestVerification,
@@ -11,6 +11,10 @@ from app.schemas import (
     VolunteerAssignment, OperationalPulse,
     AssignmentStatus, SourcingStatus, PledgeStatus, MobilizationStatus,
     VolunteerProfileUpdate, VolunteerProfile, MissionTaskCreate, MissionTask
+)
+from app.services.notification_service import (
+    notify_all_admins,
+    notify_user,
 )
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -29,7 +33,7 @@ async def log_pulse(actor_id: str, action_type: str, target_id: str, description
             "metadata": metadata,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        supabase_admin.table("operational_pulse").insert(pulse_data).execute()
+        await db_admin.table("operational_pulse").insert(pulse_data).async_execute()
     except Exception as e:
         print(f"Failed to log pulse: {e}")
 
@@ -47,7 +51,7 @@ async def verify_victim_request(
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "verified_by": user["id"]
     }
-    supabase_admin.table("resource_requests").update(req_update).eq("id", data.request_id).execute()
+    await db_admin.table("resource_requests").update(req_update).eq("id", data.request_id).async_execute()
 
     # 2. Insert verification log
     v_log = {
@@ -60,11 +64,36 @@ async def verify_victim_request(
         "latitude_at_verification": data.latitude_at_verification,
         "longitude_at_verification": data.longitude_at_verification
     }
-    result = supabase_admin.table("request_verifications").insert(v_log).execute()
+    result = await db_admin.table("request_verifications").insert(v_log).async_execute()
     
     # 3. Log pulse
     bg_tasks.add_task(log_pulse, user["id"], "VERIFIED_REQUEST", data.request_id, f"Volunteer verified request {data.request_id} as {data.verification_status}")
-    
+
+    # 4. Notify admin & victim about verification
+    async def _notify_verification():
+        try:
+            await notify_all_admins(
+                title="🔍 Request Verified by Volunteer",
+                message=f"Request {data.request_id[:8]}... verified as '{data.verification_status}'.",
+                notification_type="info",
+                related_id=data.request_id,
+                related_type="request",
+            )
+            # Notify victim
+            req = await db_admin.table("resource_requests").select("victim_id").eq("id", data.request_id).maybe_single().async_execute()
+            if req.data and req.data.get("victim_id"):
+                await notify_user(
+                    user_id=req.data["victim_id"],
+                    title="✅ Your Request Has Been Verified",
+                    message=f"A volunteer has verified your request on the ground. Status: {data.verification_status}.",
+                    notification_type="success",
+                    related_id=data.request_id,
+                    related_type="request",
+                )
+        except Exception:
+            pass
+    bg_tasks.add_task(_notify_verification)
+
     return result.data[0]
 
 # --- NGO ↔ Donor: Sourcing ---
@@ -79,7 +108,7 @@ async def create_sourcing_request(
         "ngo_id": user["id"],
         **data.dict()
     }
-    result = supabase_admin.table("resource_sourcing_requests").insert(s_data).execute()
+    result = await db_admin.table("resource_sourcing_requests").insert(s_data).async_execute()
     
     bg_tasks.add_task(log_pulse, user["id"], "CREATED_SOURCING", result.data[0]["id"], f"NGO {user.get('organization', user['id'])} requested {data.quantity_needed} {data.resource_type}")
     
@@ -92,7 +121,7 @@ async def pledge_to_sourcing(
     bg_tasks: BackgroundTasks = BackgroundTasks()
 ):
     # 1. Check ifourcing exists
-    s_req = supabase_admin.table("resource_sourcing_requests").select("*").eq("id", data.sourcing_request_id).execute()
+    s_req = await db_admin.table("resource_sourcing_requests").select("*").eq("id", data.sourcing_request_id).async_execute()
     if not s_req.data:
         raise HTTPException(status_code=404, detail="Sourcing request not found")
 
@@ -102,11 +131,11 @@ async def pledge_to_sourcing(
         "donor_id": user["id"],
         **data.dict()
     }
-    result = supabase_admin.table("donor_pledges").insert(p_data).execute()
+    result = await db_admin.table("donor_pledges").insert(p_data).async_execute()
     
     # 3. Update sourcing status to partially_funded if it was open
     if s_req.data[0]["status"] == "open":
-        supabase_admin.table("resource_sourcing_requests").update({"status": "partially_funded"}).eq("id", data.sourcing_request_id).execute()
+        await db_admin.table("resource_sourcing_requests").update({"status": "partially_funded"}).eq("id", data.sourcing_request_id).async_execute()
 
     bg_tasks.add_task(log_pulse, user["id"], "PLEDGED_RESOURCES", data.sourcing_request_id, f"Donor pledged {data.quantity_pledged} units to sourcing request {data.sourcing_request_id}")
     
@@ -124,7 +153,7 @@ async def create_mobilization(
         "ngo_id": user["id"],
         **data.dict()
     }
-    result = supabase_admin.table("ngo_mobilization").insert(m_data).execute()
+    result = await db_admin.table("ngo_mobilization").insert(m_data).async_execute()
     
     bg_tasks.add_task(log_pulse, user["id"], "CREATED_MOBILIZATION", result.data[0]["id"], f"NGO created mobilization mission: {data.title}")
     
@@ -142,10 +171,28 @@ async def join_mission(
         "volunteer_id": user["id"],
         "status": "assigned"
     }
-    result = supabase_admin.table("volunteer_assignments").insert(assignment).execute()
+    result = await db_admin.table("volunteer_assignments").insert(assignment).async_execute()
     
     bg_tasks.add_task(log_pulse, user["id"], "JOINED_MISSION", mobilization_id, f"Volunteer joined mission {mobilization_id}")
-    
+
+    # Notify the NGO lead that a volunteer joined their mission
+    async def _notify_ngo_lead():
+        try:
+            mob = await db_admin.table("ngo_mobilization").select("ngo_id, title").eq("id", mobilization_id).maybe_single().async_execute()
+            if mob.data and mob.data.get("ngo_id"):
+                vol_name = user.get("full_name") or user.get("email") or "A volunteer"
+                await notify_user(
+                    user_id=mob.data["ngo_id"],
+                    title="👤 Volunteer Joined Your Mission",
+                    message=f"{vol_name} has joined your mission: {mob.data.get('title', mobilization_id[:8])}.",
+                    notification_type="success",
+                    related_id=mobilization_id,
+                    related_type="mobilization",
+                )
+        except Exception:
+            pass
+    bg_tasks.add_task(_notify_ngo_lead)
+
     return result.data[0]
 
 # --- Admin: Pulse ---
@@ -154,30 +201,30 @@ async def get_operational_pulse(
     limit: int = 50,
     user=Depends(require_role("admin"))
 ):
-    result = supabase_admin.table("operational_pulse")\
+    result = await db_admin.table("operational_pulse")\
         .select("*")\
         .order("created_at", desc=True)\
         .limit(limit)\
-        .execute()
+        .async_execute()
     return result.data
 
 # --- Public: Get Active Missions & Needs ---
 @router.get("/active-needs", response_model=List[ResourceSourcing])
 async def get_active_needs():
-    result = supabase_admin.table("resource_sourcing_requests")\
+    result = await db_admin.table("resource_sourcing_requests")\
         .select("*")\
         .neq("status", "closed")\
         .order("created_at", desc=True)\
-        .execute()
+        .async_execute()
     return result.data
 
 @router.get("/active-missions", response_model=List[NgoMobilization])
 async def get_active_missions():
-    result = supabase_admin.table("ngo_mobilization")\
+    result = await db_admin.table("ngo_mobilization")\
         .select("*")\
         .eq("status", "active")\
         .order("created_at", desc=True)\
-        .execute()
+        .async_execute()
     return result.data
 
 # --- Phase 6.5: Advanced Coordination ---
@@ -190,7 +237,7 @@ async def adopt_victim_request(
 ):
     """Direct Donor-to-Victim linking."""
     # 1. Verify existence and trust
-    req = supabase_admin.table("resource_requests").select("*").eq("id", request_id).single().execute()
+    req = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
     if not req.data:
         raise HTTPException(status_code=404, detail="Request not found")
     if not req.data.get("is_verified"):
@@ -204,12 +251,36 @@ async def adopt_victim_request(
         "assigned_to": user["id"],
         "assigned_role": "donor"
     }
-    result = supabase_admin.table("resource_requests").update(update_data).eq("id", request_id).execute()
+    result = await db_admin.table("resource_requests").update(update_data).eq("id", request_id).async_execute()
 
     # 3. Log pulse
     bg_tasks.add_task(log_pulse, user["id"], "ADOPTED_REQUEST", request_id, 
                      f"Donor {user.get('full_name', 'Anonymous')} adopted verified request {request_id} for direct fulfillment.")
-    
+
+    # 4. Notify victim and admin
+    async def _notify_adoption():
+        try:
+            victim_id = req.data.get("victim_id")
+            if victim_id:
+                await notify_user(
+                    user_id=victim_id,
+                    title="🎁 A Donor Has Adopted Your Request",
+                    message=f"A donor has directly adopted your request for {req.data.get('resource_type', 'resources')}. Help is coming!",
+                    notification_type="success",
+                    related_id=request_id,
+                    related_type="request",
+                )
+            await notify_all_admins(
+                title="💎 Donor Adopted Request",
+                message=f"Donor {user.get('full_name', 'Anonymous')} directly adopted request {request_id[:8]}...",
+                notification_type="info",
+                related_id=request_id,
+                related_type="request",
+            )
+        except Exception:
+            pass
+    bg_tasks.add_task(_notify_adoption)
+
     return result.data[0]
 
 class FeedbackBody(BaseModel):
@@ -229,17 +300,17 @@ async def complete_volunteer_assignment(
         "feedback_notes": body.feedback,
         "completed_at": datetime.now(timezone.utc).isoformat()
     }
-    result = supabase_admin.table("volunteer_assignments")\
+    result = await db_admin.table("volunteer_assignments")\
         .update(update_data)\
         .eq("id", assignment_id)\
         .eq("volunteer_id", user["id"])\
-        .execute()
+        .async_execute()
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Assignment not found or unauthorized")
 
     # 2. Reward volunteer (Trust System)
-    supabase_admin.rpc("increment_user_impact", {"user_id": user["id"], "points": 5}).execute()
+    await db_admin.rpc("increment_user_impact", {"user_id": user["id"], "points": 5}).async_execute()
 
     # 3. Log pulse
     bg_tasks.add_task(log_pulse, user["id"], "COMPLETED_ASSIGNMENT", assignment_id, 
@@ -250,32 +321,32 @@ async def complete_volunteer_assignment(
 @router.get("/urgent-clusters")
 async def get_urgent_clusters(user=Depends(require_role("ngo", "admin"))):
     """Spatial intelligence for NGOs to see where help is needed most."""
-    result = supabase_admin.table("urgent_verification_clusters").select("*").execute()
+    result = await db_admin.table("urgent_verification_clusters").select("*").async_execute()
     return result.data
 
 @router.get("/my-impact")
 async def get_my_impact(user=Depends(get_current_user)):
     """Personal motivation endpoint showing trust score and points."""
-    result = supabase_admin.table("users").select("trust_score, total_impact_points, role")\
-        .eq("id", user["id"]).single().execute()
+    result = await db_admin.table("users").select("trust_score, total_impact_points, role")\
+        .eq("id", user["id"]).single().async_execute()
     return result.data
 
 # --- Phase 6.6: Deep Interaction ---
 
 @router.get("/volunteer/profile", response_model=VolunteerProfile)
 async def get_volunteer_profile(user=Depends(require_role("volunteer"))):
-    result = supabase_admin.table("volunteer_profiles").select("*").eq("user_id", user["id"]).maybe_single().execute()
+    result = await db_admin.table("volunteer_profiles").select("*").eq("user_id", user["id"]).maybe_single().async_execute()
     if not result.data:
         # Auto-create if not exists
         profile = {"user_id": user["id"], "skills": [], "assets": [], "availability_status": "available"}
-        result = supabase_admin.table("volunteer_profiles").insert(profile).execute()
+        result = await db_admin.table("volunteer_profiles").insert(profile).async_execute()
     return result.data[0] if isinstance(result.data, list) else result.data
 
 @router.patch("/volunteer/profile", response_model=VolunteerProfile)
 async def update_volunteer_profile(data: VolunteerProfileUpdate, user=Depends(require_role("volunteer"))):
     update_data = {k: v for k, v in data.dict().items() if v is not None}
     update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = supabase_admin.table("volunteer_profiles").update(update_data).eq("user_id", user["id"]).execute()
+    result = await db_admin.table("volunteer_profiles").update(update_data).eq("user_id", user["id"]).async_execute()
     return result.data[0]
 
 @router.post("/mission-tasks", response_model=MissionTask)
@@ -285,7 +356,7 @@ async def create_mission_task(data: MissionTaskCreate, user=Depends(require_role
         "mobilization_id": data.mobilization_id,
         "task_description": data.task_description
     }
-    result = supabase_admin.table("mission_tasks").insert(task_data).execute()
+    result = await db_admin.table("mission_tasks").insert(task_data).async_execute()
     return result.data[0]
 
 @router.patch("/mission-tasks/{task_id}/complete")
@@ -295,7 +366,7 @@ async def complete_mission_task(task_id: str, user=Depends(require_role("volunte
         "completed_by": user["id"],
         "completed_at": datetime.now(timezone.utc).isoformat()
     }
-    result = supabase_admin.table("mission_tasks").update(update_data).eq("id", task_id).execute()
+    result = await db_admin.table("mission_tasks").update(update_data).eq("id", task_id).async_execute()
     return result.data[0]
 
 @router.post("/confirm-delivery/{request_id}")
@@ -307,7 +378,7 @@ async def confirm_aid_delivery(
 ):
     """Secure handshake using the 6-digit code from the victim."""
     # 1. Verify code
-    req = supabase_admin.table("resource_requests").select("*").eq("id", request_id).single().execute()
+    req = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
     if not req.data:
         raise HTTPException(status_code=404, detail="Request not found")
     
@@ -320,10 +391,10 @@ async def confirm_aid_delivery(
         "status": "completed",
         "delivery_confirmed_at": datetime.now(timezone.utc).isoformat()
     }
-    result = supabase_admin.table("resource_requests").update(update_data).eq("id", request_id).execute()
+    result = await db_admin.table("resource_requests").update(update_data).eq("id", request_id).async_execute()
 
     # 3. Reward the deliverer
-    supabase_admin.rpc("increment_user_impact", {"user_id": user["id"], "points": 10}).execute()
+    await db_admin.rpc("increment_user_impact", {"user_id": user["id"], "points": 10}).async_execute()
 
     bg_tasks.add_task(log_pulse, user["id"], "DELIVERED_AID", request_id, 
                      f"Deliverer successfully completed handshake for request {request_id}.")

@@ -312,9 +312,32 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
                                                 >
                                                     <option value="">Select resource…</option>
 
+                                                    {/* Standard disaster-related resource types */}
+                                                    <optgroup label="🍞 Food">
+                                                        <option value="Food">Food (General)</option>
+                                                    </optgroup>
+                                                    <optgroup label="💧 Water">
+                                                        <option value="Water">Water (General)</option>
+                                                    </optgroup>
+                                                    <optgroup label="🏥 Medical">
+                                                        <option value="Medical">Medical Supplies</option>
+                                                    </optgroup>
+                                                    <optgroup label="🏠 Shelter">
+                                                        <option value="Shelter">Shelter / Housing</option>
+                                                    </optgroup>
+                                                    <optgroup label="👕 Clothing">
+                                                        <option value="Clothing">Clothing</option>
+                                                    </optgroup>
+                                                    <optgroup label="💰 Financial">
+                                                        <option value="Financial Aid">Financial Aid</option>
+                                                    </optgroup>
+                                                    <optgroup label="🚨 Emergency">
+                                                        <option value="Evacuation">Evacuation Assistance</option>
+                                                    </optgroup>
+
                                                     {/* DB available resources grouped by category */}
                                                     {Object.entries(resourcesByCategory).map(([category, resources]) => (
-                                                        <optgroup key={category} label={`${CATEGORY_EMOJI[category] || '📦'} ${category}`}>
+                                                        <optgroup key={`db-${category}`} label={`${CATEGORY_EMOJI[category] || '📦'} ${category} (In Stock)`}>
                                                             {resources.map((r) => (
                                                                 <option key={r.resource_id} value={r.title}>
                                                                     {r.title} — {r.remaining_quantity} {r.unit} available
@@ -323,7 +346,7 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
                                                         </optgroup>
                                                     ))}
 
-                                                    {/* Always allow custom + volunteers */}
+                                                    {/* Allow custom + volunteers */}
                                                     <optgroup label="🙋 Other">
                                                         <option value="Volunteers">🙋 Volunteers</option>
                                                         <option value="Custom">📦 Custom Resource</option>

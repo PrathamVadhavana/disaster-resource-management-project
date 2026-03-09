@@ -8,7 +8,7 @@ import { useTheme } from 'next-themes'
 import {
     LayoutDashboard, Users, Map, Brain, Activity, Settings,
     LogOut, ChevronLeft, Menu, Sun, Moon, Shield, BarChart3,
-    Inbox, Package,
+    Inbox, Package, Scale, Clock, FlaskConical,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { NotificationBell } from '@/components/shared/NotificationBell'
@@ -22,6 +22,9 @@ const navItems = [
     { href: '/admin/live-map', label: 'Live Map', icon: Map },
     { href: '/admin/ai-intelligence', label: 'AI Intelligence', icon: Brain },
     { href: '/admin/analytics', label: 'Analytics', icon: BarChart3 },
+    { href: '/admin/sla', label: 'SLA Monitor', icon: Clock },
+    { href: '/admin/what-if', label: 'What-If Analysis', icon: FlaskConical },
+    { href: '/admin/fairness', label: 'Fairness', icon: Scale },
     { href: '/admin/settings', label: 'Settings', icon: Settings },
 ]
 

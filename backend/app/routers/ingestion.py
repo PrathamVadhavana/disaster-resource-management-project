@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.database import supabase_admin
+from app.services.ingestion import memory_store
 
 router = APIRouter()
 
@@ -94,36 +94,23 @@ async def list_ingested_events(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """List recent ingested events with optional filters."""
-    query = supabase_admin.table("ingested_events").select("*")
+    """List recent ingested events with optional filters (served from memory)."""
+    events = memory_store.query_ingested_events(
+        event_type=event_type,
+        severity=severity,
+        processed=processed,
+        limit=limit,
+        offset=offset,
+    )
 
-    if event_type:
-        query = query.eq("event_type", event_type)
-    if severity:
-        query = query.eq("severity", severity)
-    if processed is not None:
-        query = query.eq("processed", processed)
-
-    query = query.order("ingested_at", desc=True).range(offset, offset + limit - 1)
-    resp = query.execute()
-    base_events = resp.data or []
-
-    # Manual enrichment for data sources
-    source_ids = list(set(e["source_id"] for e in base_events if e.get("source_id")))
-    source_map = {}
-    if source_ids:
-        s_resp = supabase_admin.table("external_data_sources").select("id, source_name, source_type").in_("id", source_ids).execute()
-        for s in (s_resp.data or []):
-            source_map[s["id"]] = s
-
-    final_events = []
-    for e in base_events:
-        e["external_data_sources"] = source_map.get(e.get("source_id"))
-        final_events.append(e)
+    # Enrich with source info from memory
+    sources = {s["id"]: s for s in memory_store.get_all_sources()}
+    for e in events:
+        e["external_data_sources"] = sources.get(e.get("source_id"))
 
     return {
-        "events": final_events,
-        "count": len(final_events),
+        "events": events,
+        "count": len(events),
         "offset": offset,
         "limit": limit,
     }
@@ -132,22 +119,12 @@ async def list_ingested_events(
 @router.get("/events/{event_id}")
 async def get_ingested_event(event_id: str):
     """Get a specific ingested event."""
-    resp = (
-        supabase_admin.table("ingested_events")
-        .select("*")
-        .eq("id", event_id)
-        .single()
-        .execute()
-    )
-    if not resp.data:
+    event = memory_store.get_ingested_event(event_id)
+    if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    
-    event = resp.data
-    sid = event.get("source_id")
-    if sid:
-        s_resp = supabase_admin.table("external_data_sources").select("source_name, source_type").eq("id", sid).maybe_single().execute()
-        event["external_data_sources"] = s_resp.data
 
+    sources = {s["id"]: s for s in memory_store.get_all_sources()}
+    event["external_data_sources"] = sources.get(event.get("source_id"))
     return event
 
 
@@ -158,29 +135,18 @@ async def list_weather_observations(
     location_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=500),
 ):
-    """List recent weather observations."""
-    query = supabase_admin.table("weather_observations").select("*")
-    if location_id:
-        query = query.eq("location_id", location_id)
-    query = query.order("observed_at", desc=True).limit(limit)
-    resp = query.execute()
-    return {"observations": resp.data or [], "count": len(resp.data or [])}
+    """List recent weather observations (from memory)."""
+    observations = memory_store.query_weather(location_id=location_id, limit=limit)
+    return {"observations": observations, "count": len(observations)}
 
 
 @router.get("/weather/latest/{location_id}")
 async def latest_weather(location_id: str):
     """Get the most recent weather observation for a location."""
-    resp = (
-        supabase_admin.table("weather_observations")
-        .select("*")
-        .eq("location_id", location_id)
-        .order("observed_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if not resp.data:
+    row = memory_store.latest_weather_for_location(location_id)
+    if not row:
         raise HTTPException(status_code=404, detail="No weather data for this location")
-    return resp.data[0]
+    return row
 
 
 # ── Satellite observations ──────────────────────────────────────────
@@ -191,15 +157,11 @@ async def list_satellite_observations(
     confidence: Optional[str] = Query(None, description="low, nominal, high"),
     limit: int = Query(50, ge=1, le=500),
 ):
-    """List recent satellite / fire hotspot observations."""
-    query = supabase_admin.table("satellite_observations").select("*")
-    if disaster_id:
-        query = query.eq("disaster_id", disaster_id)
-    if confidence:
-        query = query.eq("confidence", confidence)
-    query = query.order("acq_datetime", desc=True).limit(limit)
-    resp = query.execute()
-    return {"observations": resp.data or [], "count": len(resp.data or [])}
+    """List recent satellite / fire hotspot observations (from memory)."""
+    observations = memory_store.query_satellites(
+        disaster_id=disaster_id, confidence=confidence, limit=limit
+    )
+    return {"observations": observations, "count": len(observations)}
 
 
 # ── Alert notifications ────────────────────────────────────────────
@@ -210,40 +172,31 @@ async def list_alert_notifications(
     status: Optional[str] = Query(None, description="pending, sent, failed, acknowledged"),
     limit: int = Query(50, ge=1, le=500),
 ):
-    """List recent alert notifications."""
-    query = supabase_admin.table("alert_notifications").select("*")
-    if severity:
-        query = query.eq("severity", severity)
-    if status:
-        query = query.eq("status", status)
-    query = query.order("created_at", desc=True).limit(limit)
-    resp = query.execute()
-    return {"alerts": resp.data or [], "count": len(resp.data or [])}
+    """List recent alert notifications (from memory)."""
+    alerts = memory_store.query_alerts(severity=severity, status=status, limit=limit)
+    return {"alerts": alerts, "count": len(alerts)}
 
 
 # ── Data source management ──────────────────────────────────────────
 
 @router.get("/sources")
 async def list_data_sources():
-    """List all registered external data sources."""
-    resp = supabase_admin.table("external_data_sources").select("*").execute()
-    return {"sources": resp.data or []}
+    """List all registered external data sources (from memory)."""
+    return {"sources": memory_store.get_all_sources()}
 
 
 @router.patch("/sources/{source_id}")
 async def update_data_source(source_id: str, body: Dict[str, Any]):
     """Update a data source config (e.g. toggle is_active, change interval)."""
-    allowed_fields = {"is_active", "poll_interval_s", "config_json"}
+    allowed_fields = {"is_active", "poll_interval_s"}
     update_data = {k: v for k, v in body.items() if k in allowed_fields}
     if not update_data:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    resp = (
-        supabase_admin.table("external_data_sources")
-        .update(update_data)
-        .eq("id", source_id)
-        .execute()
-    )
-    if not resp.data:
-        raise HTTPException(status_code=404, detail="Data source not found")
-    return resp.data[0]
+    # Find and update the source in memory
+    sources = memory_store.get_all_sources()
+    for src in sources:
+        if src["id"] == source_id:
+            src.update(update_data)
+            return src
+    raise HTTPException(status_code=404, detail="Data source not found")

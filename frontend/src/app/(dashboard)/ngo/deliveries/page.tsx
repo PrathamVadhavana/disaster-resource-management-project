@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import {
     Loader2, Truck, Play, CheckCircle2, Package, MapPin,
     RefreshCw, Navigation, Clock, User, Upload,
@@ -32,14 +32,10 @@ export default function NGODeliveryTrackingPage() {
     })
 
     useEffect(() => {
-        const supabase = createClient()
-        const channel = supabase
-            .channel('ngo-delivery-rt')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'resource_requests' }, () => {
-                qc.invalidateQueries({ queryKey: ['ngo-deliveries'] })
-            })
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+        const unsub = subscribeToTable('resource_requests', () => {
+            qc.invalidateQueries({ queryKey: ['ngo-deliveries'] })
+        })
+        return () => { unsub() }
     }, [qc])
 
     const statusMutation = useMutation({

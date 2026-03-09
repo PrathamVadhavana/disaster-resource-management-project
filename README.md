@@ -16,9 +16,9 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 └──────────────────────┬───────────────────────────────────────────┘
                        │ HTTPS / WebSocket
 ┌──────────────────────▼───────────────────────────────────────────┐
-│                    Supabase Platform                              │
-│   Auth (JWT)  ·  PostgreSQL + PostGIS  ·  Realtime (WebSocket)   │
-│   Row-Level Security  ·  Edge Functions                          │
+│                    Supabase (Auth + PostgreSQL)                  │
+│   Auth (Supabase)  ·  PostgreSQL + PostGIS  ·  SSE Realtime      │
+│   PostgREST queries  ·  FastAPI backend                          │
 └──────────────────────┬───────────────────────────────────────────┘
                        │ REST / async
 ┌──────────────────────▼───────────────────────────────────────────┐
@@ -86,7 +86,7 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 ### Frontend
 - Role-based dashboards: **Admin**, **Victim**, **NGO/Donor**, **Volunteer**
 - Interactive Leaflet/OpenStreetMap disaster map (no API key needed)
-- Real-time updates via Supabase WebSocket subscriptions
+- Real-time updates via Server-Sent Events (SSE)
 - Dark/light theme, responsive mobile-first design
 - Victim resource request form with AI chatbot alternative
 
@@ -98,7 +98,7 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 |-------|-----------|
 | Frontend | Next.js · React · TypeScript · Tailwind CSS · Leaflet · Zustand · React Query |
 | Backend | FastAPI · Python 3.11 · Uvicorn · Pydantic |
-| Database | Supabase (PostgreSQL + PostGIS) · SQLAlchemy (async) |
+| Database | Supabase (PostgreSQL + PostGIS) |
 | ML/AI | scikit-learn · XGBoost · PuLP · Prophet (optional) · pandas · NumPy |
 | Infra | Docker · Docker Compose · Redis (optional) |
 | Integrations | OpenWeatherMap · USGS · GDACS · NASA FIRMS · SendGrid (all free tier) |
@@ -113,31 +113,22 @@ An end-to-end, AI-powered platform for disaster monitoring, prediction, victim a
 
 - **Node.js 20+** and **npm**
 - **Python 3.11+** and **pip**
-- **Supabase** account ([free tier](https://supabase.com))
+- **Supabase** project ([free tier](https://supabase.com)) with a database
 - **Docker** (optional — for one-command setup)
 
 ### 1. Setup Supabase
 
-1. Create a project at [supabase.com](https://supabase.com)
-2. In the **SQL Editor**, run these scripts in order:
-   - `database/schema.sql` — core tables
-   - `database/phase2_allocation_engine.sql` — allocation tables
-   - `database/phase3_nlp_triage.sql` — NLP feedback table
-   - `database/create_resource_requests.sql` — victim request tables
-   - `database/phase4_realtime_ingestion.sql` — ingestion tables
-   - `database/phase5_ai_ops.sql` — AI operations tables
-   - `database/seed_available_resources.sql` — sample resource data (optional)
-3. Copy your **Project URL**, **Anon Key**, and **Service Role Key** from **Settings → API**
+1. Create a Supabase project at [supabase.com/dashboard](https://supabase.com/dashboard)
+2. Note your **Project URL** and **anon key** from Settings → API
+3. Note the **service role key** and **JWT secret** from the same page
 
 ### 2. Configure Environment
 
 **Backend** — create `backend/.env`:
 ```env
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-anon-key
-SUPABASE_SERVICE_KEY=your-service-role-key
-SUPABASE_DB_PASSWORD=your-db-password
-DATABASE_URL=postgresql+asyncpg://postgres:your-db-password@db.your-project.supabase.co:5432/postgres
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_JWT_SECRET=your-jwt-secret
 ALLOWED_ORIGINS=http://localhost:3000
 DEBUG=true
 ```
@@ -329,7 +320,7 @@ disaster-resource-management/
 │   │   │   ├── outcome_service.py   # Prediction vs actual tracking
 │   │   │   └── ingestion/           # External feed pollers
 │   │   ├── core/                    # Configuration (Phase 4 & 5)
-│   │   ├── database.py              # Supabase + SQLAlchemy setup
+│   │   ├── database.py              # Supabase client setup
 │   │   └── schemas.py               # Pydantic models
 │   ├── models/                      # Trained ML models (.pkl + metadata)
 │   ├── training_data/               # CSV datasets for retraining
@@ -348,12 +339,6 @@ disaster-resource-management/
 │   ├── phase5_ai_ops.sql            # AI Operations tables
 │   ├── seed_available_resources.sql # Sample resource data
 │   └── *.sql                        # Additional migration & fix scripts
-│
-├── docs/                              # Additional documentation
-│   ├── API.md
-│   ├── DEPLOYMENT.md
-│   ├── DEVELOPMENT.md
-│   └── PHASE4_INGESTION.md
 │
 ├── docker-compose.yml                 # Frontend + Backend + Redis
 ├── GETTING_STARTED.md                 # Detailed setup walkthrough
@@ -399,7 +384,7 @@ disaster-resource-management/
 
 ## Security
 
-- **Authentication** — JWT-based via Supabase Auth with bcrypt password hashing
+- **Authentication** — Supabase Auth with JWT tokens
 - **Authorization** — Row-Level Security policies + role-based access control (admin, ngo, donor, victim, volunteer)
 - **Data protection** — HTTPS in production, CORS configuration, Pydantic input validation
 - **Environment isolation** — all secrets via `.env` files, never committed to source control
@@ -428,7 +413,7 @@ npm run build              # type-check + build
 |-----------|---------------------|
 | Frontend | Vercel, Netlify, or any Node.js host |
 | Backend | Railway, Fly.io, Render, or any Docker host |
-| Database | Supabase Cloud (already hosted) |
+| Database | Supabase PostgreSQL (managed — free tier available) |
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed instructions.
 

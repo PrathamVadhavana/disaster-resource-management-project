@@ -1,30 +1,34 @@
 'use client'
 
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth-provider'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import { cn } from '@/lib/utils'
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import {
     Loader2, Clock, CheckCircle2, XCircle, Package, MapPin,
     ArrowRight, AlertTriangle, FileText, MessageSquare,
-    ChevronDown, ChevronUp, Timer, Truck
+    ChevronDown, ChevronUp, Timer, Truck, Trash2
 } from 'lucide-react'
 import { NotificationBell } from '@/components/shared/NotificationBell'
-import { getResourceRequests } from '@/lib/api/victim'
+import { getResourceRequests, deleteResourceRequest } from '@/lib/api/victim'
 
 const STEPS = [
     { key: 'pending', label: 'Submitted', icon: FileText, color: 'text-slate-500' },
     { key: 'approved', label: 'Approved', icon: CheckCircle2, color: 'text-green-500' },
+    { key: 'under_review', label: 'Under Review', icon: Package, color: 'text-amber-500' },
+    { key: 'availability_submitted', label: 'Resources Ready', icon: Package, color: 'text-cyan-500' },
     { key: 'assigned', label: 'Assigned', icon: Package, color: 'text-blue-500' },
     { key: 'in_progress', label: 'In Progress', icon: Truck, color: 'text-purple-500' },
+    { key: 'delivered', label: 'Delivered', icon: Truck, color: 'text-teal-500' },
     { key: 'completed', label: 'Completed', icon: CheckCircle2, color: 'text-emerald-500' },
 ]
 
 const STATUS_INDEX: Record<string, number> = {
-    pending: 0, approved: 1, assigned: 2, in_progress: 3, completed: 4, rejected: -1,
+    pending: 0, approved: 1, under_review: 2, availability_submitted: 3,
+    assigned: 4, in_progress: 5, delivered: 6, completed: 7, closed: 7, rejected: -1,
 }
 
 function StatusTracker({ status }: { status: string }) {
@@ -90,28 +94,31 @@ function TimeCountdown({ targetDate }: { targetDate: string }) {
 
 export default function VictimRequestStatusPage() {
     const { profile } = useAuth()
+    const queryClient = useQueryClient()
     const [expanded, setExpanded] = useState<string | null>(null)
     const [page, setPage] = useState(1)
     const pageSize = 20
 
-    const { data, isLoading, refetch } = useQuery({
+    const deleteMutation = useMutation({
+        mutationFn: (id: string) => deleteResourceRequest(id),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['victim-requests-status'] }),
+    })
+
+    const { data, isLoading, error, refetch } = useQuery({
         queryKey: ['victim-requests-status', page],
         queryFn: async () => {
             return getResourceRequests({ page, page_size: pageSize })
         },
         refetchInterval: 15000,
+        retry: 2,
     })
 
     // Realtime subscription for instant updates
     useEffect(() => {
-        const supabase = createClient()
-        const channel = supabase
-            .channel('victim-request-updates')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'resource_requests' }, () => {
-                refetch()
-            })
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+        const unsub = subscribeToTable('resource_requests', () => {
+            refetch()
+        })
+        return () => { unsub() }
     }, [refetch])
 
     const requests = data?.requests || (Array.isArray(data) ? data : [])
@@ -146,7 +153,21 @@ export default function VictimRequestStatusPage() {
             </div>
 
             {/* Request Cards */}
-            {requests.length === 0 ? (
+            {error && (
+                <div className="rounded-2xl border border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/5 p-5">
+                    <div className="flex items-center gap-3">
+                        <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
+                        <div>
+                            <p className="text-sm font-semibold text-red-700 dark:text-red-400">Failed to load requests</p>
+                            <p className="text-xs text-red-600 dark:text-red-300 mt-0.5">{(error as Error).message}</p>
+                        </div>
+                        <button onClick={() => refetch()} className="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-100 dark:bg-red-500/10 text-red-700 dark:text-red-400 hover:bg-red-200">
+                            Retry
+                        </button>
+                    </div>
+                </div>
+            )}
+            {requests.length === 0 && !error ? (
                 <div className="text-center py-20">
                     <Package className="w-16 h-16 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
                     <p className="text-lg font-semibold text-slate-700 dark:text-white">No requests yet</p>
@@ -291,6 +312,36 @@ export default function VictimRequestStatusPage() {
                                                         </div>
                                                     ))}
                                                 </div>
+                                            </div>
+                                        )}
+
+                                        {/* Delete / Cancel button */}
+                                        {!isCompleted && !isRejected && (
+                                            <div className="flex justify-end pt-2">
+                                                <button
+                                                    onClick={() => {
+                                                        const msg = req.status === 'pending'
+                                                            ? 'Are you sure you want to delete this request?'
+                                                            : 'Are you sure you want to cancel this request? It has already been processed.'
+                                                        if (window.confirm(msg)) {
+                                                            deleteMutation.mutate(req.id)
+                                                        }
+                                                    }}
+                                                    disabled={deleteMutation.isPending}
+                                                    className={cn(
+                                                        'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors',
+                                                        req.status === 'pending'
+                                                            ? 'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 border border-red-200 dark:border-red-500/20'
+                                                            : 'bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-500/20 border border-amber-200 dark:border-amber-500/20'
+                                                    )}
+                                                >
+                                                    {deleteMutation.isPending ? (
+                                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                                    ) : (
+                                                        <Trash2 className="w-4 h-4" />
+                                                    )}
+                                                    {req.status === 'pending' ? 'Delete Request' : 'Cancel Request'}
+                                                </button>
                                             </div>
                                         )}
                                     </div>

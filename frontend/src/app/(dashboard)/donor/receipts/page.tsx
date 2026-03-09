@@ -6,7 +6,7 @@ import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth-provider'
 import {
     Receipt, Download, Loader2, FileText, Calendar,
-    Search, CheckCircle2, X, Building2
+    Search, CheckCircle2, X, Building2, FileDown
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -31,12 +31,14 @@ export default function TaxReceiptsPage() {
     const [receiptModal, setReceiptModal] = useState<boolean>(false)
     const [receiptData, setReceiptData] = useState<any>(null)
     const [loadingReceipt, setLoadingReceipt] = useState<boolean>(false)
+    const [downloadingPdf, setDownloadingPdf] = useState<string | null>(null)
 
     // Fetch only completed donations (these are eligible for tax receipts)
-    const { data: donations = [], isLoading } = useQuery<DonationRecord[]>({
+    const { data: donationsResp, isLoading } = useQuery<any>({
         queryKey: ['donor-donations'],
         queryFn: () => api.getDonations(),
     })
+    const donations: DonationRecord[] = Array.isArray(donationsResp) ? donationsResp : (donationsResp?.donations || [])
 
     const completedDonations = useMemo(() => {
         return donations.filter(d => d.status === 'completed')
@@ -76,7 +78,7 @@ export default function TaxReceiptsPage() {
         setReceiptModal(true)
         try {
             const data = await api.getDonationReceipt(id)
-            setReceiptData(data)
+            setReceiptData({ ...data, _donation_id: id })
         } catch (error) {
             console.error('Failed to fetch receipt:', error)
             setReceiptModal(false)
@@ -147,6 +149,23 @@ export default function TaxReceiptsPage() {
         a.download = `tax-receipts-${year}.csv`
         a.click()
         URL.revokeObjectURL(url)
+    }
+
+    const downloadPdfCertificate = async (donationId: string) => {
+        setDownloadingPdf(donationId)
+        try {
+            const blob = await api.getTaxCertificatePdf(donationId)
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `tax-certificate-REC-${donationId.slice(0, 8).toUpperCase()}.pdf`
+            a.click()
+            URL.revokeObjectURL(url)
+        } catch (error) {
+            console.error('Failed to download PDF certificate:', error)
+        } finally {
+            setDownloadingPdf(null)
+        }
     }
 
     if (isLoading) {
@@ -271,6 +290,13 @@ export default function TaxReceiptsPage() {
                                     >
                                         <Download className="w-4 h-4" /> Receipt
                                     </button>
+                                    <button
+                                        onClick={() => downloadPdfCertificate(d.id)}
+                                        disabled={downloadingPdf === d.id}
+                                        className="px-4 py-2 rounded-xl bg-blue-50 dark:bg-blue-500/10 text-blue-700 dark:text-blue-400 text-sm font-semibold hover:bg-blue-100 dark:hover:bg-blue-500/20 flex items-center gap-2 transition-colors disabled:opacity-50"
+                                    >
+                                        {downloadingPdf === d.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />} PDF
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -333,12 +359,19 @@ export default function TaxReceiptsPage() {
                                     &quot;{receiptData.message}&quot;
                                 </p>
 
-                                <div className="mt-8 flex justify-center">
+                                <div className="mt-8 flex justify-center gap-3">
                                     <button
                                         onClick={() => downloadReceipt(receiptData)}
                                         className="h-10 px-6 rounded-xl bg-emerald-600 text-white font-semibold text-sm hover:bg-emerald-700 flex items-center gap-2 transition-all"
                                     >
-                                        <Download className="w-4 h-4" /> Download Receipt
+                                        <Download className="w-4 h-4" /> Download TXT
+                                    </button>
+                                    <button
+                                        onClick={() => receiptData._donation_id && downloadPdfCertificate(receiptData._donation_id)}
+                                        disabled={!!downloadingPdf || !receiptData._donation_id}
+                                        className="h-10 px-6 rounded-xl bg-blue-600 text-white font-semibold text-sm hover:bg-blue-700 flex items-center gap-2 transition-all disabled:opacity-50"
+                                    >
+                                        {downloadingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />} Download PDF
                                     </button>
                                 </div>
                             </div>

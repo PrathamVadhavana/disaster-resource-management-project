@@ -4,7 +4,8 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { volunteerDetailsSchema } from '@/types/auth';
 import type { z } from 'zod';
-import { createClient } from '@/lib/supabase/client';
+import { db } from '@/lib/db';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Loader2, HandHeart } from 'lucide-react';
@@ -25,7 +26,6 @@ const CERTIFICATIONS = [
 
 export function VolunteerForm({ userId }: { userId: string }) {
     const router = useRouter();
-    const supabase = createClient();
     const [loading, setLoading] = useState(false);
 
     const form = useForm<VolunteerFormData>({
@@ -40,25 +40,25 @@ export function VolunteerForm({ userId }: { userId: string }) {
     const onSubmit = async (data: VolunteerFormData) => {
         setLoading(true);
         try {
-            const { error: upsertErr } = await (supabase.from('users') as any)
-                .upsert({ id: userId, email: (await supabase.auth.getUser()).data.user?.email ?? '', role: 'volunteer' }, { onConflict: 'id' });
-            if (upsertErr) console.warn('users upsert warning:', upsertErr.message);
+            const sb = getSupabaseClient();
+            const { data: { session } } = await sb.auth.getSession();
+            await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'volunteer' });
 
-            const { error } = await (supabase.from('volunteer_details') as any).upsert({
+            await db.upsertDetails('volunteer_details', {
                 id: userId,
                 skills: data.skills,
                 availability_status: data.availability_status,
                 certifications: data.certifications || [],
-            }, { onConflict: 'id' });
+            });
 
-            if (error) {
-                console.error('volunteer_details insert error:', error);
-                throw error;
+            await db.updateProfile({ is_profile_completed: true });
+
+            // Set cookies with Supabase access token
+            if (session) {
+                document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
+                document.cookie = `sb-role=volunteer; path=/; max-age=3600; SameSite=Lax`;
             }
-
-            await (supabase.from('users') as any).update({ is_profile_completed: true }).eq('id', userId);
-            await supabase.auth.updateUser({ data: { role: 'volunteer' } });
-            await supabase.auth.refreshSession();
+            document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`;
             window.location.href = '/volunteer';
         } catch (error: any) {
             console.error('Volunteer onboarding error:', error);

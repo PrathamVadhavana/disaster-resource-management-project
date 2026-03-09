@@ -15,8 +15,8 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import ingestion_config as cfg
-from app.database import supabase_admin
 from app.services.ingestion.mock_data_service import generate_mock_earthquakes
+from app.services.ingestion import memory_store
 
 logger = logging.getLogger("ingestion.usgs")
 
@@ -121,56 +121,21 @@ class USGSService:
         if not items:
             return []
 
-        source_id = await self._get_source_id()
+        source_id = memory_store.get_source_id("usgs_earthquakes")
 
-        new_events: List[Dict[str, Any]] = []
+        rows = []
         for item in items:
             ext_id = item.get("external_id")
-            if ext_id:
-                existing = (
-                    supabase_admin.table("ingested_events")
-                    .select("id")
-                    .eq("external_id", ext_id)
-                    .limit(1)
-                    .execute()
-                )
-                if existing.data:
-                    continue
-
-            row = {
+            if ext_id and memory_store.event_exists(ext_id):
+                continue
+            rows.append({
                 "id": str(uuid4()),
                 "source_id": source_id,
                 **item,
                 "ingested_at": datetime.now(timezone.utc).isoformat(),
-            }
-            new_events.append(row)
+            })
 
-        if new_events:
-            supabase_admin.table("ingested_events").insert(new_events).execute()
-
-        return new_events
-
-    async def _get_source_id(self) -> str:
-        resp = (
-            supabase_admin.table("external_data_sources")
-            .select("id")
-            .eq("source_name", "usgs_earthquakes")
-            .limit(1)
-            .execute()
-        )
-        if resp.data:
-            return resp.data[0]["id"]
-        # Auto-create the source entry
-        new_id = str(uuid4())
-        supabase_admin.table("external_data_sources").insert({
-            "id": new_id,
-            "source_name": "usgs_earthquakes",
-            "source_type": "geojson_feed",
-            "base_url": "https://earthquake.usgs.gov/earthquakes/feed",
-            "is_active": True,
-            "poll_interval_s": 300,
-        }).execute()
-        return new_id
+        return memory_store.add_ingested_events(rows)
 
     @staticmethod
     def auto_create_disaster_payload(event: Dict[str, Any]) -> Dict[str, Any]:

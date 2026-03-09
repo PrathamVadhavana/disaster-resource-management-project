@@ -23,7 +23,7 @@ class Phase5Config:
     NL_QUERY_TIMEOUT_S: int = int(os.getenv("NL_QUERY_TIMEOUT_S", "30"))
 
     # ── Anomaly Detection ───────────────────────────────────────────
-    ANOMALY_DETECTION_INTERVAL_S: int = int(os.getenv("ANOMALY_DETECTION_INTERVAL_S", "3600"))  # 1 hour
+    ANOMALY_DETECTION_INTERVAL_S: int = int(os.getenv("ANOMALY_DETECTION_INTERVAL_S", "14400"))  # 4 hours
     ANOMALY_CONTAMINATION: float = float(os.getenv("ANOMALY_CONTAMINATION", "0.05"))  # 5% expected anomalies
     ANOMALY_MIN_SAMPLES: int = int(os.getenv("ANOMALY_MIN_SAMPLES", "20"))  # Min data points needed
     ANOMALY_LOOKBACK_HOURS: int = int(os.getenv("ANOMALY_LOOKBACK_HOURS", "48"))

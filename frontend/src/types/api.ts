@@ -136,6 +136,47 @@ export interface ResourceRequest {
   ai_confidence?: number | null
   nlp_overridden?: boolean
   urgency_signals?: Array<{ keyword: string; label: string; severity_boost: number }>
+  // NLP priority scoring
+  nlp_priority?: string | null
+  nlp_confidence?: number | null
+  manual_priority?: string | null
+  extracted_needs?: Array<Record<string, unknown>> | null
+  // Fulfillment tracking
+  fulfillment_entries?: Array<{
+    provider_id?: string
+    provider_name?: string
+    provider_role?: string
+    donation_type?: string
+    amount?: number
+    resource_items?: Array<Record<string, unknown>>
+    status?: string
+    created_at?: string
+  }>
+  fulfillment_pct?: number
+  // Verification
+  is_verified?: boolean
+  verification_status?: string | null
+  verified_at?: string | null
+  verified_by?: string | null
+  // Delivery confirmation
+  delivery_confirmation_code?: string | null
+  delivery_confirmed_at?: string | null
+  // Donor adoption
+  adopted_by?: string | null
+  adoption_status?: string | null
+  // Victim grouping
+  group_id?: string | null
+  head_count?: number
+  // Disaster linking
+  linked_disaster_id?: string | null
+  disaster_distance_km?: number | null
+  disaster_id?: string | null
+  // SLA tracking
+  sla_escalated_at?: string | null
+  sla_admin_alerted?: boolean
+  sla_delivery_alerted?: boolean
+  // Admin
+  admin_note?: string | null
 }
 
 export interface ResourceRequestListResponse {
@@ -190,12 +231,17 @@ export interface AlertNotification {
   id: string
   event_id: string | null
   disaster_id: string | null
+  prediction_id: string | null
   channel: string
   recipient: string
+  recipient_role: string | null
   severity: string
   status: string
   subject: string | null
   body: string | null
+  external_ref: string | null
+  error_message: string | null
+  sent_at: string | null
   created_at: string
 }
 
@@ -203,24 +249,116 @@ export interface AlertNotification {
 
 export interface SitrepReport {
   id: string
+  report_date: string
   report_type: string
+  title: string
+  markdown_body: string
+  summary: string | null
+  key_metrics: Record<string, unknown>
+  recommendations: Array<Record<string, unknown>>
+  model_used: string
   generated_by: string
-  content: string
+  generation_time_ms: number | null
+  emailed_to: string[]
+  status: string
+  error_message: string | null
   created_at: string
+  updated_at: string
 }
 
 export interface AnomalyAlert {
   id: string
   anomaly_type: string
   severity: string
-  description: string
+  title: string
+  description: string | null
+  ai_explanation: string | null
+  metric_name: string
+  metric_value: number
+  expected_range: Record<string, unknown>
+  anomaly_score: number | null
+  related_disaster_id: string | null
+  related_location_id: string | null
+  context_data: Record<string, unknown>
   status: string
-  detected_at: string
+  acknowledged_by: string | null
   acknowledged_at: string | null
-  resolved_at: string | null
+  detected_at: string
+  created_at: string
 }
 
 export interface HealthResponse {
   status: string
   ml_models_loaded: boolean
+}
+
+// ─── Fairness ───────────────────────────────────────────────────────────────
+
+export interface FairnessPlan {
+  plan_index: number
+  equity_weight: number
+  efficiency_score: number
+  equity_score: number
+  gini: number
+  allocation_count: number
+  zone_allocations: Record<string, number>
+  adjustments_applied: string[]
+  allocations: Array<{
+    resource_id: string
+    type: string
+    quantity: number
+    location: string
+    distance_km: number
+    zone_id?: string
+    rural_boost_applied?: boolean
+    vulnerability_bump?: boolean
+    underservice_bonus_applied?: boolean
+  }>
+}
+
+export interface FairnessFrontierResponse {
+  disaster_id: string | null
+  total_resources: number
+  total_needs: number
+  total_zones: number
+  plans: FairnessPlan[]
+}
+
+export interface FairnessApplyResponse {
+  status: string
+  plan_index: number
+  resources_allocated: number
+  efficiency_score: number
+  equity_score: number
+  gini: number
+  adjustments_applied: string[]
+}
+
+export interface FairnessAudit {
+  disaster_id: string | null
+  gini_coefficient: number
+  overall_equity_score: number
+  vulnerability_scores: Record<string, number>
+  underservice_scores: Record<string, number>
+  zone_details: Array<{
+    zone_id: string
+    zone_name: string
+    population: number
+    vulnerability_index: number
+    underservice_score: number
+    allocated: number
+    needed: number
+    fulfillment_pct: number
+    is_rural: boolean
+    ngo_count_within_20km: number
+  }>
+  distribution_by_vulnerability_group: Record<string, {
+    zone_count: number
+    total_allocated: number
+    total_needed: number
+    avg_fulfillment_pct: number
+  }>
+  plan_index?: number
+  applied_by?: string
+  applied_at?: string
 }

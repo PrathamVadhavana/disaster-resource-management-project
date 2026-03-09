@@ -96,7 +96,7 @@ CREATE INDEX idx_predictions_location ON predictions(location_id);
 CREATE INDEX idx_predictions_type ON predictions(prediction_type);
 CREATE INDEX idx_predictions_created_at ON predictions(created_at DESC);
 
--- Users table (extends Supabase auth.users)
+-- Users table (extends Supabase Auth users)
 CREATE TABLE users (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

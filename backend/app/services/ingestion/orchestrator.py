@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from app.core.config import ingestion_config as cfg
-from app.database import supabase_admin
+from app.database import db_admin
+from app.services.ingestion import memory_store
 from app.services.ingestion.weather_service import WeatherService
 from app.services.ingestion.gdacs_service import GDACSService
 from app.services.ingestion.usgs_service import USGSService
@@ -86,6 +87,8 @@ class IngestionOrchestrator:
 
     async def _loop(self, name: str, poll_fn, interval_s: int) -> None:
         """Run *poll_fn* every *interval_s* seconds until cancelled."""
+        # Delay initial poll to let uvicorn finish binding to the port
+        await asyncio.sleep(5)
         logger.info("Feed loop [%s] started – interval %ds", name, interval_s)
         while self._running:
             try:
@@ -136,38 +139,15 @@ class IngestionOrchestrator:
     async def _process_disaster_event(self, event: Dict[str, Any], source: str) -> None:
         """
         For GDACS/USGS events:
-         1. Auto-create (or find) a matching disaster record
-         2. Run batch predictions (severity + spread + impact)
-         3. If critical, dispatch NGO alerts
+         1. Evaluate alert thresholds and dispatch notifications
+         2. Run predictions if ML service is available
+         
+        Note: Live disaster data is displayed directly on the map from
+        external APIs without persistent storage. Disaster records are
+        only created manually by admins/NGOs.
         """
-        disaster_id = await self._auto_create_disaster(event, source)
-        if not disaster_id:
-            return
-
-        # Mark ingested event as processed and link disaster
-        event_id = event.get("id")
-        if event_id:
-            supabase_admin.table("ingested_events").update({
-                "processed": True,
-                "processed_at": datetime.now(timezone.utc).isoformat(),
-                "disaster_id": disaster_id,
-            }).eq("id", event_id).execute()
-
-        # Trigger batch predictions via ML service
-        prediction_ids = await self._run_batch_predictions(event, disaster_id)
-
-        # Link prediction IDs back to the ingested event
-        if prediction_ids and event_id:
-            supabase_admin.table("ingested_events").update({
-                "prediction_ids": prediction_ids,
-            }).eq("id", event_id).execute()
-
-        # Evaluate alert threshold
-        await self.alerts.evaluate_and_notify(
-            event,
-            disaster_id=disaster_id,
-            prediction_id=prediction_ids[0] if prediction_ids else None,
-        )
+        # Evaluate alert threshold for critical events
+        await self.alerts.evaluate_and_notify(event)
 
     async def _auto_create_disaster(self, event: Dict[str, Any], source: str) -> Optional[str]:
         """Create or find a disaster record for the event."""
@@ -201,7 +181,7 @@ class IngestionOrchestrator:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
-            resp = supabase_admin.table("disasters").insert(disaster_data).execute()
+            resp = await db_admin.table("disasters").insert(disaster_data).async_execute()
             if resp.data:
                 did = resp.data[0]["id"]
                 logger.info("Auto-created disaster %s from %s event", did, source)
@@ -219,19 +199,24 @@ class IngestionOrchestrator:
         name = event.get("location_name", "Auto-detected Location")
 
         if lat is not None and lon is not None:
-            # Look for a location within ~0.5 degrees (~55 km)
-            resp = (
-                supabase_admin.table("locations")
-                .select("id")
-                .gte("latitude", lat - 0.5)
-                .lte("latitude", lat + 0.5)
-                .gte("longitude", lon - 0.5)
-                .lte("longitude", lon + 0.5)
-                .limit(1)
-                .execute()
-            )
-            if resp.data:
-                return resp.data[0]["id"]
+            # PostgreSQL handles range filters but on multiple fields
+            # without a composite index. Instead, filter on latitude only
+            # and do the longitude check in Python.
+            try:
+                resp = (
+                    await db_admin.table("locations")
+                    .select("id, latitude, longitude")
+                    .gte("latitude", lat - 0.5)
+                    .lte("latitude", lat + 0.5)
+                    .limit(50)
+                    .async_execute()
+                )
+                for loc in (resp.data or []):
+                    loc_lon = loc.get("longitude")
+                    if loc_lon is not None and abs(loc_lon - lon) <= 0.5:
+                        return loc["id"]
+            except Exception as e:
+                logger.warning(f"Location lookup failed, creating new: {e}")
 
         # Create a new location
         loc_data = {
@@ -245,7 +230,7 @@ class IngestionOrchestrator:
             "country": "Unknown",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        resp = supabase_admin.table("locations").insert(loc_data).execute()
+        resp = await db_admin.table("locations").insert(loc_data).async_execute()
         return resp.data[0]["id"] if resp.data else loc_data["id"]
 
     async def _run_batch_predictions(self, event: Dict[str, Any], disaster_id: str) -> List[str]:
@@ -265,7 +250,7 @@ class IngestionOrchestrator:
         # Get location_id from the disaster record
         location_id = None
         try:
-            disaster_resp = supabase_admin.table("disasters").select("location_id").eq("id", disaster_id).limit(1).execute()
+            disaster_resp = await db_admin.table("disasters").select("location_id").eq("id", disaster_id).limit(1).async_execute()
             if disaster_resp.data:
                 location_id = disaster_resp.data[0].get("location_id")
         except Exception:
@@ -312,7 +297,7 @@ class IngestionOrchestrator:
                 "model_version": result.get("model_version", "1.0.0"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            supabase_admin.table("predictions").insert(pred_data).execute()
+            await db_admin.table("predictions").insert(pred_data).async_execute()
             prediction_ids.append(pid)
         except Exception:
             logger.exception("Severity prediction failed for event %s", event.get("id"))
@@ -337,7 +322,7 @@ class IngestionOrchestrator:
                 "model_version": result.get("model_version", "1.0.0"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            supabase_admin.table("predictions").insert(pred_data).execute()
+            await db_admin.table("predictions").insert(pred_data).async_execute()
             prediction_ids.append(pid)
         except Exception:
             logger.exception("Spread prediction failed for event %s", event.get("id"))
@@ -371,7 +356,7 @@ class IngestionOrchestrator:
                 "model_version": result.get("model_version", "1.0.0"),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            supabase_admin.table("predictions").insert(pred_data).execute()
+            await db_admin.table("predictions").insert(pred_data).async_execute()
             prediction_ids.append(pid)
         except Exception:
             logger.exception("Impact prediction failed for event %s", event.get("id"))
@@ -383,8 +368,7 @@ class IngestionOrchestrator:
     # ── source status bookkeeping ───────────────────────────────────
 
     async def _update_source_status(self, source_name_key: str, status: str, error: Optional[str] = None) -> None:
-        """Update last_polled_at and last_status in external_data_sources."""
-        # Map loop name → source_name in DB
+        """Update last_polled_at and last_status in in-memory source store."""
         name_map = {
             "weather": "openweathermap",
             "gdacs": "gdacs",
@@ -393,19 +377,7 @@ class IngestionOrchestrator:
             "social": "social_media",
         }
         source_name = name_map.get(source_name_key, source_name_key)
-        try:
-            update: Dict[str, Any] = {
-                "last_polled_at": datetime.now(timezone.utc).isoformat(),
-                "last_status": status,
-            }
-            if error:
-                update["last_error"] = error[:500]
-            else:
-                update["last_error"] = None
-
-            supabase_admin.table("external_data_sources").update(update).eq("source_name", source_name).execute()
-        except Exception:
-            logger.debug("Failed to update source status for %s", source_name)
+        memory_store.update_source_status(source_name, status, error)
 
     # ── manual trigger (used by API router) ─────────────────────────
 
@@ -433,8 +405,7 @@ class IngestionOrchestrator:
 
     async def get_status(self) -> Dict[str, Any]:
         """Return the current status of all data sources."""
-        resp = supabase_admin.table("external_data_sources").select("*").execute()
-        sources = resp.data or []
+        sources = memory_store.get_all_sources()
         return {
             "orchestrator_running": self._running,
             "sources": [

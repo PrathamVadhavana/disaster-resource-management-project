@@ -15,7 +15,6 @@ import {
 const STATUS_COLORS: Record<string, { bg: string; text: string; ring: string; icon: any }> = {
     pending: { bg: 'bg-amber-500/10', text: 'text-amber-600 dark:text-amber-400', ring: 'ring-amber-500/20', icon: Clock },
     approved: { bg: 'bg-green-500/10', text: 'text-green-600 dark:text-green-400', ring: 'ring-green-500/20', icon: CheckCircle2 },
-    availability_submitted: { bg: 'bg-cyan-500/10', text: 'text-cyan-600 dark:text-cyan-400', ring: 'ring-cyan-500/20', icon: FileCheck },
     under_review: { bg: 'bg-indigo-500/10', text: 'text-indigo-600 dark:text-indigo-400', ring: 'ring-indigo-500/20', icon: Eye },
     assigned: { bg: 'bg-blue-500/10', text: 'text-blue-600 dark:text-blue-400', ring: 'ring-blue-500/20', icon: User },
     in_progress: { bg: 'bg-purple-500/10', text: 'text-purple-600 dark:text-purple-400', ring: 'ring-purple-500/20', icon: TrendingUp },
@@ -32,13 +31,26 @@ const PRIORITY_COLORS: Record<string, string> = {
     low: 'bg-green-500/10 text-green-600 dark:text-green-400 ring-green-500/20',
 }
 
+const STATUS_LABELS: Record<string, string> = {
+    pending: 'Pending',
+    approved: 'Approved',
+    under_review: 'Under Review',
+    availability_submitted: 'Availability Submitted',
+    assigned: 'Assigned',
+    in_progress: 'In Progress',
+    delivered: 'Delivered',
+    completed: 'Completed',
+    closed: 'Closed',
+    rejected: 'Rejected',
+}
+
 function StatusBadge({ status }: { status: string }) {
     const s = STATUS_COLORS[status] || STATUS_COLORS.pending
     const Icon = s.icon
     return (
-        <span className={cn('inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold ring-1 ring-inset capitalize', s.bg, s.text, s.ring)}>
+        <span className={cn('inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold ring-1 ring-inset', s.bg, s.text, s.ring)}>
             <Icon className="w-3 h-3" />
-            {status.replace(/_/g, ' ')}
+            {STATUS_LABELS[status] || status.replace(/_/g, ' ')}
         </span>
     )
 }
@@ -277,7 +289,7 @@ export default function AdminRequestsPage() {
 
             {/* Status Overview Cards */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                {['pending', 'approved', 'availability_submitted', 'assigned', 'in_progress', 'delivered', 'completed', 'rejected'].map((s) => {
+                {['pending', 'approved', 'under_review', 'availability_submitted', 'assigned', 'in_progress', 'delivered', 'completed', 'closed', 'rejected'].map((s) => {
                     const sc = STATUS_COLORS[s]
                     const Icon = sc?.icon || Clock
                     const count = statusCounts[s] || 0
@@ -295,7 +307,7 @@ export default function AdminRequestsPage() {
                         >
                             <div className="flex items-center gap-2 mb-1">
                                 <Icon className={cn('w-4 h-4', sc?.text || '')} />
-                                <span className="text-xs font-medium text-slate-500 dark:text-slate-400 capitalize">{s.replace('_', ' ')}</span>
+                                <span className="text-xs font-medium text-slate-500 dark:text-slate-400">{STATUS_LABELS[s] || s.replace(/_/g, ' ')}</span>
                             </div>
                             <p className="text-xl font-bold text-slate-900 dark:text-white">{count}</p>
                         </button>
@@ -395,7 +407,16 @@ export default function AdminRequestsPage() {
                                                 </span>
                                             </td>
                                             <td className="px-3 py-3">
-                                                {req.assigned_user ? (
+                                                {req.assigned_users && req.assigned_users.length > 0 ? (
+                                                    <div className="flex flex-col gap-1">
+                                                        {req.assigned_users.map((u: any, idx: number) => (
+                                                            <div key={u.id || idx} className="flex flex-col">
+                                                                <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{u.full_name || 'Organization'}</span>
+                                                                <span className="text-[10px] text-slate-400 uppercase tracking-tighter">{u.role}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                ) : req.assigned_user ? (
                                                     <div className="flex flex-col">
                                                         <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{req.assigned_user.full_name || 'Organization'}</span>
                                                         <span className="text-[10px] text-slate-400 uppercase tracking-tighter">{req.assigned_role}</span>
@@ -404,7 +425,16 @@ export default function AdminRequestsPage() {
                                                     <span className="text-xs text-slate-400 italic">Unassigned</span>
                                                 )}
                                             </td>
-                                            <td className="px-3 py-3"><PriorityBadge priority={req.priority} /></td>
+                                            <td className="px-3 py-3">
+                                                <div className="flex items-center gap-1.5">
+                                                    <PriorityBadge priority={req.priority} />
+                                                    {req.is_verified ? (
+                                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 ring-1 ring-inset ring-emerald-200 dark:ring-emerald-500/20" title="Field verified">✓</span>
+                                                    ) : (
+                                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 ring-1 ring-inset ring-amber-200 dark:ring-amber-500/20" title="Not yet verified">?</span>
+                                                    )}
+                                                </div>
+                                            </td>
                                             <td className="px-3 py-3"><StatusBadge status={req.status} /></td>
                                             <td className="px-3 py-3 text-slate-700 dark:text-slate-300 font-mono text-xs text-right">{req.quantity}</td>
                                             <td className="px-3 py-3 text-xs text-slate-500">

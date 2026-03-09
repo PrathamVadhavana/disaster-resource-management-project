@@ -4,12 +4,12 @@ import { useState, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import { SubmitAvailabilityModal } from '@/components/ngo/SubmitAvailabilityModal'
 import {
     Loader2, Search, MapPin, Package, ChevronLeft, ChevronRight,
     ArrowRight, AlertTriangle, CheckCircle2, Eye, Send,
-    RefreshCw, Navigation, Calendar, User,
+    RefreshCw, Navigation, Calendar, User, Users,
 } from 'lucide-react'
 
 const PRIORITY_DOT: Record<string, string> = {
@@ -33,6 +33,7 @@ export default function NGOApprovedRequestsPage() {
     const [sortBy, setSortBy] = useState<'priority' | 'distance'>('priority')
     const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null)
     const [gpsStatus, setGpsStatus] = useState<'detecting' | 'ready' | 'denied' | 'unavailable'>('detecting')
+    const [poolModal, setPoolModal] = useState<string | null>(null)
 
     // Auto-detect GPS
     useEffect(() => {
@@ -58,19 +59,21 @@ export default function NGOApprovedRequestsPage() {
 
     // Realtime
     useEffect(() => {
-        const supabase = createClient()
-        const channel = supabase
-            .channel('ngo-approved-rt')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'resource_requests' }, () => {
-                qc.invalidateQueries({ queryKey: ['ngo-fulfillment'] })
-            })
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+        const unsub = subscribeToTable('resource_requests', () => {
+            qc.invalidateQueries({ queryKey: ['ngo-fulfillment'] })
+        })
+        return () => { unsub() }
     }, [qc])
 
     const requests = data?.requests || []
     const total = data?.total || 0
     const totalPages = Math.max(1, Math.ceil(total / 20))
+
+    const { data: poolData } = useQuery({
+        queryKey: ['ngo-request-pool', poolModal],
+        queryFn: () => poolModal ? api.getNgoRequestPool(poolModal) : null,
+        enabled: !!poolModal,
+    })
 
     const filtered = search
         ? requests.filter((r: any) =>
@@ -174,8 +177,10 @@ export default function NGOApprovedRequestsPage() {
                                             {req.resource_type || 'Resource Request'}
                                         </h3>
                                         <span className={cn('text-[10px] px-2 py-0.5 rounded-full font-semibold ring-1 ring-inset',
-                                            'bg-blue-100 dark:bg-blue-500/10 text-blue-600 ring-blue-500/20')}>
-                                            Approved
+                                            req.status === 'under_review'
+                                                ? 'bg-amber-100 dark:bg-amber-500/10 text-amber-600 ring-amber-500/20'
+                                                : 'bg-blue-100 dark:bg-blue-500/10 text-blue-600 ring-blue-500/20')}>
+                                            {req.status === 'under_review' ? 'Under Review' : req.status === 'availability_submitted' ? 'Availability Submitted' : 'Approved'}
                                         </span>
                                         <span className={cn('text-[10px] px-2 py-0.5 rounded-full font-semibold ring-1 ring-inset capitalize',
                                             PRIORITY_BADGE[req.priority] || '')}>
@@ -219,11 +224,30 @@ export default function NGOApprovedRequestsPage() {
                                             <Navigation className="w-3 h-3" /> {req.distance_km} km from your location
                                         </div>
                                     )}
+
+                                    {req.fulfillment_pct != null && req.fulfillment_pct > 0 && (
+                                        <div className="mt-2">
+                                            <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1">
+                                                <span>Fulfilled</span>
+                                                <span className="font-semibold">{req.fulfillment_pct}%</span>
+                                            </div>
+                                            <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                                                <div className="h-full rounded-full bg-gradient-to-r from-amber-500 to-green-500 transition-all" style={{ width: `${Math.min(req.fulfillment_pct, 100)}%` }} />
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div className="flex flex-col items-end gap-2 shrink-0">
                                     <span className="text-[10px] text-slate-400 font-mono">{req.id?.slice(0, 8)}</span>
                                     <div className="flex gap-2">
+                                        {(req.fulfillment_pct > 0 || req.fulfillment_entries?.length > 0) && (
+                                            <button
+                                                onClick={() => setPoolModal(req.id)}
+                                                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium border border-blue-200 dark:border-blue-500/20 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors">
+                                                <Users className="w-3 h-3" /> Pool
+                                            </button>
+                                        )}
                                         <button
                                             onClick={() => setSelectedRequest(selectedRequest?.id === req.id ? null : req)}
                                             className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
@@ -313,6 +337,70 @@ export default function NGOApprovedRequestsPage() {
                     request={showAvailabilityModal}
                     onClose={() => setShowAvailabilityModal(null)}
                 />
+            )}
+
+            {/* Resource Pool Modal */}
+            {poolModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-md p-6 max-h-[80vh] overflow-y-auto">
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                <Users className="w-5 h-5 text-blue-500" /> Resource Pool
+                            </h2>
+                            <button onClick={() => setPoolModal(null)} className="text-slate-400 hover:text-slate-700 dark:hover:text-white text-sm">✕</button>
+                        </div>
+                        {!poolData ? (
+                            <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-blue-500" /></div>
+                        ) : poolData.total_contributors === 0 ? (
+                            <p className="text-sm text-slate-500 text-center py-6">No contributors yet. Be the first to submit availability!</p>
+                        ) : (
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
+                                    <span className="text-sm text-slate-600 dark:text-slate-400">Fulfillment</span>
+                                    <span className="text-lg font-bold text-emerald-600">{poolData.fulfillment_pct ?? 0}%</span>
+                                </div>
+                                <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-white/10">
+                                    <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${Math.min(poolData.fulfillment_pct ?? 0, 100)}%` }} />
+                                </div>
+
+                                {poolData.ngo_contributors?.length > 0 && (
+                                    <div>
+                                        <p className="text-xs font-semibold text-blue-600 uppercase mb-2">NGOs ({poolData.ngo_contributors.length})</p>
+                                        {poolData.ngo_contributors.map((c: any, i: number) => (
+                                            <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-blue-50/50 dark:bg-blue-500/5 border border-blue-100 dark:border-blue-500/10 mb-1.5">
+                                                <div>
+                                                    <p className="text-sm font-medium text-slate-900 dark:text-white">{c.provider_name}</p>
+                                                    <p className="text-[10px] text-slate-400">
+                                                        {c.resource_items?.map((ri: any) => `${ri.quantity} ${ri.resource_type}`).join(', ') || 'Resources'}
+                                                    </p>
+                                                </div>
+                                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-500/10 text-blue-600 font-medium">{c.status?.replace('_', ' ')}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {poolData.donor_contributors?.length > 0 && (
+                                    <div>
+                                        <p className="text-xs font-semibold text-amber-600 uppercase mb-2">Donors ({poolData.donor_contributors.length})</p>
+                                        {poolData.donor_contributors.map((c: any, i: number) => (
+                                            <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-amber-50/50 dark:bg-amber-500/5 border border-amber-100 dark:border-amber-500/10 mb-1.5">
+                                                <div>
+                                                    <p className="text-sm font-medium text-slate-900 dark:text-white">{c.provider_name}</p>
+                                                    <p className="text-[10px] text-slate-400">
+                                                        {c.donation_type === 'money' ? `$${c.amount?.toLocaleString()}` :
+                                                         c.resource_items?.map((ri: any) => `${ri.quantity} ${ri.resource_type}`).join(', ') || 'Resources'}
+                                                    </p>
+                                                </div>
+                                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-500/10 text-amber-600 font-medium">{c.status}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                </div>
             )}
         </div>
     )

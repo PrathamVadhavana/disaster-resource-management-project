@@ -69,6 +69,7 @@ BEGIN
     END IF;
 END $$;
 
--- Enable Supabase Realtime for notifications table
-ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
-ALTER PUBLICATION supabase_realtime ADD TABLE request_audit_log;
+-- (Optional) Enable Supabase Realtime for notifications table
+-- These statements are only needed for Supabase-hosted databases.
+-- ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
+-- ALTER PUBLICATION supabase_realtime ADD TABLE request_audit_log;

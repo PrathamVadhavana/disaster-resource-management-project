@@ -3,7 +3,7 @@ from typing import List
 from datetime import datetime
 import uuid
 
-from app.database import supabase
+from app.database import db
 from app.schemas import PredictionInput, PredictionResponse, PredictionType
 from app.services.ml_service import MLService
 from app.dependencies import get_ml_service
@@ -38,6 +38,13 @@ async def create_prediction(
         # Add prediction-specific fields
         if prediction_input.prediction_type == PredictionType.SEVERITY:
             prediction_data["predicted_severity"] = ml_result.get('predicted_severity')
+            # TFT multi-horizon fields
+            prediction_data["severity_6h"] = ml_result.get('severity_6h')
+            prediction_data["severity_12h"] = ml_result.get('severity_12h')
+            prediction_data["severity_24h"] = ml_result.get('severity_24h')
+            prediction_data["severity_48h"] = ml_result.get('severity_48h')
+            prediction_data["lower_bound"] = ml_result.get('lower_bound')
+            prediction_data["upper_bound"] = ml_result.get('upper_bound')
         
         if prediction_input.prediction_type == PredictionType.SPREAD:
             prediction_data["predicted_area_km2"] = ml_result.get('predicted_area_km2')
@@ -49,7 +56,7 @@ async def create_prediction(
             prediction_data["predicted_damage_usd"] = ml_result.get('predicted_damage_usd')
         
         # Save to database
-        response = supabase.table("predictions").insert(prediction_data).execute()
+        response = await db.table("predictions").insert(prediction_data).async_execute()
         
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to save prediction")
@@ -68,7 +75,7 @@ async def get_predictions(
 ):
     """Get all predictions with optional filtering"""
     try:
-        query = supabase.table("predictions").select("*")
+        query = db.table("predictions").select("*")
         
         if location_id:
             query = query.eq("location_id", location_id)
@@ -76,7 +83,7 @@ async def get_predictions(
             query = query.eq("prediction_type", prediction_type.value)
         
         query = query.order("created_at", desc=True).limit(limit)
-        response = query.execute()
+        response = await query.async_execute()
         
         return response.data
         
@@ -89,11 +96,11 @@ async def get_prediction(prediction_id: str):
     """Get a specific prediction by ID"""
     try:
         response = (
-            supabase.table("predictions")
+            await db.table("predictions")
             .select("*")
             .eq("id", prediction_id)
             .single()
-            .execute()
+            .async_execute()
         )
         
         if not response.data:
@@ -132,6 +139,12 @@ async def create_batch_predictions(
             
             if pred_input.prediction_type == PredictionType.SEVERITY:
                 prediction_data["predicted_severity"] = ml_result.get('predicted_severity')
+                prediction_data["severity_6h"] = ml_result.get('severity_6h')
+                prediction_data["severity_12h"] = ml_result.get('severity_12h')
+                prediction_data["severity_24h"] = ml_result.get('severity_24h')
+                prediction_data["severity_48h"] = ml_result.get('severity_48h')
+                prediction_data["lower_bound"] = ml_result.get('lower_bound')
+                prediction_data["upper_bound"] = ml_result.get('upper_bound')
             
             if pred_input.prediction_type == PredictionType.SPREAD:
                 prediction_data["predicted_area_km2"] = ml_result.get('predicted_area_km2')
@@ -145,7 +158,7 @@ async def create_batch_predictions(
             results.append(prediction_data)
         
         # Batch insert
-        response = supabase.table("predictions").insert(results).execute()
+        response = await db.table("predictions").insert(results).async_execute()
         
         return response.data
         

@@ -31,7 +31,7 @@ export const ngoDetailsSchema = z.object({
 });
 
 export const donorDetailsSchema = z.object({
-    donor_type: z.enum(['individual', 'corporate', 'foundation', 'government']),
+    donor_type: z.enum(['individual', 'corporate', 'government']),
     preferred_causes: z.array(z.string()).min(1, "Select at least one cause"),
     tax_id: z.string().optional(),
 });

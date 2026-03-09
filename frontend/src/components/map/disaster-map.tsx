@@ -2,7 +2,8 @@
 
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'
 import { Icon } from 'leaflet'
-import { supabase } from '@/lib/supabase'
+import { api } from '@/lib/api'
+import { subscribeToTable } from '@/lib/realtime'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import 'leaflet/dist/leaflet.css'
@@ -38,30 +39,18 @@ export function DisasterMap() {
   const { data: disasters = [], isLoading, error } = useQuery({
     queryKey: ['disasters'],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('disasters')
-        .select('*, locations(*)')
-        .in('status', ['active', 'monitoring'])
-        .order('created_at', { ascending: false })
-      if (error) throw error
-      return data as Disaster[]
+      const data = await api.getDisasters({ status: 'active,monitoring' })
+      return (Array.isArray(data) ? data : data?.disasters ?? []) as Disaster[]
     }
   })
 
   useEffect(() => {
-    const channel = supabase
-      .channel('disasters-changes')
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'disasters'
-      }, () => {
-        queryClient.invalidateQueries({ queryKey: ['disasters'] })
-      })
-      .subscribe()
+    const unsub = subscribeToTable('disasters', () => {
+      queryClient.invalidateQueries({ queryKey: ['disasters'] })
+    })
 
     return () => {
-      supabase.removeChannel(channel)
+      unsub()
     }
   }, [queryClient])
 

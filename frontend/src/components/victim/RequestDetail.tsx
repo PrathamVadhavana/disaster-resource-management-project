@@ -5,14 +5,15 @@ import { getResourceRequest, deleteResourceRequest, type ResourceRequest } from 
 import { StatusBadge, PriorityBadge, ResourceTypeIcon } from './StatusBadge'
 import { UrgencyTags, ConfidenceBadge } from './UrgencyTags'
 import { cn } from '@/lib/utils'
-import { ArrowLeft, Edit3, Trash2, Loader2, MapPin, Calendar, User, Package, Brain, Activity } from 'lucide-react'
+import { ArrowLeft, Edit3, Trash2, Loader2, MapPin, Calendar, User, Package, Brain, Activity, Users } from 'lucide-react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { format } from 'date-fns'
 import { useState } from 'react'
 import { api } from '@/lib/api'
+import { DeliveryConfirmation } from './DeliveryConfirmation'
 
-const statusSteps = ['pending', 'approved', 'assigned', 'in_progress', 'completed']
+const statusSteps = ['pending', 'approved', 'under_review', 'availability_submitted', 'assigned', 'in_progress', 'delivered', 'completed']
 
 export function RequestDetail({ requestId }: { requestId: string }) {
     const router = useRouter()
@@ -27,6 +28,18 @@ export function RequestDetail({ requestId }: { requestId: string }) {
     const { data: timelineData, isLoading: isLoadingTimeline } = useQuery({
         queryKey: ['victim-timeline', requestId],
         queryFn: () => api.getVictimRequestTimeline(requestId),
+    })
+
+    const { data: fulfillmentData } = useQuery({
+        queryKey: ['victim-fulfillment', requestId],
+        queryFn: () => api.getRequestFulfillment(requestId),
+        enabled: !!request && ['approved', 'under_review', 'assigned', 'in_progress', 'delivered', 'completed'].includes(request.status),
+    })
+
+    const { data: poolData } = useQuery({
+        queryKey: ['victim-resource-pool', requestId],
+        queryFn: () => api.getResourcePool(requestId),
+        enabled: !!request && ['approved', 'under_review', 'assigned', 'in_progress', 'delivered', 'completed'].includes(request.status),
     })
 
     const deleteMut = useMutation({
@@ -53,7 +66,7 @@ export function RequestDetail({ requestId }: { requestId: string }) {
     const currentStep = statusSteps.indexOf(request.status)
     const isRejected = request.status === 'rejected'
     const canEdit = request.status === 'pending'
-    const canDelete = ['pending', 'approved', 'assigned', 'in_progress'].includes(request.status)
+    const canDelete = ['pending', 'approved', 'assigned', 'in_progress', 'under_review', 'availability_submitted'].includes(request.status)
 
     return (
         <div className="space-y-6">
@@ -176,6 +189,179 @@ export function RequestDetail({ requestId }: { requestId: string }) {
                     )}
                 </div>
             </div>
+
+            {/* Fulfillment Progress */}
+            {fulfillmentData && (
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+                    <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
+                        <h2 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                            <Package className="w-4 h-4 text-emerald-500" />
+                            Fulfillment Progress
+                        </h2>
+                        <span className="text-sm font-bold text-emerald-600">{fulfillmentData.fulfillment_pct ?? 0}%</span>
+                    </div>
+                    <div className="p-5 space-y-4">
+                        {/* Overall progress bar */}
+                        <div>
+                            <div className="w-full h-3 rounded-full bg-slate-100 dark:bg-white/10">
+                                <div className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600 transition-all"
+                                    style={{ width: `${Math.min(fulfillmentData.fulfillment_pct ?? 0, 100)}%` }} />
+                            </div>
+                        </div>
+                        {/* Per-item breakdown */}
+                        {fulfillmentData.item_fulfillment && Object.entries(fulfillmentData.item_fulfillment).map(([type, info]: [string, any]) => (
+                            <div key={type} className="p-3 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
+                                <div className="flex items-center justify-between mb-1">
+                                    <span className="text-sm font-medium text-slate-900 dark:text-white">{type}</span>
+                                    <span className="text-xs text-slate-500">{info.fulfilled} / {info.requested}</span>
+                                </div>
+                                <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-white/10">
+                                    <div className="h-full rounded-full bg-emerald-500 transition-all"
+                                        style={{ width: `${info.requested > 0 ? Math.min((info.fulfilled / info.requested) * 100, 100) : 0}%` }} />
+                                </div>
+                                {info.providers?.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-1">
+                                        {info.providers.map((p: any, i: number) => (
+                                            <span key={i} className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                                                {p.role}: {p.quantity} {p.unit || 'units'}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                        {fulfillmentData.entries?.length > 0 && (
+                            <div className="text-xs text-slate-400">
+                                {fulfillmentData.entries.length} contribution(s) from donors and NGOs
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* Resource Pool */}
+            {poolData && poolData.total_contributors > 0 && (
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+                    <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
+                        <h2 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                            <Users className="w-4 h-4 text-blue-500" />
+                            Resource Pool
+                        </h2>
+                        <span className={cn(
+                            'text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide',
+                            poolData.pool_type === 'ngo_donor' ? 'bg-purple-50 dark:bg-purple-500/10 text-purple-600 dark:text-purple-400' :
+                            poolData.pool_type === 'ngo_ngo' ? 'bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400' :
+                            poolData.pool_type === 'donor_donor' ? 'bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400' :
+                            'bg-slate-50 dark:bg-slate-500/10 text-slate-600 dark:text-slate-400'
+                        )}>
+                            {poolData.pool_type === 'ngo_donor' ? 'NGO + Donor Pool' :
+                             poolData.pool_type === 'ngo_ngo' ? 'Multi-NGO Pool' :
+                             poolData.pool_type === 'donor_donor' ? 'Multi-Donor Pool' :
+                             `${poolData.total_contributors} Contributor`}
+                        </span>
+                    </div>
+                    <div className="p-5 space-y-4">
+                        {/* Per-item pool breakdown */}
+                        {poolData.item_pool && Object.entries(poolData.item_pool).map(([type, info]: [string, any]) => (
+                            <div key={type} className="p-3 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-sm font-medium text-slate-900 dark:text-white">{type}</span>
+                                    <span className="text-xs text-slate-500">{info.total_fulfilled} / {info.requested} fulfilled</span>
+                                </div>
+                                <div className="w-full h-2 rounded-full bg-slate-200 dark:bg-white/10 overflow-hidden flex">
+                                    {info.requested > 0 && info.fulfilled_by_ngo > 0 && (
+                                        <div className="h-full bg-blue-500 transition-all"
+                                            style={{ width: `${Math.min((info.fulfilled_by_ngo / info.requested) * 100, 100)}%` }} />
+                                    )}
+                                    {info.requested > 0 && info.fulfilled_by_donor > 0 && (
+                                        <div className="h-full bg-amber-500 transition-all"
+                                            style={{ width: `${Math.min((info.fulfilled_by_donor / info.requested) * 100, 100 - (info.fulfilled_by_ngo / info.requested) * 100)}%` }} />
+                                    )}
+                                </div>
+                                <div className="mt-1.5 flex items-center gap-3 text-[10px]">
+                                    {info.fulfilled_by_ngo > 0 && (
+                                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                                            <span className="w-2 h-2 rounded-full bg-blue-500" /> NGO: {info.fulfilled_by_ngo}
+                                        </span>
+                                    )}
+                                    {info.fulfilled_by_donor > 0 && (
+                                        <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                                            <span className="w-2 h-2 rounded-full bg-amber-500" /> Donor: {info.fulfilled_by_donor}
+                                        </span>
+                                    )}
+                                    {info.gap > 0 && (
+                                        <span className="text-red-500">Gap: {info.gap}</span>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+
+                        {/* NGO Contributors */}
+                        {poolData.ngo_contributors?.length > 0 && (
+                            <div>
+                                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-2">NGO Contributors ({poolData.ngo_contributors.length})</p>
+                                <div className="space-y-2">
+                                    {poolData.ngo_contributors.map((c: any, i: number) => (
+                                        <div key={i} className="flex items-center justify-between p-2.5 rounded-lg bg-blue-50/50 dark:bg-blue-500/5 border border-blue-100 dark:border-blue-500/10">
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-500/20 flex items-center justify-center text-blue-600 dark:text-blue-400 text-[10px] font-bold">
+                                                    NGO
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-medium text-slate-900 dark:text-white">{c.provider_name}</p>
+                                                    <p className="text-[10px] text-slate-400">
+                                                        {c.resource_items?.map((ri: any) => `${ri.quantity} ${ri.resource_type}`).join(', ') || 'Resources'}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <span className={cn(
+                                                'text-[10px] px-2 py-0.5 rounded-full font-medium',
+                                                c.status === 'availability_submitted' ? 'bg-blue-100 dark:bg-blue-500/10 text-blue-600' : 'bg-slate-100 dark:bg-white/5 text-slate-500'
+                                            )}>{c.status?.replace('_', ' ')}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Donor Contributors */}
+                        {poolData.donor_contributors?.length > 0 && (
+                            <div>
+                                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase mb-2">Donor Contributors ({poolData.donor_contributors.length})</p>
+                                <div className="space-y-2">
+                                    {poolData.donor_contributors.map((c: any, i: number) => (
+                                        <div key={i} className="flex items-center justify-between p-2.5 rounded-lg bg-amber-50/50 dark:bg-amber-500/5 border border-amber-100 dark:border-amber-500/10">
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-7 h-7 rounded-full bg-amber-100 dark:bg-amber-500/20 flex items-center justify-center text-amber-600 dark:text-amber-400 text-[10px] font-bold">
+                                                    DNR
+                                                </div>
+                                                <div>
+                                                    <p className="text-sm font-medium text-slate-900 dark:text-white">{c.provider_name}</p>
+                                                    <p className="text-[10px] text-slate-400">
+                                                        {c.donation_type === 'money' ? `$${c.amount?.toLocaleString()}` :
+                                                         c.donation_type === 'both' ? `$${c.amount?.toLocaleString()} + ${c.resource_items?.map((ri: any) => `${ri.quantity} ${ri.resource_type}`).join(', ')}` :
+                                                         c.resource_items?.map((ri: any) => `${ri.quantity} ${ri.resource_type}`).join(', ') || 'Resources'}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <span className={cn(
+                                                'text-[10px] px-2 py-0.5 rounded-full font-medium',
+                                                c.status === 'pledged' ? 'bg-amber-100 dark:bg-amber-500/10 text-amber-600' : 'bg-slate-100 dark:bg-white/5 text-slate-500'
+                                            )}>{c.status}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {poolData.total_money > 0 && (
+                            <div className="text-xs text-slate-500 dark:text-slate-400 pt-1 border-t border-slate-100 dark:border-white/5">
+                                Total monetary contributions: <span className="font-semibold text-emerald-600">${poolData.total_money?.toLocaleString()}</span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Details grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -307,6 +493,11 @@ export function RequestDetail({ requestId }: { requestId: string }) {
                         )}
                     </div>
                 </div>
+            )}
+
+            {/* Delivery Confirmation (shown when status is 'delivered') */}
+            {request.status === 'delivered' && (
+                <DeliveryConfirmation requestId={request.id} />
             )}
 
             {/* Delete confirmation modal */}

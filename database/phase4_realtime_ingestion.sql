@@ -163,11 +163,12 @@ VALUES
 ON CONFLICT (source_name) DO NOTHING;
 
 
--- 7. Enable Realtime on key tables for frontend WebSocket push
--- (Run in Supabase SQL Editor — requires supabase_realtime publication)
+-- 7. (Optional) Enable Realtime on key tables for frontend WebSocket push
+-- The following block is only needed for Supabase-hosted databases.
+-- It adds tables to the supabase_realtime publication for live subscriptions.
+/*
 DO $$
 BEGIN
-    -- Add tables to the realtime publication if not already present
     IF NOT EXISTS (
         SELECT 1 FROM pg_publication_tables
         WHERE pubname = 'supabase_realtime' AND tablename = 'ingested_events'
@@ -196,6 +197,7 @@ BEGIN
         ALTER PUBLICATION supabase_realtime ADD TABLE satellite_observations;
     END IF;
 END $$;
+*/
 
 
 -- 8. RLS policies — allow authenticated reads; service-role writes

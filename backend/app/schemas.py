@@ -48,6 +48,14 @@ class ResourceStatus(str, Enum):
     DEPLOYED = "deployed"
 
 
+class LocationType(str, Enum):
+    CITY = "city"
+    REGION = "region"
+    SHELTER = "shelter"
+    HOSPITAL = "hospital"
+    WAREHOUSE = "warehouse"
+
+
 class PredictionType(str, Enum):
     SEVERITY = "severity"
     SPREAD = "spread"
@@ -57,12 +65,16 @@ class PredictionType(str, Enum):
 
 class LocationBase(BaseModel):
     name: str
+    type: LocationType
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
+    address: Optional[str] = None
     city: str
     state: str
     country: str
+    postal_code: Optional[str] = None
     population: Optional[int] = None
+    area_sq_km: Optional[float] = None
 
 
 class LocationCreate(LocationBase):
@@ -163,6 +175,13 @@ class PredictionResponse(BaseModel):
     ci_lower_km2: Optional[float] = None
     ci_upper_km2: Optional[float] = None
     predicted_damage_usd: Optional[float] = None
+    # ── TFT multi-horizon severity forecasts ──
+    severity_6h: Optional[str] = Field(None, description="Predicted severity at t+6 hours")
+    severity_12h: Optional[str] = Field(None, description="Predicted severity at t+12 hours")
+    severity_24h: Optional[str] = Field(None, description="Predicted severity at t+24 hours")
+    severity_48h: Optional[str] = Field(None, description="Predicted severity at t+48 hours")
+    lower_bound: Optional[Dict[str, Any]] = Field(None, description="10th-percentile bounds per horizon")
+    upper_bound: Optional[Dict[str, Any]] = Field(None, description="90th-percentile bounds per horizon")
     model_version: str
     created_at: datetime
 
@@ -279,7 +298,7 @@ class UserLogin(BaseModel):
 
 class UserRegister(BaseModel):
     email: str
-    password: str = Field(..., min_length=8)
+    password: str = ""
     full_name: Optional[str] = None
     role: UserRole = UserRole.VICTIM
 
@@ -318,9 +337,13 @@ class RequestPriority(str, Enum):
 class RequestStatus(str, Enum):
     PENDING = "pending"
     APPROVED = "approved"
+    AVAILABILITY_SUBMITTED = "availability_submitted"
+    UNDER_REVIEW = "under_review"
     ASSIGNED = "assigned"
     IN_PROGRESS = "in_progress"
+    DELIVERED = "delivered"
     COMPLETED = "completed"
+    CLOSED = "closed"
     REJECTED = "rejected"
 
 
@@ -379,8 +402,32 @@ class ResourceRequestResponse(BaseModel):
     adoption_status: Optional[str] = None
     delivery_confirmation_code: Optional[str] = None
     delivery_confirmed_at: Optional[datetime] = None
+    # NLP priority scoring fields
+    nlp_priority: Optional[str] = None
+    nlp_confidence: Optional[float] = None
+    manual_priority: Optional[str] = None
+    extracted_needs: Optional[List[Dict]] = None
+    # Fulfillment tracking
+    fulfillment_entries: Optional[List[Dict]] = Field(default_factory=list)
+    fulfillment_pct: int = 0
+    # Admin
+    admin_note: Optional[str] = None
+    # Victim grouping
     group_id: Optional[str] = None
     head_count: int = 1
+    # Disaster linking
+    linked_disaster_id: Optional[str] = None
+    disaster_distance_km: Optional[float] = None
+    disaster_id: Optional[str] = None
+    # SLA tracking
+    sla_escalated_at: Optional[datetime] = None
+    sla_admin_alerted: bool = False
+    sla_delivery_alerted: bool = False
+    # NLP classification
+    nlp_classification: Optional[Dict] = None
+    urgency_signals: Optional[List[Dict]] = Field(default_factory=list)
+    ai_confidence: Optional[float] = None
+    nlp_overridden: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -509,13 +556,18 @@ class PledgeStatus(str, Enum):
     CANCELLED = "cancelled"
 
 class DonorPledgeCreate(BaseModel):
-    sourcing_request_id: str
-    quantity_pledged: int
+    sourcing_request_id: Optional[str] = None
+    quantity_pledged: int = 0
+    disaster_id: Optional[str] = None
 
-class DonorPledge(DonorPledgeCreate):
+class DonorPledge(BaseModel):
     id: str
     donor_id: str
-    status: PledgeStatus
+    disaster_id: Optional[str] = None
+    sourcing_request_id: Optional[str] = None
+    quantity_pledged: int = 0
+    status: PledgeStatus = PledgeStatus.PENDING
+    user_id: Optional[str] = None
     created_at: datetime
 
     class Config:

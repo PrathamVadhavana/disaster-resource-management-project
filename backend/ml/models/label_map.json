@@ -1,0 +1,14 @@
+{
+  "label2id": {
+    "critical": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 3
+  },
+  "id2label": {
+    "0": "critical",
+    "1": "high",
+    "2": "medium",
+    "3": "low"
+  }
+}

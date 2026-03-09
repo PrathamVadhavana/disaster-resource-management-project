@@ -14,7 +14,8 @@ load_dotenv(override=True)
 from app.routers import (
     disasters, predictions, resources, auth, victim, victim_profile, retrain, nlp,
     ingestion, global_disasters, admin, certifications, donor, ngo, volunteer,
-    chat, interactivity, analytics
+    chat, interactivity, analytics, realtime, hotspots, causal, llm, advanced_ml,
+    workflow
 )
 from app.services.ml_service import MLService
 from app.services.ingestion.orchestrator import IngestionOrchestrator
@@ -22,7 +23,7 @@ from app.routers.ingestion import set_orchestrator
 from app.services.anomaly_service import AnomalyDetectionService
 from app.services.sitrep_service import SitrepService
 from app.database import init_db
-from app.dependencies import set_ml_service
+from app.dependencies import set_ml_service, init_supabase_auth
 from app.middleware import setup_rate_limiting, setup_logging_middleware, configure_logging
 
 # Configure structured logging
@@ -48,7 +49,11 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Disaster Management API...")
 
-    # Initialize database
+    # Initialize Supabase auth
+    init_supabase_auth()
+    logger.info("Auth layer initialized")
+
+    # Initialize Supabase database client
     await init_db()
 
     # Load ML models
@@ -77,6 +82,49 @@ async def lifespan(app: FastAPI):
     app.state.sitrep_cron_task = sitrep_cron_task
     logger.info("Sitrep cron scheduled")
 
+    # Phase 6: Start DBSCAN hotspot clustering every 5 minutes
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from ml.clustering_service import run_clustering
+
+    hotspot_scheduler = AsyncIOScheduler()
+    hotspot_scheduler.add_job(
+        run_clustering,
+        trigger="interval",
+        minutes=30,
+        id="hotspot_dbscan",
+        name="DBSCAN hotspot detection",
+        max_instances=1,
+        replace_existing=True,
+    )
+    hotspot_scheduler.start()
+    app.state.hotspot_scheduler = hotspot_scheduler
+    logger.info("Hotspot DBSCAN scheduler started (every 30 min)")
+
+    # Phase 7: Start SLA monitoring background loop
+    from app.services.sla_service import sla_check_loop
+    sla_task = asyncio.create_task(sla_check_loop())
+    app.state.sla_task = sla_task
+    logger.info("SLA monitoring background task started")
+
+    # Start event store batch flush loop (reduces DB writes)
+    from app.services.event_sourcing_service import start_event_flush_loop
+    event_flush_task = asyncio.create_task(start_event_flush_loop())
+    app.state.event_flush_task = event_flush_task
+    logger.info("Event store batch flush loop started")
+
+    # Start periodic in-memory cache cleanup
+    from app.core.query_cache import cleanup_expired
+    async def _cache_cleanup_loop():
+        while True:
+            await asyncio.sleep(300)  # every 5 minutes
+            cleanup_expired()
+    cache_cleanup_task = asyncio.create_task(_cache_cleanup_loop())
+    app.state.cache_cleanup_task = cache_cleanup_task
+
+    # Allow the event loop to complete uvicorn startup before background
+    # tasks begin executing database calls.
+    await asyncio.sleep(0.1)
+
     yield
 
     # Shutdown
@@ -86,6 +134,20 @@ async def lifespan(app: FastAPI):
         logger.info("Anomaly detection stopped")
     if hasattr(app.state, "sitrep_cron_task") and app.state.sitrep_cron_task:
         app.state.sitrep_cron_task.cancel()
+    if hasattr(app.state, "hotspot_scheduler") and app.state.hotspot_scheduler:
+        app.state.hotspot_scheduler.shutdown(wait=False)
+        logger.info("Hotspot scheduler stopped")
+    if hasattr(app.state, "sla_task") and app.state.sla_task:
+        app.state.sla_task.cancel()
+        logger.info("SLA monitoring task stopped")
+    if hasattr(app.state, "event_flush_task") and app.state.event_flush_task:
+        # Flush remaining events before shutdown
+        from app.services.event_sourcing_service import _flush_event_buffer
+        await _flush_event_buffer()
+        app.state.event_flush_task.cancel()
+        logger.info("Event flush task stopped")
+    if hasattr(app.state, "cache_cleanup_task") and app.state.cache_cleanup_task:
+        app.state.cache_cleanup_task.cancel()
     if hasattr(app.state, "ingestion_orchestrator") and app.state.ingestion_orchestrator:
         await app.state.ingestion_orchestrator.stop()
         logger.info("Ingestion orchestrator stopped")
@@ -124,7 +186,17 @@ app = FastAPI(
 )
 
 # CORS configuration – NEVER use "*" with allow_credentials in production.
-_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
+# In production, set ALLOWED_ORIGINS to a comma-separated list of frontend URLs.
+# Defaults include both common local dev origins.
+_default_origins = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000"
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
+if os.getenv("ALLOWED_ORIGINS"):
+    logger.info("CORS origins from env: %s", _allowed_origins)
+else:
+    logger.warning(
+        "ALLOWED_ORIGINS env var not set — using localhost defaults. "
+        "Set this in production to your deployed frontend URL(s)."
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -186,6 +258,12 @@ app.include_router(ngo.router, prefix="/api/ngo", tags=["NGO Operations"])
 app.include_router(interactivity.router)
 app.include_router(analytics.router)
 app.include_router(chat.router)
+app.include_router(realtime.router)
+app.include_router(hotspots.router, prefix="/api/hotspots", tags=["Hotspot Clusters"])
+app.include_router(causal.router, prefix="/api/causal", tags=["Causal AI Analysis"])
+app.include_router(llm.router, prefix="/api/llm", tags=["DisasterGPT LLM"])
+app.include_router(advanced_ml.router, prefix="/api/ml", tags=["Advanced ML (RL, Federated, Multi-Agent, PINN)"])
+app.include_router(workflow.router, tags=["Workflow & SLA"])
 
 
 # Global exception handler – never leak internal details in production
@@ -220,5 +298,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
+        reload_dirs=["app", "ml", "scripts"],
         log_level="info"
     )

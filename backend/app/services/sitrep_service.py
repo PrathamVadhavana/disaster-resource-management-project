@@ -1,7 +1,7 @@
-﻿"""
+"""
 Phase 5 - Situation Report Generation Service.
 
-Gathers structured data from Supabase and generates template-based
+Gathers structured data from the database and generates template-based
 markdown situation reports - no external AI API needed (free).
 """
 
@@ -15,29 +15,42 @@ from typing import Optional, Dict, Any, List
 
 import httpx
 
-from app.database import supabase_admin
+from app.database import db_admin
 from app.core.phase5_config import phase5_config
 
 logger = logging.getLogger("sitrep_service")
 
 
 class SitrepService:
-    """Generates template-based situation reports (no paid API required)."""
+    """Generates situation reports with optional LLM enhancement via Groq."""
 
     def __init__(self):
-        self.model = "rule-based"
+        self._groq_client = None
+        self._groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if groq_key:
+            try:
+                from groq import Groq
+                self._groq_client = Groq(api_key=groq_key)
+                self.model = self._groq_model
+                logger.info("SitRep service using Groq LLM: %s", self._groq_model)
+            except Exception as e:
+                logger.warning("Groq not available for SitRep: %s", e)
+                self.model = "rule-based"
+        else:
+            self.model = "rule-based"
 
     # -- Data gathering --
 
     async def _gather_active_disasters(self) -> List[Dict]:
         try:
             resp = (
-                supabase_admin.table("disasters")
+                await db_admin.table("disasters")
                 .select("id, type, severity, status, title, description, affected_population, casualties, estimated_damage, start_date, created_at")
                 .in_("status", ["active", "monitoring"])
                 .order("created_at", desc=True)
                 .limit(50)
-                .execute()
+                .async_execute()
             )
             return resp.data or []
         except Exception as e:
@@ -46,7 +59,7 @@ class SitrepService:
 
     async def _gather_resource_utilization(self) -> Dict:
         try:
-            all_resp = supabase_admin.table("resources").select("id, type, status, quantity").execute()
+            all_resp = await db_admin.table("resources").select("id, type, status, quantity").limit(5000).async_execute()
             resources = all_resp.data or []
             total = len(resources)
             by_status = {}
@@ -66,10 +79,11 @@ class SitrepService:
     async def _gather_open_requests(self) -> Dict:
         try:
             resp = (
-                supabase_admin.table("resource_requests")
+                await db_admin.table("resource_requests")
                 .select("id, resource_type, priority, status")
                 .in_("status", ["pending", "approved", "assigned", "in_progress"])
-                .execute()
+                .limit(5000)
+                .async_execute()
             )
             requests = resp.data or []
             by_priority = {}; by_type = {}; by_status = {}
@@ -87,12 +101,12 @@ class SitrepService:
         try:
             since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
             resp = (
-                supabase_admin.table("predictions")
+                await db_admin.table("predictions")
                 .select("id, prediction_type, confidence_score, predicted_severity, created_at")
                 .gte("created_at", since)
                 .order("created_at", desc=True)
                 .limit(100)
-                .execute()
+                .async_execute()
             )
             predictions = resp.data or []
             by_type = {}; avg_confidence = {}
@@ -110,14 +124,9 @@ class SitrepService:
 
     async def _gather_recent_ingestion(self) -> Dict:
         try:
+            from app.services.ingestion import memory_store
             since = (datetime.utcnow() - timedelta(hours=24)).isoformat()
-            resp = (
-                supabase_admin.table("ingested_events")
-                .select("id, event_type, severity, processed")
-                .gte("ingested_at", since)
-                .execute()
-            )
-            events = resp.data or []
+            events = memory_store.query_ingested_events(since=since, limit=500)
             by_type = {}; by_severity = {}; processed_count = 0
             for e in events:
                 etype = e.get("event_type", "unknown"); sev = e.get("severity", "unknown")
@@ -132,12 +141,12 @@ class SitrepService:
     async def _gather_anomaly_summary(self) -> Dict:
         try:
             resp = (
-                supabase_admin.table("anomaly_alerts")
+                await db_admin.table("anomaly_alerts")
                 .select("id, anomaly_type, severity, title, status")
                 .eq("status", "active")
                 .order("detected_at", desc=True)
                 .limit(20)
-                .execute()
+                .async_execute()
             )
             alerts = resp.data or []
             return {"active_count": len(alerts), "alerts": [{"type": a["anomaly_type"], "severity": a["severity"], "title": a["title"]} for a in alerts]}
@@ -315,8 +324,100 @@ class SitrepService:
             lines.append("No urgent recommendations at this time. Continue monitoring.")
         lines.append("")
         lines.append("---")
-        lines.append(f"*Report generated by Rule-Based SitRep Engine - {data['generated_at'][:19]} UTC*")
+        lines.append(f"*Report generated by {'Groq LLM + ' if self._groq_client else ''}Rule-Based SitRep Engine - {data['generated_at'][:19]} UTC*")
         return "\n".join(lines)
+
+    async def _enhance_with_llm(self, markdown: str, data: Dict[str, Any]) -> str:
+        """Optionally enhance the executive summary and recommendations using Groq."""
+        if not self._groq_client:
+            return markdown
+
+        try:
+            import asyncio
+
+            # Build a concise data summary for the LLM
+            disasters = data.get("active_disasters", [])
+            resources = data.get("resource_utilization", {})
+            requests = data.get("open_requests", {})
+            anomalies = data.get("anomaly_summary", {})
+
+            data_summary = json.dumps({
+                "active_disasters": len(disasters),
+                "critical_disasters": [d.get("title", "?") for d in disasters if d.get("severity") == "critical"],
+                "utilization_pct": resources.get("utilization_pct", 0),
+                "total_resources": resources.get("total_resources", 0),
+                "open_requests": requests.get("total_open", 0),
+                "critical_requests": requests.get("by_priority", {}).get("critical", 0),
+                "anomalies": anomalies.get("active_count", 0),
+                "disaster_details": [
+                    {"title": d.get("title"), "type": d.get("type"), "severity": d.get("severity"),
+                     "affected": d.get("affected_population"), "casualties": d.get("casualties")}
+                    for d in disasters[:10]
+                ],
+            }, default=str, indent=2)
+
+            prompt = f"""You are the AI coordinator for HopeInChaos, a disaster management platform.
+Given this platform data, write ONLY two sections:
+
+1. A 3-5 sentence executive summary highlighting the most critical situation, key metrics, and overall system health.
+2. A numbered list of 3-5 prioritized actionable recommendations.
+
+Platform Data:
+{data_summary}
+
+Format your response exactly like this:
+EXECUTIVE_SUMMARY:
+[Your summary here]
+
+RECOMMENDATIONS:
+1. [Recommendation]
+2. [Recommendation]
+..."""
+
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._groq_client.chat.completions.create(
+                    model=self._groq_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=512,
+                    temperature=0.5,
+                ),
+            )
+            llm_text = response.choices[0].message.content or ""
+
+            # Replace the executive summary section
+            if "EXECUTIVE_SUMMARY:" in llm_text:
+                exec_start = llm_text.index("EXECUTIVE_SUMMARY:") + len("EXECUTIVE_SUMMARY:")
+                exec_end = llm_text.index("RECOMMENDATIONS:") if "RECOMMENDATIONS:" in llm_text else len(llm_text)
+                new_summary = llm_text[exec_start:exec_end].strip()
+
+                # Replace between "## 1. Executive Summary" and "## 2."
+                import re
+                markdown = re.sub(
+                    r"(## 1\. Executive Summary\n\n)(.*?)(\n## 2\.)",
+                    rf"\g<1>{new_summary}\n\n\g<3>",
+                    markdown,
+                    flags=re.DOTALL,
+                )
+
+            # Replace the recommendations section
+            if "RECOMMENDATIONS:" in llm_text:
+                rec_start = llm_text.index("RECOMMENDATIONS:") + len("RECOMMENDATIONS:")
+                new_recs = llm_text[rec_start:].strip()
+
+                import re
+                markdown = re.sub(
+                    r"(## 8\. Recommendations\n\n)(.*?)(\n---)",
+                    rf"\g<1>{new_recs}\n\n\g<3>",
+                    markdown,
+                    flags=re.DOTALL,
+                )
+
+            return markdown
+        except Exception as e:
+            logger.warning("LLM enhancement failed (using template): %s", e)
+            return markdown
 
     # -- Report generation --
 
@@ -325,6 +426,8 @@ class SitrepService:
         data = await self.gather_all_data()
         try:
             markdown_body = self._generate_markdown(data, report_type)
+            # Enhance with LLM if available (Groq)
+            markdown_body = await self._enhance_with_llm(markdown_body, data)
             generation_time = int((time.time() - start_ms) * 1000)
             lines = markdown_body.strip().split("\n")
             title = f"Situation Report - {data['report_date']}"
@@ -361,7 +464,7 @@ class SitrepService:
                 "generation_time_ms": generation_time,
                 "status": "generated",
             }
-            db_resp = supabase_admin.table("situation_reports").insert(record).execute()
+            db_resp = await db_admin.table("situation_reports").insert(record).async_execute()
             stored = db_resp.data[0] if db_resp.data else record
             if phase5_config.SITREP_EMAIL_ENABLED and phase5_config.SITREP_ADMIN_EMAILS:
                 await self._email_report(stored, phase5_config.SITREP_ADMIN_EMAILS)
@@ -376,7 +479,7 @@ class SitrepService:
                 "markdown_body": "", "model_used": self.model, "generated_by": generated_by,
                 "generation_time_ms": generation_time, "status": "failed", "error_message": str(e),
             }
-            try: supabase_admin.table("situation_reports").insert(error_record).execute()
+            try: await db_admin.table("situation_reports").insert(error_record).async_execute()
             except Exception: pass
             raise
 
@@ -397,30 +500,42 @@ class SitrepService:
                             "content": [{"type": "text/plain", "value": report.get("markdown_body", "")}],
                         },
                     )
-            supabase_admin.table("situation_reports").update({"emailed_to": recipients, "status": "emailed"}).eq("id", report["id"]).execute()
+            await db_admin.table("situation_reports").update({"emailed_to": recipients, "status": "emailed"}).eq("id", report["id"]).async_execute()
         except Exception as e:
             logger.error(f"Failed to email report: {e}")
 
     # -- List & get reports --
 
     async def list_reports(self, report_type: Optional[str] = None, limit: int = 20, offset: int = 0) -> List[Dict]:
-        query = (
-            supabase_admin.table("situation_reports")
-            .select("id, report_date, report_type, title, summary, key_metrics, status, generation_time_ms, created_at")
-            .order("report_date", desc=True)
-            .range(offset, offset + limit - 1)
-        )
-        if report_type: query = query.eq("report_type", report_type)
-        resp = query.execute()
-        return resp.data or []
+        try:
+            query = (
+                db_admin.table("situation_reports")
+                .select("id, report_date, report_type, title, summary, key_metrics, status, generation_time_ms, created_at")
+                .order("report_date", desc=True)
+                .range(offset, offset + limit - 1)
+            )
+            if report_type: query = query.eq("report_type", report_type)
+            resp = await query.async_execute()
+            return resp.data or []
+        except Exception as e:
+            logger.warning("Failed to list reports: %s", e)
+            return []
 
     async def get_report(self, report_id: str) -> Optional[Dict]:
-        resp = supabase_admin.table("situation_reports").select("*").eq("id", report_id).single().execute()
-        return resp.data
+        try:
+            resp = await db_admin.table("situation_reports").select("*").eq("id", report_id).single().async_execute()
+            return resp.data
+        except Exception as e:
+            logger.warning("Failed to get report %s: %s", report_id, e)
+            return None
 
     async def get_latest_report(self) -> Optional[Dict]:
-        resp = (
-            supabase_admin.table("situation_reports").select("*")
-            .eq("status", "generated").order("created_at", desc=True).limit(1).execute()
-        )
-        return resp.data[0] if resp.data else None
+        try:
+            resp = (
+                await db_admin.table("situation_reports").select("*")
+                .eq("status", "generated").order("created_at", desc=True).limit(1).async_execute()
+            )
+            return resp.data[0] if resp.data else None
+        except Exception as e:
+            logger.warning("Failed to get latest report: %s", e)
+            return None

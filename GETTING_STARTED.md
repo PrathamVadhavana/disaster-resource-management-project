@@ -19,53 +19,36 @@ Step-by-step guide to set up and run the Disaster Resource Management System on 
 
 ---
 
-## Step 1 — Create a Supabase Project
+## Step 1 — Set Up Supabase Project
 
-1. Go to [supabase.com](https://supabase.com) and sign in (or create a free account)
-2. Click **New Project**, choose a name, set a **database password** (save it — you'll need it), and select a region
-3. Wait ~2 minutes for provisioning to complete
+Supabase provides the PostgreSQL database and authentication layer.
 
-### Collect your credentials
+1. Go to [supabase.com](https://supabase.com) and sign in
+2. Click **New Project**, choose an organization, name your project, set a database password, and select a region
+3. Wait for the project to finish provisioning
 
-Go to **Settings → API** and copy these three values:
-
-| Credential | Where to find it |
-|------------|-----------------|
-| **Project URL** | `https://xxxxx.supabase.co` |
-| **Anon (public) Key** | Under "Project API keys" → `anon` `public` |
-| **Service Role Key** | Under "Project API keys" → `service_role` `secret` |
-
-Also note your **database password** from project creation.
+> **That's the database.** Supabase provisions a full PostgreSQL instance automatically. Tables are created by running the SQL scripts in `database/`.
 
 ---
 
-## Step 2 — Run Database Setup
+## Step 2 — Set Up Supabase Authentication
 
-Open the **Supabase SQL Editor** (left sidebar → SQL Editor).
+Supabase handles all user authentication (email/password, OAuth).
 
-### 2a. Auth & Users (REQUIRED — do this first)
+### 2a. Enable Authentication Providers
 
-Copy the entire contents of **`database/COMPLETE_SETUP.sql`** into the SQL Editor and click **Run**.
+1. In the Supabase dashboard, go to **Authentication → Providers**
+2. **Email** is enabled by default — ensure it is on
+3. *(Optional)* Enable **Google** under OAuth providers — configure Client ID and Secret
 
-This creates the `users` table, role-based extension tables (`victim_details`, `ngo_details`, etc.), auth triggers, RLS policies, and backfills profiles for any existing users. It is safe to run multiple times.
+### 2b. Get Your Project Keys
 
-### 2b. Application Tables
-
-Then run these scripts **in order**:
-
-| # | File | Purpose |
-|:-:|------|---------|
-| 1 | `database/schema.sql` | Core tables: locations, disasters, resources, predictions *(skip if COMPLETE_SETUP already created users)* |
-| 2 | `database/phase2_allocation_engine.sql` | Resource consumption log for forecasting |
-| 3 | `database/phase3_nlp_triage.sql` | NLP training feedback table |
-| 4 | `database/create_resource_requests.sql` | Victim resource requests, available_resources |
-| 5 | `database/phase4_realtime_ingestion.sql` | External data sources, ingested events, weather/satellite observations, alerts |
-| 6 | `database/phase5_ai_ops.sql` | Situation reports, NL query log, anomaly alerts, outcome tracking, evaluations |
-| 7 | `database/seed_available_resources.sql` | *(Optional)* Sample resource inventory data |
-
-**Tip:** Open each `.sql` file, copy the entire contents, paste into the SQL Editor, and click **Run**.
-
-> **If you only want signup/login/onboarding to work**, step 2a alone is enough. The other scripts add the disaster management tables.
+1. Go to **Settings → API** in the Supabase dashboard
+2. Copy the following values:
+   - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_URL`
+   - **anon / public key** → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - **service_role key** → `SUPABASE_SERVICE_ROLE_KEY` (keep this secret)
+   - **JWT Secret** → `SUPABASE_JWT_SECRET` (from Settings → API → JWT Settings)
 
 ---
 
@@ -78,10 +61,8 @@ Create `backend/.env` (copy from `backend/.env.example`):
 ```env
 # Required — Supabase
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-anon-public-key
-SUPABASE_SERVICE_KEY=your-service-role-key
-SUPABASE_DB_PASSWORD=your-database-password
-DATABASE_URL=postgresql+asyncpg://postgres:your-database-password@db.your-project.supabase.co:5432/postgres
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_JWT_SECRET=your-jwt-secret
 
 # Required — App
 ALLOWED_ORIGINS=http://localhost:3000
@@ -99,9 +80,14 @@ DEBUG=true
 Create `frontend/.env.local` (copy from `frontend/.env.example`):
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-public-key
 NEXT_PUBLIC_API_URL=http://localhost:8000
+
+# Supabase
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+
+# Server-side only (for admin operations)
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 ```
 
 > **Note:** Maps use Leaflet + OpenStreetMap — no Mapbox token needed.
@@ -242,8 +228,12 @@ These enhance functionality but are **not required**:
 
 ### Backend won't start
 
-**"Missing Supabase credentials"**
-- Ensure `backend/.env` exists and has `SUPABASE_URL`, `SUPABASE_KEY`, and `SUPABASE_SERVICE_KEY` set to real values (not the placeholder text)
+**"Missing database credentials"**
+- Ensure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set in `backend/.env`
+
+**"Auth initialization failed"**
+- Ensure `SUPABASE_JWT_SECRET` is set in `backend/.env`
+- Verify the JWT secret from Supabase dashboard: Settings → API → JWT Settings
 
 **"ML models loaded" doesn't appear**
 - Check that `backend/models/` contains `.pkl` files. If missing, run:
@@ -254,8 +244,8 @@ These enhance functionality but are **not required**:
   ```
 
 **Database connection errors**
-- Verify `DATABASE_URL` uses the correct password and host (`db.your-project.supabase.co`, not `your-project.supabase.co`)
-- Ensure `+asyncpg` is in the URL prefix: `postgresql+asyncpg://...`
+- Ensure the Supabase project is active and not paused
+- Verify `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are correct
 
 ### Frontend won't start
 
@@ -268,12 +258,12 @@ npm run dev
 ```
 
 **Blank page / API errors**
-- Verify `frontend/.env.local` has the correct Supabase URL and anon key
+- Verify `frontend/.env.local` has the correct Supabase config and `NEXT_PUBLIC_API_URL`
 - Confirm backend is running on port 8000
 
 ### Real-time updates not working
-- In Supabase Dashboard → **Database → Replication**, enable realtime for the tables you need
-- Check browser console for WebSocket connection errors
+- Ensure the backend SSE endpoint (`/api/events/stream`) is reachable
+- Check browser console for EventSource connection errors
 
 ### Docker issues
 - Ensure Docker Desktop is running

@@ -18,7 +18,8 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import ingestion_config as cfg
-from app.database import supabase_admin
+from app.database import db_admin
+from app.services.ingestion import memory_store
 
 logger = logging.getLogger("ingestion.alerts")
 
@@ -64,10 +65,10 @@ class AlertNotificationService:
     async def _get_ngo_recipients(self) -> List[Dict[str, Any]]:
         """Query users with role ngo or admin who have email/phone."""
         resp = (
-            supabase_admin.table("users")
+            await db_admin.table("users")
             .select("id, email, phone, role, full_name")
             .in_("role", ["ngo", "admin"])
-            .execute()
+            .async_execute()
         )
         return resp.data or []
 
@@ -117,8 +118,8 @@ class AlertNotificationService:
                 subject, email or "(no email)",
             )
 
-        # Persist notification log
-        supabase_admin.table("alert_notifications").insert(notif_base).execute()
+        # Persist notification log (in-memory)
+        memory_store.add_alert_notification(notif_base)
         return notif_base
 
     # ── Email via SendGrid ──────────────────────────────────────────

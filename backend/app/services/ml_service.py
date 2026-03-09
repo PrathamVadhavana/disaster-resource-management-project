@@ -1,6 +1,10 @@
 """
 ML Service — loads trained scikit-learn / XGBoost pipelines from disk
 and exposes async prediction methods consumed by the FastAPI routers.
+
+Severity predictions now delegate to a Temporal Fusion Transformer (TFT)
+when the trained checkpoint is available, falling back to the legacy
+RandomForest / rule-based approach otherwise.
 """
 
 import json
@@ -19,6 +23,10 @@ from app.services.training.data_pipeline import (
     SEVERITY_ORDER,
     TERRAIN_TYPES,
 )
+
+# Lazy-loaded TFT forecaster singleton
+_tft_forecaster = None
+_tft_load_attempted = False
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +62,9 @@ class MLService:
                 )
                 self._load_fallback_models()
 
+            # Attempt to load TFT model for severity forecasting
+            self._load_tft_model()
+
             self.models_loaded = True
             logger.info("ML models loaded successfully")
 
@@ -63,6 +74,31 @@ class MLService:
             self._load_fallback_models()
             self.models_loaded = True
             logger.info("Loaded fallback models after error")
+
+    def _load_tft_model(self):
+        """Try to load the Temporal Fusion Transformer for severity predictions."""
+        global _tft_forecaster, _tft_load_attempted
+        if _tft_load_attempted:
+            return
+        _tft_load_attempted = True
+        try:
+            from ml.tft_model import TFTSeverityForecaster
+            forecaster = TFTSeverityForecaster()
+            if forecaster.load():
+                _tft_forecaster = forecaster
+                logger.info("  ✔ TFT severity forecaster loaded")
+            else:
+                logger.warning(
+                    "  ✘ TFT checkpoint not found — severity uses legacy model. "
+                    "Run `python -m ml.train_tft` to train."
+                )
+        except ImportError:
+            logger.warning(
+                "  ✘ pytorch-forecasting not installed — TFT unavailable. "
+                "Install with: pip install pytorch-forecasting lightning"
+            )
+        except Exception as e:
+            logger.error("  ✘ TFT load error: %s", e)
 
     def _load_real_models(self):
         """Load joblib-serialized pipelines from the models/ directory."""
@@ -186,10 +222,26 @@ class MLService:
     # ── Prediction methods ────────────────────────────────────────────────
 
     async def predict_severity(self, features: Dict[str, Any]) -> Dict[str, Any]:
-        """Predict disaster severity using the trained RandomForest pipeline."""
+        """Predict disaster severity.
+
+        Delegates to the Temporal Fusion Transformer when available,
+        providing multi-horizon forecasts (t+6h, t+12h, t+24h, t+48h)
+        with quantile uncertainty bands.  Falls back to the legacy
+        RandomForest pipeline or rule-based heuristic otherwise.
+        """
         if not self.models_loaded:
             raise RuntimeError("Models not loaded")
 
+        # ── Try TFT first (multi-horizon with uncertainty) ──────────────
+        global _tft_forecaster
+        if _tft_forecaster is not None:
+            try:
+                result = _tft_forecaster.predict_from_features(features)
+                return result
+            except Exception as e:
+                logger.warning("TFT inference failed, falling back: %s", e)
+
+        # ── Legacy path: sklearn / rule-based ───────────────────────────
         model = self.models.get("severity")
         if model is not None:
             X = self._build_severity_features(features)
@@ -201,7 +253,6 @@ class MLService:
                 proba = model.predict_proba(X)[0]
                 confidence = float(np.max(proba))
             else:
-                # Pipeline — get the last step
                 clf = model[-1] if hasattr(model, "__getitem__") else model
                 if hasattr(clf, "predict_proba"):
                     proba = clf.predict_proba(X)[0]
@@ -209,11 +260,17 @@ class MLService:
                 else:
                     confidence = 0.75
         else:
-            # Fallback rule-based
             severity, confidence = self._fallback_severity(features)
 
+        # Return legacy result with multi-horizon stub fields for compat
         return {
             "predicted_severity": severity,
+            "severity_6h": severity,
+            "severity_12h": severity,
+            "severity_24h": severity,
+            "severity_48h": severity,
+            "lower_bound": {},
+            "upper_bound": {},
             "confidence_score": round(confidence, 4),
             "model_version": self.model_version,
         }

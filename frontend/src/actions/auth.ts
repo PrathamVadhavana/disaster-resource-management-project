@@ -1,22 +1,32 @@
 'use server';
 
-import { createClient } from '@/lib/supabase/server';
+import { cookies } from 'next/headers';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 /**
  * Check if the current user's profile is complete.
  * Used by client components to determine redirect target.
+ *
+ * Reads the Supabase token from cookies and calls the backend API.
  */
 export async function checkProfileStatus() {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const cookieStore = await cookies();
+    const token = cookieStore.get('sb-token')?.value;
 
-    if (!user) return null;
+    if (!token) return null;
 
-    const { data: profile } = await supabase
-        .from('users')
-        .select('is_profile_completed, role')
-        .eq('id', user.id)
-        .single();
+    try {
+        const res = await fetch(`${API_BASE}/api/auth/me`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+            cache: 'no-store',
+        });
 
-    return profile as { is_profile_completed: boolean; role: string } | null;
+        if (!res.ok) return null;
+
+        const profile = await res.json();
+        return profile as { is_profile_completed: boolean; role: string } | null;
+    } catch {
+        return null;
+    }
 }

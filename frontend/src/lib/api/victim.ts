@@ -2,14 +2,14 @@
  * Victim API Client
  * Communicates with FastAPI backend for victim resource requests and profile
  */
-import { createClient } from '@/lib/supabase/client'
+import { getSupabaseClient } from '@/lib/supabase/client'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 // ─── Types ──────────────────────────────────────────────
 export type VictimResourceType = 'Food' | 'Water' | 'Medical' | 'Shelter' | 'Clothing' | 'Financial Aid' | 'Evacuation' | 'Volunteers' | 'Custom' | 'Multiple'
 export type RequestPriority = 'critical' | 'high' | 'medium' | 'low'
-export type RequestStatus = 'pending' | 'approved' | 'assigned' | 'in_progress' | 'completed' | 'rejected'
+export type RequestStatus = 'pending' | 'approved' | 'under_review' | 'availability_submitted' | 'assigned' | 'in_progress' | 'delivered' | 'completed' | 'closed' | 'rejected'
 
 export interface ResourceItem {
     resource_type: string
@@ -47,6 +47,25 @@ export interface ResourceRequest {
     ai_confidence?: number | null
     nlp_overridden?: boolean
     urgency_signals?: Array<{ keyword: string; label: string; severity_boost: number }>
+    // Fulfillment tracking
+    fulfillment_pct?: number
+    fulfillment_entries?: Array<{
+        provider_id: string
+        provider_name: string
+        provider_role: string
+        donation_type?: string
+        amount?: number
+        resource_items?: Array<{ resource_type: string; quantity: number }>
+        status: string
+        created_at: string
+    }>
+    // Delivery verification
+    delivery_confirmation_code?: string
+    delivery_confirmed_at?: string
+    delivery_rating?: number
+    delivery_feedback?: string
+    // Disaster linking
+    linked_disaster_id?: string
 }
 
 export interface ResourceRequestCreate {
@@ -130,12 +149,12 @@ export interface RequestFilters {
 
 // ─── Helper ─────────────────────────────────────────────
 async function getAccessToken(): Promise<string> {
-    const supabase = createClient()
-    const { data } = await supabase.auth.getSession()
-    if (!data.session?.access_token) {
+    const sb = getSupabaseClient()
+    const { data: { session } } = await sb.auth.getSession()
+    if (!session) {
         throw new Error('Not authenticated')
     }
-    return data.session.access_token
+    return session.access_token
 }
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {

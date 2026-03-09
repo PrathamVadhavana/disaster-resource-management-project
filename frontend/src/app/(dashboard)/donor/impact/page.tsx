@@ -13,10 +13,11 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 
 export default function DonorImpactPage() {
     // Fetch donations from backend API
-    const { data: donations = [], isLoading: donLoading } = useQuery<any[]>({
+    const { data: donationsResp, isLoading: donLoading } = useQuery<any>({
         queryKey: ['donor-donations'],
         queryFn: () => api.getDonations(),
     })
+    const donations: any[] = Array.isArray(donationsResp) ? donationsResp : (donationsResp?.donations || [])
 
     const { data: disasters, isLoading: dLoading } = useQuery({
         queryKey: ['donor-impact-disasters'],

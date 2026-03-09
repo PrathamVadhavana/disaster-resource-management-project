@@ -33,7 +33,7 @@ export default function NGOTeamPage() {
     const [openMenu, setOpenMenu] = useState<string | null>(null)
     const [viewMember, setViewMember] = useState<any>(null)
 
-    // Fetch real users from Supabase - show NGO-relevant roles
+    // Fetch real users from the database - show NGO-relevant roles
     const { data: users, isLoading } = useQuery({
         queryKey: ['ngo-team-users'],
         queryFn: () => api.getUsers(),

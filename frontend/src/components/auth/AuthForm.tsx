@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-provider';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -53,9 +53,8 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
     const [error, setError] = useState<string | null>(null);
     const [emailToVerify, setEmailToVerify] = useState<string>('');
 
-    const supabase = createClient();
     const router = useRouter();
-    const { signIn } = useAuth();
+    const { signIn, signUp } = useAuth();
 
     // Login Form
     const loginForm = useForm<LoginValues>({
@@ -93,36 +92,8 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
         setIsLoading(true);
         setError(null);
         try {
-            // 1. Check if user exists using our secure RPC
-            let status = null;
-            try {
-                const { data: rpcData, error: rpcError } = await (supabase.rpc as any)('check_user_status', {
-                    p_email: data.email
-                });
-
-                if (!rpcError) {
-                    status = rpcData;
-                }
-                // If RPC fails (function might be missing), we let Supabase auth handle validation
-            } catch {
-                // RPC not available, continue with signup
-            }
-
-            if (status?.exists) {
-                throw new Error('User already exists. Please log in.');
-            }
-
-            // 2. Proceed with Signup
-            const { error } = await supabase.auth.signUp({
-                email: data.email,
-                password: data.password,
-                options: {
-                    data: {
-                        full_name: data.fullName,
-                        role: data.role,
-                    },
-                },
-            });
+            // Use AuthProvider's signUp which handles Supabase + backend registration
+            const { error } = await signUp(data.email, data.password, data.fullName, data.role);
             if (error) throw error;
             setEmailToVerify(data.email);
             setStep('VERIFICATION');
@@ -134,37 +105,83 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
         }
     };
 
-    const onVerifyOtp = async (data: OtpValues) => {
-        setIsLoading(true);
+    const onVerifyOtp = async (_data: OtpValues) => {
+        // Supabase handles email verification.
+        // After signup, the user is already signed in. Redirect to onboarding.
+        router.push('/onboarding');
+        router.refresh();
+    };
+
+    /** Complete post-Google-sign-in steps (backend registration + redirect) */
+    const completeGoogleSignIn = async () => {
+        const sb = getSupabaseClient();
+        const { data: { session } } = await sb.auth.getSession();
+        if (!session) return;
+
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+        await fetch(`${API_BASE}/api/auth/register`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({
+                email: session.user.email,
+                password: '', // Not needed for OAuth
+                full_name: session.user.user_metadata?.full_name || '',
+                role: 'victim', // Default role for OAuth sign-ups
+            }),
+        });
+
+        // Set cookie so middleware can read the token
+        document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
+
+        router.push('/onboarding');
+        router.refresh();
+    };
+
+    const handleGoogleAuth = async () => {
+        if (isLoading) return;
         setError(null);
+        setIsLoading(true);
         try {
-            const { data: authData, error } = await supabase.auth.verifyOtp({
-                email: emailToVerify,
-                token: data.token,
-                type: 'signup',
+            const sb = getSupabaseClient();
+            const { error } = await sb.auth.signInWithOAuth({
+                provider: 'google',
+                options: {
+                    redirectTo: `${window.location.origin}/auth/callback`,
+                },
             });
             if (error) throw error;
-            if (authData.user) {
-                // After email verification, redirect to onboarding for new users
-                router.push('/onboarding');
-                router.refresh();
-            }
+            // Supabase will redirect to Google — on return, the auth state change listener
+            // will pick up the session and completeGoogleSignIn will be called.
         } catch (err: any) {
-            setError(err.message || 'Invalid or expired OTP');
+            console.error('Google sign-in error:', err);
+            setError(err.message || 'Google sign-in failed');
+        } finally {
             setIsLoading(false);
         }
     };
 
-    const handleGoogleAuth = async () => {
-        setError(null);
-        const { error } = await supabase.auth.signInWithOAuth({
-            provider: 'google',
-            options: {
-                redirectTo: `${window.location.origin}/auth/callback`,
-            },
+    // Handle OAuth redirect result when returning from Google sign-in
+    useEffect(() => {
+        const sb = getSupabaseClient();
+        const { data: { subscription } } = sb.auth.onAuthStateChange(async (event) => {
+            if (event === 'SIGNED_IN') {
+                setIsLoading(true);
+                try {
+                    await completeGoogleSignIn();
+                } catch (err: any) {
+                    console.error('Google redirect completion error:', err);
+                    setError(err.message || 'Failed to complete Google sign-in');
+                } finally {
+                    setIsLoading(false);
+                }
+            }
         });
-        if (error) setError(error.message);
-    };
+        return () => subscription.unsubscribe();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const toggleView = () => {
         setView(view === 'login' ? 'signup' : 'login');
@@ -178,7 +195,8 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
             <button
                 type="button"
                 onClick={handleGoogleAuth}
-                className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-bold h-11 rounded-xl flex items-center justify-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-750 transition-all"
+                disabled={isLoading}
+                className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-bold h-11 rounded-xl flex items-center justify-center gap-2 hover:bg-slate-50 dark:hover:bg-slate-750 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
                 <svg className="w-5 h-5" viewBox="0 0 24 24">
                     <path
@@ -267,27 +285,20 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
                             onClick={async () => {
                                 setIsLoading(true);
                                 try {
-                                    const { error } = await supabase.auth.resend({
-                                        type: 'signup',
-                                        email: emailToVerify,
-                                    });
-                                    if (error) {
-                                        if (error.status === 429) {
-                                            throw new Error('Please wait 60 seconds before requesting another code.');
-                                        }
-                                        throw error;
-                                    }
-                                    alert('New code sent! Please check your spam folder.');
+                                    const sb = getSupabaseClient();
+                                    const { error } = await sb.auth.resend({ type: 'signup', email: emailToVerify });
+                                    if (error) throw error;
+                                    alert('Verification email re-sent! Please check your inbox.');
                                 } catch (err: any) {
                                     console.error("Resend Error:", err);
-                                    setError(err.message || 'Failed to resend code');
+                                    setError(err.message || 'Failed to resend verification email');
                                 } finally {
                                     setIsLoading(false);
                                 }
                             }}
                             className="w-full text-sm font-bold text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
                         >
-                            Resend Code
+                            Resend Verification Email
                         </button>
 
                         <button

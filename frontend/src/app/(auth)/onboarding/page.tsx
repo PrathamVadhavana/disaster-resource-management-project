@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@/lib/supabase/client';
+import { getSupabaseClient } from '@/lib/supabase/client';
 import { useAuth } from '@/lib/auth-provider';
 import { Loader2, AlertTriangle, Heart, HandHeart, Building2 } from 'lucide-react';
 import { VictimForm } from '@/components/auth/onboarding/VictimForm';
@@ -48,10 +48,9 @@ export default function OnboardingPage() {
     const [submitting, setSubmitting] = useState(false);
     const [selectedRole, setSelectedRole] = useState<string | null>(null);
     const router = useRouter();
-    const supabase = createClient();
 
-    // Get role from user_metadata (set during signup) or profile
-    const metaRole = (authUser?.user_metadata?.role as string) || (profile?.role as string) || null;
+    // Get role from Supabase custom claims (via auth-provider's role) or profile
+    const metaRole = (profile?.role as string) || null;
 
     useEffect(() => {
         if (!authLoading) {
@@ -65,7 +64,9 @@ export default function OnboardingPage() {
                 router.push('/admin');
                 return;
             }
-            if (profile?.is_profile_completed) {
+            // Check both profile data and the profile-completed cookie
+            const hasCompletedCookie = document.cookie.split('; ').some(c => c === 'profile-completed=true');
+            if (profile?.is_profile_completed || hasCompletedCookie) {
                 const r = effectiveRole || 'victim';
                 router.push(roleToDashboard(r));
                 return;
@@ -84,8 +85,13 @@ export default function OnboardingPage() {
 
     const handleRoleSelected = async (role: string) => {
         setSelectedRole(role);
-        // Also update metadata so role persists
-        await supabase.auth.updateUser({ data: { role } });
+        // Update role cookie so middleware routes correctly
+        const sb = getSupabaseClient();
+        const { data: { session } } = await sb.auth.getSession();
+        if (session) {
+            document.cookie = `sb-role=${role}; path=/; max-age=3600; SameSite=Lax`;
+            document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
+        }
     };
 
     // Loading

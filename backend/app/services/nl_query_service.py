@@ -1,11 +1,11 @@
-﻿"""
+"""
 Phase 5 - Natural Language Query Service.
 
 Provides a 'Chat with your data' interface using BOTH:
 1. Rule-based keyword matching for DB queries (fast, free)
-2. Google Gemini LLM for intelligent response generation (free tier)
+2. Groq / HuggingFace Inference API for intelligent response generation (free tier)
 
-Falls back to rule-based formatting if no Gemini API key is configured.
+Falls back to rule-based formatting if no API key is configured.
 """
 
 import json
@@ -15,74 +15,92 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
-from app.database import supabase_admin
+from app.database import db_admin
 from app.core.phase5_config import phase5_config
 
 logger = logging.getLogger("nl_query_service")
 
-# Gemini LLM State
-_gemini_available = False
-_genai_client = None
+# LLM State — prefer Groq (free, fast, 70B) over HuggingFace
+_llm_available = False
+_llm_client = None
+_llm_model = ""
+_llm_provider = "rule-based"
 
-try:
-    from google import genai
-    _api_key = os.getenv("GEMINI_API_KEY", "")
-    if _api_key:
-        _genai_client = genai.Client(api_key=_api_key)
-        _gemini_available = True
-        logger.info("✅ Gemini LLM configured successfully (google-genai)")
-    else:
-        logger.info("ℹ️  No GEMINI_API_KEY set — using rule-based NL query mode")
-except ImportError:
-    logger.warning("⚠️  google-genai not installed — using rule-based NL query mode")
-except Exception as e:
-    logger.warning(f"⚠️  Gemini setup failed: {e} — using rule-based NL query mode")
+# Try Groq first (free tier, Llama 3.3 70B)
+_groq_api_key = os.getenv("GROQ_API_KEY", "")
+if _groq_api_key:
+    try:
+        from groq import Groq
+        _llm_client = Groq(api_key=_groq_api_key)
+        _llm_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        _llm_provider = "groq"
+        _llm_available = True
+        logger.info("Groq API configured (model: %s)", _llm_model)
+    except ImportError:
+        logger.warning("groq package not installed — trying HuggingFace")
+    except Exception as e:
+        logger.warning(f"Groq setup failed: {e} — trying HuggingFace")
+
+# Fall back to HuggingFace
+if not _llm_available:
+    try:
+        from huggingface_hub import InferenceClient
+        _hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY") or None
+        _llm_client = InferenceClient(token=_hf_token)
+        _llm_model = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
+        _llm_provider = "huggingface"
+        _llm_available = True
+        logger.info("HuggingFace Inference API configured (model: %s)", _llm_model)
+    except ImportError:
+        logger.warning("huggingface_hub not installed — using rule-based NL query mode")
+    except Exception as e:
+        logger.warning(f"HuggingFace setup failed: {e} — using rule-based NL query mode")
 
 
 class NLQueryService:
-    """Natural language query interface with optional Gemini LLM enhancement."""
+    """Natural language query interface with optional Groq/HuggingFace LLM enhancement."""
 
     def __init__(self):
-        self.model = "gemini-2.0-flash" if _gemini_available else "rule-based"
+        self.model = _llm_model if _llm_available else "rule-based"
 
     # -- Tool execution (same DB queries as before) --
 
     async def _tool_query_disasters(self, params: Dict) -> Any:
-        query = supabase_admin.table("disasters").select("*")
+        query = db_admin.table("disasters").select("*")
         if params.get("status"): query = query.eq("status", params["status"])
         if params.get("severity"): query = query.eq("severity", params["severity"])
         if params.get("disaster_type"): query = query.eq("type", params["disaster_type"])
         query = query.order("created_at", desc=True).limit(params.get("limit", 20))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_resources(self, params: Dict) -> Any:
-        query = supabase_admin.table("resources").select("*")
+        query = db_admin.table("resources").select("*")
         if params.get("status"): query = query.eq("status", params["status"])
         if params.get("resource_type"): query = query.eq("type", params["resource_type"])
         if params.get("disaster_id"): query = query.eq("disaster_id", params["disaster_id"])
         query = query.limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_victim_requests(self, params: Dict) -> Any:
-        query = supabase_admin.table("resource_requests").select("*")
+        query = db_admin.table("resource_requests").select("*")
         if params.get("status"): query = query.eq("status", params["status"])
         if params.get("priority"): query = query.eq("priority", params["priority"])
         if params.get("resource_type"): query = query.eq("resource_type", params["resource_type"])
         query = query.order("created_at", desc=True).limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_predictions(self, params: Dict) -> Any:
-        query = supabase_admin.table("predictions").select("*")
+        query = db_admin.table("predictions").select("*")
         if params.get("prediction_type"): query = query.eq("prediction_type", params["prediction_type"])
         if params.get("since_hours"):
             since = (datetime.utcnow() - timedelta(hours=params["since_hours"])).isoformat()
             query = query.gte("created_at", since)
         if params.get("min_confidence"): query = query.gte("confidence_score", params["min_confidence"])
         query = query.order("created_at", desc=True).limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_resource_utilization(self, params: Dict) -> Any:
-        resp = supabase_admin.table("resources").select("id, type, status, quantity").execute()
+        resp = await db_admin.table("resources").select("id, type, status, quantity").async_execute()
         resources = resp.data or []
         total = len(resources)
         by_status = {}; by_type = {}; total_quantity_by_type = {}
@@ -96,41 +114,41 @@ class NLQueryService:
         return {"total_resources": total, "utilization_pct": utilization_pct, "by_status": by_status, "by_type": by_type, "total_quantity_by_type": total_quantity_by_type}
 
     async def _tool_query_anomaly_alerts(self, params: Dict) -> Any:
-        query = supabase_admin.table("anomaly_alerts").select("*")
+        query = db_admin.table("anomaly_alerts").select("*")
         if params.get("status"): query = query.eq("status", params["status"])
         if params.get("severity"): query = query.eq("severity", params["severity"])
         if params.get("anomaly_type"): query = query.eq("anomaly_type", params["anomaly_type"])
         query = query.order("detected_at", desc=True).limit(params.get("limit", 20))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_ingested_events(self, params: Dict) -> Any:
-        query = supabase_admin.table("ingested_events").select(
-            "id, event_type, title, severity, latitude, longitude, location_name, ingested_at, processed"
-        )
-        if params.get("event_type"): query = query.eq("event_type", params["event_type"])
+        from app.services.ingestion import memory_store
+        since = None
         if params.get("since_hours"):
             since = (datetime.utcnow() - timedelta(hours=params["since_hours"])).isoformat()
-            query = query.gte("ingested_at", since)
-        query = query.order("ingested_at", desc=True).limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return memory_store.query_ingested_events(
+            event_type=params.get("event_type"),
+            since=since,
+            limit=params.get("limit", 50),
+        )
 
     async def _tool_query_outcome_tracking(self, params: Dict) -> Any:
-        query = supabase_admin.table("outcome_tracking").select("*")
+        query = db_admin.table("outcome_tracking").select("*")
         if params.get("prediction_type"): query = query.eq("prediction_type", params["prediction_type"])
         query = query.order("created_at", desc=True).limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_available_resources(self, params: Dict) -> Any:
-        query = supabase_admin.table("available_resources").select("*").eq("is_active", True)
+        query = db_admin.table("available_resources").select("*").eq("is_active", True)
         if params.get("category"): query = query.eq("category", params["category"])
         query = query.order("category").limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     async def _tool_query_users(self, params: Dict) -> Any:
-        query = supabase_admin.table("users").select("id, full_name, email, role, created_at")
+        query = db_admin.table("users").select("id, full_name, email, role, created_at")
         if params.get("role"): query = query.eq("role", params["role"])
         query = query.order("created_at", desc=True).limit(params.get("limit", 50))
-        return (query.execute()).data or []
+        return (await query.async_execute()).data or []
 
     # -- Rule-based query classification and routing --
 
@@ -308,14 +326,16 @@ class NLQueryService:
         # Fallback: just dump JSON
         return f"Found {count} result(s):\n`json\n{json.dumps(data[:5], indent=2, default=str)}\n`"
 
-    # -- Gemini LLM Enhancement --
+    # -- HuggingFace LLM Enhancement --
 
     async def _generate_llm_response(self, query: str, category: str, data: Any, rule_based_text: str) -> str:
-        """Use Gemini to generate a more intelligent, natural response."""
-        if not _gemini_available or not _genai_client:
+        """Use Groq or HuggingFace API to generate a more intelligent, natural response."""
+        if not _llm_available or not _llm_client:
             return rule_based_text
 
         try:
+            import asyncio
+
             # Prepare data summary (limit size for token efficiency)
             data_summary = ""
             if isinstance(data, dict):
@@ -325,35 +345,58 @@ class NLQueryService:
             else:
                 data_summary = str(data)[:1000]
 
-            prompt = f"""You are an AI disaster management assistant. A user asked a question about the disaster management platform data.
+            system_prompt = """You are the AI assistant for HopeInChaos, a disaster resource management platform. 
+You answer questions about the platform's data: disasters, resources, victim requests, predictions, anomalies, and users.
+Always base your answers on the actual data provided below. Be specific with numbers, names, and facts.
+Use markdown formatting with headers, bullet points, tables, and bold for key metrics.
+Keep responses under 500 words. Highlight critical or urgent items first."""
 
-User Question: "{query}"
+            user_prompt = f"""User Question: "{query}"
 
 Data Category: {category}
 Data Retrieved from Database:
 {data_summary}
 
-Based on this data, provide a clear, concise, and helpful response. Use markdown formatting.
-Key guidelines:
-- Be specific with numbers and facts from the data
-- Highlight critical or urgent items first
-- Provide actionable insights when possible
-- Keep the response under 500 words
-- Use bullet points and tables where appropriate
-- If the data is empty, say so clearly and suggest what might help
+Based on this data, provide a clear, concise, and helpful response. Be specific with numbers and facts from the data.
+Highlight critical or urgent items first. Provide actionable insights when possible.
+If the data is empty, say so clearly and suggest what might help.
 
 Response:"""
 
-            response = _genai_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt
-            )
-            if response and response.text:
-                return response.text.strip()
+            loop = asyncio.get_event_loop()
+
+            if _llm_provider == "groq":
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: _llm_client.chat.completions.create(
+                        model=_llm_model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        max_tokens=1024,
+                        temperature=0.7,
+                    ),
+                )
+                text = response.choices[0].message.content
+            else:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: _llm_client.chat_completion(
+                        model=_llm_model,
+                        messages=[{"role": "user", "content": system_prompt + "\n\n" + user_prompt}],
+                        max_tokens=1024,
+                        temperature=0.7,
+                    ),
+                )
+                text = response.choices[0].message.content
+
+            if text:
+                return text.strip()
             return rule_based_text
 
         except Exception as e:
-            logger.error(f"Gemini LLM error (falling back to rule-based): {e}")
+            logger.error(f"LLM error (falling back to rule-based): {e}")
             return rule_based_text
 
     # -- Main query entry point --
@@ -364,7 +407,7 @@ Response:"""
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Process a natural language query using rule-based routing + optional Gemini LLM."""
+        """Process a natural language query using rule-based routing + optional HuggingFace LLM."""
         start_ms = time.time()
 
         # Classify and route the query
@@ -403,10 +446,10 @@ Response:"""
         # Format the response (rule-based first)
         rule_based_text = self._format_response(category, data, query_text)
 
-        # Enhance with Gemini LLM if available
-        if _gemini_available:
+        # Enhance with LLM if available (Groq or HuggingFace)
+        if _llm_available:
             response_text = await self._generate_llm_response(query_text, category, data, rule_based_text)
-            model_used = "gemini-2.0-flash"
+            model_used = _llm_model
         else:
             response_text = rule_based_text
             model_used = "rule-based"
@@ -427,7 +470,7 @@ Response:"""
             "latency_ms": latency_ms,
         }
         try:
-            supabase_admin.table("nl_query_log").insert(log_record).execute()
+            await db_admin.table("nl_query_log").insert(log_record).async_execute()
         except Exception as e:
             logger.error(f"Failed to log NL query: {e}")
 
@@ -451,19 +494,19 @@ Response:"""
 
     async def get_query_history(self, user_id: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20) -> List[Dict]:
         query = (
-            supabase_admin.table("nl_query_log")
+            db_admin.table("nl_query_log")
             .select("id, query_text, query_type, response_text, tools_called, latency_ms, feedback_rating, model_used, created_at")
             .order("created_at", desc=True)
             .limit(limit)
         )
         if user_id: query = query.eq("user_id", user_id)
         if session_id: query = query.eq("session_id", session_id)
-        resp = query.execute()
+        resp = await query.async_execute()
         return resp.data or []
 
     async def submit_feedback(self, query_id: str, rating: int) -> bool:
         try:
-            supabase_admin.table("nl_query_log").update({"feedback_rating": rating}).eq("id", query_id).execute()
+            await db_admin.table("nl_query_log").update({"feedback_rating": rating}).eq("id", query_id).async_execute()
             return True
         except Exception as e:
             logger.error(f"Failed to submit feedback: {e}")

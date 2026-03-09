@@ -6,7 +6,7 @@ import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth-provider'
 import {
     User, Mail, Phone, MapPin, Shield, Save,
-    Loader2, CheckCircle2, Edit2, Award, Calendar, Building
+    Loader2, CheckCircle2, Edit2, Award, Calendar, Building, ArrowRightLeft
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -224,6 +224,22 @@ export default function VolunteerProfilePage() {
                             placeholder="Name & phone number"
                             className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm disabled:opacity-60" />
                     </div>
+                </div>
+            </div>
+
+            {/* Role Switching */}
+            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-1 flex items-center gap-2">
+                    <ArrowRightLeft className="w-4 h-4" /> Switch Role
+                </h3>
+                <p className="text-xs text-slate-500 mb-3">Change your active role on the platform</p>
+                <div className="flex gap-3">
+                    {(['donor', 'victim'] as const).map(role => (
+                        <button key={role} onClick={() => { api.switchRole(role).then(() => { window.location.href = '/' }) }}
+                            className="flex-1 py-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 transition-all capitalize">
+                            Switch to {role}
+                        </button>
+                    ))}
                 </div>
             </div>
         </div>

@@ -1,6 +1,6 @@
 -- ============================================================
 -- PROJECT: DISASTER RESOURCE MANAGEMENT
--- TARGET: SUPABASE POSTGRES
+-- TARGET: PostgreSQL
 -- PURPOSE: UPGRADE ROLES & VERIFICATION SYSTEM
 -- ============================================================
 

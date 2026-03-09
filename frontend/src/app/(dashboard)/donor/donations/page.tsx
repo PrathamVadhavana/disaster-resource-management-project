@@ -21,6 +21,8 @@ interface DonationRecord {
     description: string
     victim_name: string
     amount: number
+    donation_type?: 'money' | 'resource' | 'both'
+    resource_items?: Array<{ resource_type: string; quantity: number; unit?: string }>
     status: 'completed' | 'pending' | 'failed' | 'refunded'
     created_at: string
 }
@@ -44,7 +46,7 @@ export default function DonorDonationsPage() {
 
     // Update donation (mark completed)
     const updateMutation = useMutation({
-        mutationFn: ({ id, data }: { id: string; data: { amount?: number; status?: string } }) =>
+        mutationFn: ({ id, data }: { id: string; data: Record<string, any> }) =>
             api.updateDonation(id, data),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: ['donor-donations'] }),
     })
@@ -88,10 +90,15 @@ export default function DonorDonationsPage() {
         completed: donations.filter(d => d.status === 'completed').length,
         pending: donations.filter(d => d.status === 'pending').length,
         totalAmount: donations.filter(d => d.status === 'completed').reduce((sum, d) => sum + (d.amount || 0), 0),
+        resourceDonations: donations.filter(d => d.donation_type === 'resource' || d.donation_type === 'both').length,
     }
 
-    const markCompleted = (id: string, amount: number) => {
-        updateMutation.mutate({ id, data: { amount, status: 'completed' } })
+    const markCompleted = (id: string, amount: number, donation_type?: string, resource_items?: any[]) => {
+        const data: any = { status: 'completed' }
+        if (amount > 0) data.amount = amount
+        if (donation_type) data.donation_type = donation_type
+        if (resource_items && resource_items.length > 0) data.resource_items = resource_items
+        updateMutation.mutate({ id, data })
     }
 
     const removeDonation = (id: string) => {
@@ -203,8 +210,8 @@ export default function DonorDonationsPage() {
                     <thead>
                         <tr className="border-b border-slate-100 dark:border-white/5">
                             <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Cause / Resource</th>
-                            <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Type</th>
-                            <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Amount</th>
+                            <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Donation Type</th>
+                            <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Amount / Items</th>
                             <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Status</th>
                             <th className="text-left px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Date</th>
                             <th className="text-right px-5 py-3 text-[11px] font-semibold text-slate-500 uppercase">Actions</th>
@@ -221,15 +228,31 @@ export default function DonorDonationsPage() {
                                 </td>
                                 <td className="px-5 py-3">
                                     <span className={cn('inline-flex px-2 py-0.5 rounded-md text-[10px] font-semibold capitalize',
-                                        d.disaster_type === 'pledge'
-                                            ? 'bg-pink-100 text-pink-700 dark:bg-pink-500/10 dark:text-pink-400'
-                                            : 'bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400'
+                                        d.donation_type === 'resource'
+                                            ? 'bg-purple-100 text-purple-700 dark:bg-purple-500/10 dark:text-purple-400'
+                                            : d.donation_type === 'both'
+                                            ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-400'
+                                            : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-400'
                                     )}>
-                                        {d.disaster_type}
+                                        {d.donation_type === 'both' ? '💰 + 📦' : d.donation_type === 'resource' ? '📦 Resource' : '💰 Money'}
                                     </span>
                                 </td>
-                                <td className="px-5 py-3 text-slate-900 dark:text-white font-semibold">
-                                    {d.amount > 0 ? `$${d.amount.toLocaleString()}` : '—'}
+                                <td className="px-5 py-3">
+                                    {(d.donation_type === 'money' || d.donation_type === 'both' || !d.donation_type) && d.amount > 0 && (
+                                        <p className="text-slate-900 dark:text-white font-semibold">${d.amount.toLocaleString()}</p>
+                                    )}
+                                    {(d.donation_type === 'resource' || d.donation_type === 'both') && d.resource_items && d.resource_items.length > 0 && (
+                                        <div className="flex flex-wrap gap-1 mt-0.5">
+                                            {d.resource_items.map((ri, i) => (
+                                                <span key={i} className="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-100 dark:bg-white/5 text-[10px] text-slate-600 dark:text-slate-400">
+                                                    {ri.resource_type} ×{ri.quantity}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                    {!d.amount && (!d.resource_items || d.resource_items.length === 0) && (
+                                        <span className="text-slate-400">—</span>
+                                    )}
                                 </td>
                                 <td className="px-5 py-3">
                                     <span className={cn('inline-flex px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase',
@@ -303,30 +326,65 @@ export default function DonorDonationsPage() {
                 </div>
             )}
 
-            {/* Amount Modal */}
-            {amountModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-                    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-sm p-6">
-                        <div className="flex items-center justify-between mb-4">
-                            <h2 className="text-lg font-bold text-slate-900 dark:text-white">Enter Amount</h2>
-                            <button onClick={() => setAmountModal(null)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5"><X className="w-4 h-4" /></button>
-                        </div>
-                        <input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)}
-                            placeholder="Enter donation amount ($)"
-                            className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm mb-4" />
-                        <button onClick={() => {
-                            const amt = parseFloat(amountInput) || 0
-                            if (amt > 0) {
-                                markCompleted(amountModal, amt)
+            {/* Complete Donation Modal */}
+            {amountModal && (() => {
+                const donation = donations.find(d => d.id === amountModal)
+                const isResource = donation?.donation_type === 'resource'
+                const isBoth = donation?.donation_type === 'both'
+                const isMoney = !donation?.donation_type || donation?.donation_type === 'money'
+                const showMoneyInput = isMoney || isBoth
+                const showResourceSummary = isResource || isBoth
+
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-2xl w-full max-w-sm p-6">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+                                    {isResource ? 'Confirm Resource Donation' : isBoth ? 'Confirm Donation' : 'Enter Amount'}
+                                </h2>
+                                <button onClick={() => setAmountModal(null)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5"><X className="w-4 h-4" /></button>
+                            </div>
+
+                            {/* Resource items summary */}
+                            {showResourceSummary && donation?.resource_items && donation.resource_items.length > 0 && (
+                                <div className="mb-4">
+                                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Resources to Donate</p>
+                                    <div className="space-y-2">
+                                        {donation.resource_items.map((item, i) => (
+                                            <div key={i} className="flex items-center justify-between px-3 py-2 rounded-xl bg-purple-50 dark:bg-purple-500/10 border border-purple-200 dark:border-purple-500/20">
+                                                <span className="text-sm font-medium text-purple-700 dark:text-purple-300">{item.resource_type}</span>
+                                                <span className="text-sm text-purple-600 dark:text-purple-400">{item.quantity} {item.unit || 'units'}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Victim info */}
+                            {donation?.victim_name && (
+                                <p className="text-xs text-slate-500 mb-3">For: <span className="font-medium text-slate-700 dark:text-slate-300">{donation.victim_name}</span></p>
+                            )}
+
+                            {/* Money input (only for money or both types) */}
+                            {showMoneyInput && (
+                                <input type="number" value={amountInput} onChange={(e) => setAmountInput(e.target.value)}
+                                    placeholder="Enter donation amount ($)"
+                                    className="w-full h-10 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm mb-4" />
+                            )}
+
+                            <button onClick={() => {
+                                const amt = parseFloat(amountInput) || 0
+                                if (showMoneyInput && amt <= 0) return
+                                markCompleted(amountModal, amt, donation?.donation_type, donation?.resource_items)
                                 setAmountModal(null)
-                            }
-                        }}
-                            className="w-full h-10 rounded-xl bg-green-600 text-white text-sm font-medium hover:bg-green-700">
-                            Confirm Donation
-                        </button>
+                            }}
+                                className="w-full h-10 rounded-xl bg-green-600 text-white text-sm font-medium hover:bg-green-700">
+                                {isResource ? 'Confirm Resource Donation' : isBoth ? 'Confirm Donation' : 'Confirm Donation'}
+                            </button>
+                        </div>
                     </div>
-                </div>
-            )}
+                )
+            })()}
 
             {/* Receipt Modal */}
             {receiptModal && (

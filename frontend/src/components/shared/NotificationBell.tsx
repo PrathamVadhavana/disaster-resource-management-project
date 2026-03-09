@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import { useAuth } from '@/lib/auth-provider'
 import { cn } from '@/lib/utils'
 import {
@@ -41,36 +41,34 @@ export function NotificationBell() {
     const notifications = data?.notifications || []
     const unread = data?.unread_count || 0
 
-    // Supabase Realtime subscription for instant notifications
+    // SSE realtime subscription for instant notifications
     useEffect(() => {
         if (!profile?.id) return
-        const supabase = createClient()
-        const channel = supabase
-            .channel('user-notifications')
-            .on(
-                'postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${profile.id}` },
-                (payload) => {
-                    qc.invalidateQueries({ queryKey: ['notifications'] })
-                    // Play sound for new notification
-                    try {
-                        if (audioRef.current) {
-                            audioRef.current.currentTime = 0
-                            audioRef.current.play().catch(() => { })
-                        }
-                    } catch { }
-                    // Browser notification
-                    if ('Notification' in window && Notification.permission === 'granted') {
-                        const n = payload.new as any
-                        new Notification(n.title || 'New notification', {
-                            body: n.message || '',
-                            icon: '/favicon.ico',
-                        })
-                    }
+
+        const unsub = subscribeToTable('notifications', (evt) => {
+            // Only care about inserts for this user
+            if (evt.type !== 'INSERT') return
+            if (evt.row?.user_id !== profile.id) return
+
+            qc.invalidateQueries({ queryKey: ['notifications'] })
+            // Play sound for new notification
+            try {
+                if (audioRef.current) {
+                    audioRef.current.currentTime = 0
+                    audioRef.current.play().catch(() => { })
                 }
-            )
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+            } catch { }
+            // Browser notification
+            if ('Notification' in window && Notification.permission === 'granted') {
+                const n = evt.row as any
+                new Notification(n.title || 'New notification', {
+                    body: n.message || '',
+                    icon: '/favicon.ico',
+                })
+            }
+        })
+
+        return () => { unsub() }
     }, [profile?.id, qc])
 
     // Request browser notification permission

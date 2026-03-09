@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { createClient } from '@/lib/supabase/client'
+import { subscribeToTable } from '@/lib/realtime'
 import {
     Loader2, Search, MapPin, ChevronLeft, ChevronRight,
     CheckSquare, Truck, Play, CheckCircle2, Package,
@@ -41,14 +41,10 @@ export default function NGOAssignedRequestsPage() {
 
     // Realtime
     useEffect(() => {
-        const supabase = createClient()
-        const channel = supabase
-            .channel('ngo-assigned-rt')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'resource_requests' }, () => {
-                qc.invalidateQueries({ queryKey: ['ngo-assigned'] })
-            })
-            .subscribe()
-        return () => { supabase.removeChannel(channel) }
+        const unsub = subscribeToTable('resource_requests', () => {
+            qc.invalidateQueries({ queryKey: ['ngo-assigned'] })
+        })
+        return () => { unsub() }
     }, [qc])
 
     const statusMutation = useMutation({

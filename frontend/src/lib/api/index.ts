@@ -4,7 +4,7 @@
  * Usage:  import { api } from '@/lib/api'
  *         const disasters = await api.getDisasters({ status: 'active' })
  */
-import { createClient } from '@/lib/supabase/client'
+import { getSupabaseClient } from '@/lib/supabase/client'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
@@ -12,9 +12,9 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 async function getAccessToken(): Promise<string | null> {
     try {
-        const supabase = createClient()
-        const { data } = await supabase.auth.getSession()
-        return data?.session?.access_token ?? null
+        const sb = getSupabaseClient()
+        const { data } = await sb.auth.getSession()
+        return data.session?.access_token || null
     } catch {
         return null
     }
@@ -35,8 +35,28 @@ async function apiFetch<T = any>(
 
     const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
     if (!res.ok) {
+        if (res.status === 401) {
+            // Try refreshing the session once
+            try {
+                const sb = getSupabaseClient()
+                const { data } = await sb.auth.refreshSession()
+                if (data.session) {
+                    headers['Authorization'] = `Bearer ${data.session.access_token}`
+                    const retry = await fetch(`${API_BASE}${path}`, { ...options, headers })
+                    if (retry.ok) {
+                        if (retry.status === 204) return undefined as unknown as T
+                        return retry.json()
+                    }
+                }
+            } catch { /* refresh failed */ }
+            const err = new Error('Session expired') as any
+            err.status = 401
+            throw err
+        }
         const body = await res.json().catch(() => ({}))
-        throw new Error(body?.detail || `API error ${res.status}`)
+        const err = new Error(body?.detail || `API error ${res.status}`) as any
+        err.status = res.status
+        throw err
     }
     // 204 No Content
     if (res.status === 204) return undefined as unknown as T
@@ -201,7 +221,19 @@ export const api = {
     getDonationReceipt: (id: string) =>
         apiFetch(`/api/donor/donations/${id}/receipt`),
 
-    createDonation: (data: { disaster_id?: string | null; request_id?: string; amount?: number; status?: string; notes?: string }) =>
+    getTaxCertificatePdf: async (id: string): Promise<Blob> => {
+        const token = await getAccessToken()
+        const headers: Record<string, string> = {}
+        if (token) headers['Authorization'] = `Bearer ${token}`
+        const res = await fetch(`${API_BASE}/api/donor/donations/${id}/tax-certificate`, { headers })
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error(body?.detail || `API error ${res.status}`)
+        }
+        return res.blob()
+    },
+
+    createDonation: (data: { disaster_id?: string | null; request_id?: string; amount?: number; status?: string; notes?: string; donation_type?: string; resource_items?: { resource_type: string; quantity: number; unit?: string }[] }) =>
         apiFetch('/api/donor/donations', { method: 'POST', body: JSON.stringify(data) }),
 
     updateDonation: (id: string, data: any) =>
@@ -288,6 +320,28 @@ export const api = {
 
     getVictimRequestTimeline: (requestId: string) =>
         apiFetch(`/api/victim/requests/${requestId}/timeline`),
+
+    getRequestFulfillment: (requestId: string) =>
+        apiFetch(`/api/victim/requests/${requestId}/fulfillment`),
+
+    getResourcePool: (requestId: string) =>
+        apiFetch(`/api/victim/requests/${requestId}/resource-pool`),
+
+    getDonorRequestPool: (requestId: string) =>
+        apiFetch(`/api/donor/requests/${requestId}/pool`),
+
+    getNgoRequestPool: (requestId: string) =>
+        apiFetch(`/api/ngo/requests/${requestId}/pool`),
+
+    // ━━ Auth / Profile ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    getMyProfile: () =>
+        apiFetch('/api/auth/me'),
+
+    updateMyProfile: (data: any) =>
+        apiFetch('/api/auth/me', { method: 'PUT', body: JSON.stringify(data) }),
+
+    switchRole: (newRole: string) =>
+        apiFetch('/api/auth/me/switch-role', { method: 'POST', body: JSON.stringify({ new_role: newRole }) }),
 
     // ━━ Notifications (shared) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getNotifications: (params?: { unread_only?: boolean; limit?: number }) =>
@@ -401,4 +455,208 @@ export const api = {
 
     markNgoNotificationsRead: (notificationIds?: string[]) =>
         apiFetch('/api/ngo/notifications/mark-read', { method: 'POST', body: JSON.stringify({ notification_ids: notificationIds }) }),
+
+    // ━━ DisasterGPT LLM ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    queryLLM: (data: { query: string; disaster_id?: string; top_k?: number; max_tokens?: number; temperature?: number }) =>
+        apiFetch('/api/llm/query', { method: 'POST', body: JSON.stringify(data) }),
+
+    getLLMStats: () =>
+        apiFetch('/api/llm/stats'),
+
+    triggerLLMIndex: () =>
+        apiFetch('/api/llm/index', { method: 'POST' }),
+
+    // ━━ Fairness Frontier ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    getFairnessFrontier: (params?: { disaster_id?: string; max_distance_km?: number }) =>
+        apiFetch(`/api/admin/fairness-frontier${qs(params)}`),
+
+    applyFairnessPlan: (data: { plan_index: number; disaster_id?: string }) =>
+        apiFetch('/api/admin/fairness-frontier/apply', { method: 'POST', body: JSON.stringify(data) }),
+
+    getFairnessAudits: (params?: { disaster_id?: string; limit?: number }) =>
+        apiFetch(`/api/admin/fairness-audit${qs(params)}`),
+
+    // ━━ Hotspot Clusters ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    getHotspots: (params?: { status?: string; min_priority?: string }) =>
+        apiFetch(`/api/hotspots${qs(params)}`),
+
+    getHotspotDetail: (clusterId: string) =>
+        apiFetch(`/api/hotspots/${clusterId}`),
+
+    // ━━ Causal AI ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    runCounterfactual: (data: { disaster_id: string; intervention: { variable: string; new_value: number }; outcome_variable?: string }) =>
+        apiFetch('/api/causal/counterfactual', { method: 'POST', body: JSON.stringify(data) }),
+
+    getCausalEffects: () =>
+        apiFetch('/api/causal/effects'),
+
+    getCausalGraph: () =>
+        apiFetch('/api/causal/graph'),
+
+    getCausalAudit: (disasterId: string) =>
+        apiFetch(`/api/causal/audit/${disasterId}`, { method: 'POST' }),
+
+    // ━━ Unified DisasterGPT Streaming ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    streamUnifiedQuery: async function* (data: { query: string; disaster_id?: string; mode?: string; top_k?: number; max_tokens?: number; temperature?: number }) {
+        const token = await getAccessToken()
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+        }
+        if (token) headers['Authorization'] = `Bearer ${token}`
+
+        const res = await fetch(`${API_BASE}/api/llm/unified`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(data),
+        })
+        if (!res.ok) throw new Error(`Stream error ${res.status}`)
+        if (!res.body) return
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const payload = line.slice(6).trim()
+                    if (payload) {
+                        try { yield JSON.parse(payload) } catch { yield payload }
+                    }
+                }
+            }
+        }
+    },
+
+    // ━━ DisasterGPT Streaming ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    streamLLMQuery: async function* (data: { query: string; disaster_id?: string; top_k?: number; max_tokens?: number; temperature?: number }) {
+        const token = await getAccessToken()
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+        }
+        if (token) headers['Authorization'] = `Bearer ${token}`
+
+        const res = await fetch(`${API_BASE}/api/llm/stream`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(data),
+        })
+        if (!res.ok) throw new Error(`Stream error ${res.status}`)
+        if (!res.body) return
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const payload = line.slice(6).trim()
+                    if (payload) {
+                        try { yield JSON.parse(payload) } catch { yield payload }
+                    }
+                }
+            }
+        }
+    },
+
+    // ━━ RL Allocation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    rlAllocate: (data: { disaster_id: string; required_resources: any[]; max_distance_km?: number }) =>
+        apiFetch('/api/ml/rl-allocate', { method: 'POST', body: JSON.stringify(data) }),
+
+    getRLStatus: () =>
+        apiFetch('/api/ml/rl-status'),
+
+    trainRL: (nEpisodes: number = 500) =>
+        apiFetch(`/api/ml/rl-train?n_episodes=${nEpisodes}`, { method: 'POST' }),
+
+    // ━━ GAT Matching ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    gatMatch: (data?: { disaster_id?: string; radius_km?: number }) =>
+        apiFetch('/api/ml/gat/match', { method: 'POST', body: JSON.stringify(data || {}) }),
+
+    getGATStatus: () =>
+        apiFetch('/api/ml/gat/status'),
+
+    // ━━ Federated Learning ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    runFederatedRound: (data?: { n_clients?: number; epochs_per_client?: number; non_iid?: boolean }) =>
+        apiFetch('/api/ml/federated/round', { method: 'POST', body: JSON.stringify(data || {}) }),
+
+    getFederatedStatus: () =>
+        apiFetch('/api/ml/federated/status'),
+
+    trainFederated: (data?: { n_rounds?: number; n_clients?: number; epochs_per_client?: number }) =>
+        apiFetch('/api/ml/federated/train', { method: 'POST', body: JSON.stringify(data || {}) }),
+
+    // ━━ Multi-Agent System ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    agentQuery: (data: { query: string; disaster_id?: string }) =>
+        apiFetch('/api/ml/agent/query', { method: 'POST', body: JSON.stringify(data) }),
+
+    streamAgentQuery: async function* (data: { query: string; disaster_id?: string }) {
+        const token = await getAccessToken()
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+        }
+        if (token) headers['Authorization'] = `Bearer ${token}`
+
+        const res = await fetch(`${API_BASE}/api/ml/agent/stream`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(data),
+        })
+        if (!res.ok) throw new Error(`Agent stream error ${res.status}`)
+        if (!res.body) return
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const payload = line.slice(6).trim()
+                    if (payload) {
+                        try { yield JSON.parse(payload) } catch { yield payload }
+                    }
+                }
+            }
+        }
+    },
+
+    getAgentStatus: () =>
+        apiFetch('/api/ml/agent/status'),
+
+    // ━━ PINN Spread Prediction ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    pinnPredict: (data: { points: number[][] }) =>
+        apiFetch('/api/ml/pinn/predict', { method: 'POST', body: JSON.stringify(data) }),
+
+    pinnPredictGrid: (data: { x_range: number[]; y_range: number[]; time: number; resolution?: number }) =>
+        apiFetch('/api/ml/pinn/predict-grid', { method: 'POST', body: JSON.stringify(data) }),
+
+    getPINNStatus: () =>
+        apiFetch('/api/ml/pinn/status'),
+
+    // ━━ ML Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    getMLHealth: () =>
+        apiFetch('/api/ml/health'),
 }

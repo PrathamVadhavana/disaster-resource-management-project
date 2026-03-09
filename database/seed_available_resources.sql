@@ -1,6 +1,6 @@
 -- ============================================================
 -- Migration: Add unit column + seed sample available resources
--- Run this in the Supabase SQL Editor
+-- Run this in your SQL client (psql, DBeaver, etc.)
 -- ============================================================
 
 -- 1. Add unit column to available_resources

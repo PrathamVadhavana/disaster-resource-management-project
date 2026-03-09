@@ -29,7 +29,7 @@ function SeverityBadge({ severity }: { severity: string }) {
 export function AdminDashboardOverview() {
     const { profile } = useAuth()
 
-    const { data: disasters, isLoading: dLoad } = useQuery({
+    const { data: disasters, isLoading: dLoad, isError: dError } = useQuery({
         queryKey: ['admin-disasters'],
         queryFn: () => api.getDisasters({ limit: 100 }),
         refetchInterval: 30000,
@@ -59,6 +59,17 @@ export function AdminDashboardOverview() {
     const orchestratorRunning = ingestion?.orchestrator?.is_running
 
     const isLoading = dLoad || eLoad || iLoad || pLoad
+    const isError = dError
+
+    if (isError) {
+        return (
+            <div className="flex flex-col items-center justify-center h-64 gap-4">
+                <AlertTriangle className="w-10 h-10 text-amber-500" />
+                <p className="text-sm text-slate-500">Unable to load dashboard data.</p>
+                <button onClick={() => window.location.reload()} className="text-sm text-blue-500 hover:underline">Retry</button>
+            </div>
+        )
+    }
 
     if (isLoading) {
         return (

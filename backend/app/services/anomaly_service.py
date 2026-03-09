@@ -22,7 +22,7 @@ try:
 except ImportError:
     IsolationForest = None
 
-from app.database import supabase_admin
+from app.database import db_admin
 from app.core.phase5_config import phase5_config
 
 logger = logging.getLogger("anomaly_service")
@@ -44,12 +44,12 @@ class AnomalyDetectionService:
         try:
             since = (datetime.utcnow() - timedelta(hours=self.lookback_hours * 3)).isoformat()
             resp = (
-                supabase_admin.table("resources")
+                await db_admin.table("resources")
                 .select("id, type, status, quantity, updated_at")
                 .gte("updated_at", since)
                 .order("updated_at", desc=True)
                 .limit(500)
-                .execute()
+                .async_execute()
             )
             resources = resp.data or []
 
@@ -76,12 +76,12 @@ class AnomalyDetectionService:
         try:
             since = (datetime.utcnow() - timedelta(hours=self.lookback_hours * 3)).isoformat()
             resp = (
-                supabase_admin.table("resource_requests")
+                await db_admin.table("resource_requests")
                 .select("id, resource_type, priority, status, created_at")
                 .gte("created_at", since)
                 .order("created_at", desc=True)
                 .limit(1000)
-                .execute()
+                .async_execute()
             )
             requests = resp.data or []
 
@@ -107,12 +107,12 @@ class AnomalyDetectionService:
         try:
             since = (datetime.utcnow() - timedelta(hours=self.lookback_hours * 3)).isoformat()
             resp = (
-                supabase_admin.table("disasters")
+                await db_admin.table("disasters")
                 .select("id, type, severity, status, casualties, estimated_damage, updated_at")
                 .gte("updated_at", since)
                 .order("updated_at", desc=True)
                 .limit(200)
-                .execute()
+                .async_execute()
             )
             disasters = resp.data or []
 
@@ -323,7 +323,7 @@ class AnomalyDetectionService:
             }
 
             try:
-                resp = supabase_admin.table("anomaly_alerts").insert(alert_record).execute()
+                resp = await db_admin.table("anomaly_alerts").insert(alert_record).async_execute()
                 if resp.data:
                     stored_alerts.append(resp.data[0])
             except Exception as e:
@@ -341,20 +341,24 @@ class AnomalyDetectionService:
         limit: int = 50,
     ) -> List[Dict]:
         """Get active anomaly alerts."""
-        query = (
-            supabase_admin.table("anomaly_alerts")
-            .select("*")
-            .eq("status", "active")
-            .order("detected_at", desc=True)
-            .limit(limit)
-        )
-        if severity:
-            query = query.eq("severity", severity)
-        if anomaly_type:
-            query = query.eq("anomaly_type", anomaly_type)
+        try:
+            query = (
+                db_admin.table("anomaly_alerts")
+                .select("*")
+                .eq("status", "active")
+                .order("detected_at", desc=True)
+                .limit(limit)
+            )
+            if severity:
+                query = query.eq("severity", severity)
+            if anomaly_type:
+                query = query.eq("anomaly_type", anomaly_type)
 
-        resp = query.execute()
-        return resp.data or []
+            resp = await query.async_execute()
+            return resp.data or []
+        except Exception as e:
+            logger.warning("Failed to fetch active alerts: %s", e)
+            return []
 
     async def get_all_alerts(
         self,
@@ -364,32 +368,36 @@ class AnomalyDetectionService:
         offset: int = 0,
     ) -> List[Dict]:
         """Get all anomaly alerts with filters."""
-        query = (
-            supabase_admin.table("anomaly_alerts")
-            .select("*")
-            .order("detected_at", desc=True)
-            .range(offset, offset + limit - 1)
-        )
-        if status:
-            query = query.eq("status", status)
-        if severity:
-            query = query.eq("severity", severity)
+        try:
+            query = (
+                db_admin.table("anomaly_alerts")
+                .select("*")
+                .order("detected_at", desc=True)
+                .range(offset, offset + limit - 1)
+            )
+            if status:
+                query = query.eq("status", status)
+            if severity:
+                query = query.eq("severity", severity)
 
-        resp = query.execute()
-        return resp.data or []
+            resp = await query.async_execute()
+            return resp.data or []
+        except Exception as e:
+            logger.warning("Failed to fetch alerts: %s", e)
+            return []
 
     async def acknowledge_alert(self, alert_id: str, user_id: str) -> Optional[Dict]:
         """Mark an anomaly alert as acknowledged."""
         try:
             resp = (
-                supabase_admin.table("anomaly_alerts")
+                await db_admin.table("anomaly_alerts")
                 .update({
                     "status": "acknowledged",
                     "acknowledged_by": user_id,
                     "acknowledged_at": datetime.utcnow().isoformat(),
                 })
                 .eq("id", alert_id)
-                .execute()
+                .async_execute()
             )
             return resp.data[0] if resp.data else None
         except Exception as e:
@@ -400,10 +408,10 @@ class AnomalyDetectionService:
         """Resolve or mark an alert as false positive."""
         try:
             resp = (
-                supabase_admin.table("anomaly_alerts")
+                await db_admin.table("anomaly_alerts")
                 .update({"status": status})
                 .eq("id", alert_id)
-                .execute()
+                .async_execute()
             )
             return resp.data[0] if resp.data else None
         except Exception as e:
@@ -416,6 +424,8 @@ class AnomalyDetectionService:
         """Start periodic anomaly detection in the background."""
         self._running = True
         interval = phase5_config.ANOMALY_DETECTION_INTERVAL_S
+        # Delay initial detection to let uvicorn finish startup
+        await asyncio.sleep(10)
         logger.info(f"Anomaly detection loop started (interval: {interval}s)")
 
         while self._running:

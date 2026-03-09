@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+import logging
 
-from app.database import supabase
+from app.database import db
 from app.schemas import (
     Disaster,
     DisasterCreate,
@@ -13,6 +14,10 @@ from app.schemas import (
 )
 from app.core.helpers import serialize_disaster, serialize_datetime_fields
 from app.core.cache import cache_get, cache_set, cache_invalidate_pattern, CACHE_TTL_SHORT
+from app.dependencies import require_role
+from app.services.notification_service import notify_all_by_role
+
+logger = logging.getLogger("disasters_router")
 
 router = APIRouter()
 
@@ -34,7 +39,7 @@ async def get_disasters(
             return cached
 
         # Fetch disasters without joins to avoid "schema cache" errors
-        query = supabase.table("disasters").select("*")
+        query = db.table("disasters").select("*")
 
         if status:
             query = query.eq("status", status.value)
@@ -45,14 +50,14 @@ async def get_disasters(
 
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
 
-        response = query.execute()
+        response = await query.async_execute()
         base_disasters = response.data or []
 
         # Manual enrichment for locations
         location_ids = list(set(d["location_id"] for d in base_disasters if d.get("location_id")))
         location_map = {}
         if location_ids:
-            loc_resp = supabase.table("locations").select("id, latitude, longitude, name, city, country").in_("id", location_ids).execute()
+            loc_resp = await db.table("locations").select("id, latitude, longitude, name, city, country").in_("id", location_ids).async_execute()
             for loc in (loc_resp.data or []):
                 location_map[loc["id"]] = loc
 
@@ -72,7 +77,7 @@ async def get_disasters(
 async def get_disaster(disaster_id: str):
     """Get a specific disaster by ID"""
     try:
-        response = supabase.table("disasters").select("*").eq("id", disaster_id).single().execute()
+        response = await db.table("disasters").select("*").eq("id", disaster_id).single().async_execute()
 
         if not response.data:
             raise HTTPException(status_code=404, detail="Disaster not found")
@@ -86,13 +91,16 @@ async def get_disaster(disaster_id: str):
 
 
 @router.post("/")
-async def create_disaster(disaster_data: Dict[str, Any]):
-    """Create a new disaster record"""
+async def create_disaster(
+    disaster_data: Dict[str, Any],
+    _user: dict = Depends(require_role("admin", "ngo")),
+):
+    """Create a new disaster record (admin/ngo only)"""
     try:
         disaster_dict = dict(disaster_data)
         disaster_dict["status"] = "active"
 
-        response = supabase.table("disasters").insert(disaster_dict).execute()
+        response = await db.table("disasters").insert(disaster_dict).async_execute()
 
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to create disaster")
@@ -100,6 +108,31 @@ async def create_disaster(disaster_data: Dict[str, Any]):
         await cache_invalidate_pattern("disasters:*")
 
         disaster_id = response.data[0]["id"]
+
+        # Notify NGOs and Volunteers about the new disaster
+        title = disaster_dict.get("title", "New Disaster")
+        severity = disaster_dict.get("severity", "unknown")
+        d_type = disaster_dict.get("type", "disaster")
+        try:
+            await notify_all_by_role(
+                role="ngo",
+                title="🚨 New Disaster Reported",
+                message=f"{title} ({d_type}, severity: {severity}) has been created. Check your dashboard for requests.",
+                notification_type="warning",
+                related_id=disaster_id,
+                related_type="disaster",
+            )
+            await notify_all_by_role(
+                role="volunteer",
+                title="🚨 New Disaster — Volunteers Needed",
+                message=f"{title} ({d_type}, severity: {severity}). Check available assignments if you can help.",
+                notification_type="warning",
+                related_id=disaster_id,
+                related_type="disaster",
+            )
+        except Exception:
+            pass
+
         return {
             "id": disaster_id,
             "message": "Disaster created successfully",
@@ -113,23 +146,39 @@ async def create_disaster(disaster_data: Dict[str, Any]):
 
 
 @router.patch("/{disaster_id}", response_model=Disaster)
-async def update_disaster(disaster_id: str, disaster_update: DisasterUpdate):
-    """Update an existing disaster"""
+async def update_disaster(
+    disaster_id: str,
+    disaster_update: DisasterUpdate,
+    _user: dict = Depends(require_role("admin", "ngo")),
+):
+    """Update an existing disaster (admin/ngo only)"""
     try:
         update_dict = disaster_update.model_dump(exclude_unset=True)
 
         response = (
-            supabase.table("disasters")
+            await db.table("disasters")
             .update(update_dict)
             .eq("id", disaster_id)
-            .execute()
+            .async_execute()
         )
 
         if not response.data:
             raise HTTPException(status_code=404, detail="Disaster not found")
 
         await cache_invalidate_pattern("disasters:*")
-        return serialize_datetime_fields(response.data[0])
+
+        # Auto-generate Causal Audit Report when status → resolved
+        updated = response.data[0]
+        if update_dict.get("status") == "resolved" or update_dict.get("status") == DisasterStatus.RESOLVED.value:
+            try:
+                from app.services.audit_report_generator import on_disaster_resolved
+                import asyncio
+                asyncio.create_task(on_disaster_resolved(updated))
+                logger.info("Causal audit report generation triggered for %s", disaster_id)
+            except Exception as audit_err:
+                logger.warning("Causal audit trigger failed: %s", audit_err)
+
+        return serialize_datetime_fields(updated)
 
     except Exception as e:
         if "not found" in str(e).lower():
@@ -138,17 +187,20 @@ async def update_disaster(disaster_id: str, disaster_update: DisasterUpdate):
 
 
 @router.delete("/{disaster_id}", status_code=204)
-async def delete_disaster(disaster_id: str):
-    """Delete a disaster (soft delete by setting status to resolved)"""
+async def delete_disaster(
+    disaster_id: str,
+    _user: dict = Depends(require_role("admin", "ngo")),
+):
+    """Delete a disaster — soft delete by setting status to resolved (admin/ngo only)"""
     try:
         response = (
-            supabase.table("disasters")
+            await db.table("disasters")
             .update({
                 "status": DisasterStatus.RESOLVED.value,
                 "updated_at": datetime.utcnow().isoformat()
             })
             .eq("id", disaster_id)
-            .execute()
+            .async_execute()
         )
         
         if not response.data:
@@ -165,10 +217,10 @@ async def get_disaster_resources(disaster_id: str):
     """Get all resources allocated to a specific disaster"""
     try:
         response = (
-            supabase.table("resources")
+            await db.table("resources")
             .select("*")
             .eq("disaster_id", disaster_id)
-            .execute()
+            .async_execute()
         )
         
         return response.data

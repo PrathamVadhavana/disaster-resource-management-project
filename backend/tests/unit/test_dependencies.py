@@ -24,7 +24,7 @@ async def test_require_role_success():
     async def mock_proxy():
         return mock_client
     
-    with patch("app.dependencies.async_supabase", mock_proxy()):
+    with patch("app.dependencies.db", mock_proxy()):
         checker = require_role("admin")
         result = await checker(mock_creds)
         
@@ -47,7 +47,7 @@ async def test_require_role_forbidden():
     async def mock_proxy():
         return mock_client
     
-    with patch("app.dependencies.async_supabase", mock_proxy()):
+    with patch("app.dependencies.db", mock_proxy()):
         checker = require_role("admin")
         with pytest.raises(HTTPException) as exc:
             await checker(mock_creds)
@@ -70,6 +70,6 @@ async def test_get_current_user_id_success():
     async def mock_proxy():
         return mock_client
     
-    with patch("app.dependencies.async_supabase", mock_proxy()):
+    with patch("app.dependencies.db", mock_proxy()):
         result = await get_current_user_id(mock_creds)
         assert result == "user123"

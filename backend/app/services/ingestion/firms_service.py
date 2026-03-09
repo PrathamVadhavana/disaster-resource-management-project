@@ -17,7 +17,7 @@ from uuid import uuid4
 import httpx
 
 from app.core.config import ingestion_config as cfg
-from app.database import supabase_admin
+from app.services.ingestion import memory_store
 from app.services.ingestion.mock_data_service import generate_mock_fire_hotspots
 
 logger = logging.getLogger("ingestion.firms")
@@ -123,33 +123,8 @@ class FIRMSService:
         return results
 
     async def _store_observations(self, observations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Batch-insert into satellite_observations, skipping duplicates."""
-        if not observations:
-            return []
-
-        # Upsert-like: filter out already-existing external_ids
-        ext_ids = [o["external_id"] for o in observations if o.get("external_id")]
-        existing_ids: set = set()
-        if ext_ids:
-            # Check in batches of 100
-            for i in range(0, len(ext_ids), 100):
-                batch = ext_ids[i : i + 100]
-                resp = (
-                    supabase_admin.table("satellite_observations")
-                    .select("external_id")
-                    .in_("external_id", batch)
-                    .execute()
-                )
-                existing_ids.update(r["external_id"] for r in (resp.data or []))
-
-        new_obs = [o for o in observations if o.get("external_id") not in existing_ids]
-        if new_obs:
-            # Insert in batches of 500
-            for i in range(0, len(new_obs), 500):
-                batch = new_obs[i : i + 500]
-                supabase_admin.table("satellite_observations").insert(batch).execute()
-
-        return new_obs
+        """Batch-insert into in-memory satellite store, skipping duplicates."""
+        return memory_store.add_satellite_observations(observations)
 
     @staticmethod
     def _float_or_none(val: Any) -> Optional[float]:
@@ -168,18 +143,11 @@ class FIRMSService:
         Summarise recent satellite observations near a coordinate.
         Useful as spread-predictor input.
         """
-        resp = (
-            supabase_admin.table("satellite_observations")
-            .select("*")
-            .gte("latitude", lat - radius_deg)
-            .lte("latitude", lat + radius_deg)
-            .gte("longitude", lon - radius_deg)
-            .lte("longitude", lon + radius_deg)
-            .order("acq_datetime", desc=True)
-            .limit(100)
-            .execute()
+        rows = memory_store.query_satellites(
+            lat_range=(lat - radius_deg, lat + radius_deg),
+            lon_range=(lon - radius_deg, lon + radius_deg),
+            limit=100,
         )
-        rows = resp.data or []
         return {
             "hotspot_count": len(rows),
             "avg_frp": (sum(r.get("frp", 0) or 0 for r in rows) / len(rows)) if rows else 0,
