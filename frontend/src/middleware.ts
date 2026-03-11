@@ -43,6 +43,8 @@ export async function middleware(request: NextRequest) {
         path.startsWith('/auth') ||
         path.startsWith('/login') ||
         path.startsWith('/signup') ||
+        path.startsWith('/forgot-password') ||
+        path.startsWith('/reset-password') ||
         path.startsWith('/_next') ||
         path.startsWith('/api') ||
         path.includes('.')

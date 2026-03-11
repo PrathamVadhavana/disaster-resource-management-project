@@ -310,6 +310,15 @@ class Token(BaseModel):
     email: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    access_token: str
+    new_password: str
+
+
 # ============================================================
 # Victim Module Schemas
 # ============================================================
