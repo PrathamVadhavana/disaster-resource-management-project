@@ -88,6 +88,7 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
     const [addressText, setAddressText] = useState(editRequest?.address_text || '')
     const [latitude, setLatitude] = useState<number | null>(editRequest?.latitude ?? null)
     const [longitude, setLongitude] = useState<number | null>(editRequest?.longitude ?? null)
+    const [disasterType, setDisasterType] = useState<string>('')
     const [locating, setLocating] = useState(false)
     const [error, setError] = useState('')
 
@@ -228,6 +229,7 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
             latitude: latitude ?? undefined,
             longitude: longitude ?? undefined,
             address_text: addressText || undefined,
+            disaster_type: disasterType || undefined,
         }
 
         if (isEdit) {
@@ -467,8 +469,32 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
                     <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5">
                         <h2 className="font-semibold text-slate-900 dark:text-white">Additional Details</h2>
                     </div>
-                    <div className="p-5 space-y-4">
+                <div className="p-5 space-y-4">
+                    {!isEdit && (
                         <div>
+                            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                                What disaster are you facing? <span className="text-red-500">*</span>
+                            </label>
+                            <div className="relative">
+                                <select
+                                    required
+                                    value={disasterType}
+                                    onChange={(e) => setDisasterType(e.target.value)}
+                                    className="w-full appearance-none px-4 py-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-red-500/30 focus:border-red-500/50"
+                                >
+                                    <option value="">Select disaster type...</option>
+                                    {['earthquake', 'flood', 'hurricane', 'tornado', 'wildfire', 'tsunami', 'drought', 'landslide', 'volcano', 'other'].map(t => (
+                                        <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
+                                    ))}
+                                </select>
+                                <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 pointer-events-none" />
+                            </div>
+                            <p className="text-xs text-slate-500 mt-2">
+                                This helps us prioritize your request and alert local authorities.
+                            </p>
+                        </div>
+                    )}
+                    <div>
                             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
                                 Description <span className="text-slate-400">(optional)</span>
                             </label>

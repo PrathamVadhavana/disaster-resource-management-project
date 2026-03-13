@@ -175,8 +175,13 @@ export default function NGOAssignedRequestsPage() {
                                         <p className="font-medium text-slate-700 dark:text-slate-300">{req.victim_name || 'Unknown'}</p>
                                     </div>
                                     <div>
-                                        <p className="text-slate-400 mb-0.5 flex items-center gap-1"><Package className="w-3 h-3" /> Quantity</p>
-                                        <p className="font-bold text-slate-900 dark:text-white">{req.quantity}</p>
+                                        <p className="text-slate-400 mb-0.5 flex items-center gap-1"><Package className="w-3 h-3" /> {req.is_pooled ? 'Your Share' : 'Quantity'}</p>
+                                        <p className="font-bold text-slate-900 dark:text-white">
+                                            {req.my_quantity ?? req.quantity}
+                                            {req.is_pooled && (
+                                                <span className="ml-1 text-[10px] font-normal text-slate-400">/ {req.quantity} total</span>
+                                            )}
+                                        </p>
                                     </div>
                                     <div>
                                         <p className="text-slate-400 mb-0.5 flex items-center gap-1"><Navigation className="w-3 h-3" /> Distance</p>

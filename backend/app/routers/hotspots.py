@@ -6,10 +6,10 @@ FeatureCollection suitable for rendering as a heatmap / polygon
 layer in Leaflet or Mapbox GL JS.
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import JSONResponse
-from typing import Optional
 import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from app.database import db_admin
 from app.dependencies import get_current_user
@@ -25,8 +25,8 @@ router = APIRouter()
     response_class=JSONResponse,
 )
 async def get_hotspots(
-    status: Optional[str] = Query("active", description="Filter by cluster status"),
-    min_priority: Optional[str] = Query(None, description="Minimum priority label (low/medium/high/critical)"),
+    status: str | None = Query("active", description="Filter by cluster status"),
+    min_priority: str | None = Query(None, description="Minimum priority label (low/medium/high/critical)"),
     user: dict = Depends(get_current_user),
 ):
     """Return all hotspot clusters as a **GeoJSON FeatureCollection**.
@@ -52,15 +52,13 @@ async def get_hotspots(
     priority_order = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
     if status and status != "all":
-        fc["features"] = [
-            f for f in fc["features"]
-            if f["properties"].get("status") == status
-        ]
+        fc["features"] = [f for f in fc["features"] if f["properties"].get("status") == status]
 
     if min_priority and min_priority in priority_order:
         threshold = priority_order[min_priority]
         fc["features"] = [
-            f for f in fc["features"]
+            f
+            for f in fc["features"]
             if priority_order.get(f["properties"].get("priority_label", "low"), 0) >= threshold
         ]
 
@@ -80,12 +78,7 @@ async def get_hotspot_detail(
 ):
     """Return a single hotspot cluster by ID with full request details."""
     try:
-        resp = (
-            await db_admin.table("hotspot_clusters")
-            .select("*")
-            .eq("id", cluster_id)
-            .async_execute()
-        )
+        resp = await db_admin.table("hotspot_clusters").select("*").eq("id", cluster_id).async_execute()
         rows = resp.data or []
     except Exception as exc:
         logger.error("Failed to fetch cluster %s: %s", cluster_id, exc)
@@ -138,16 +131,18 @@ async def trigger_clustering(
     from ml.clustering_service import run_clustering
 
     clusters = await run_clustering()
-    return JSONResponse(content={
-        "message": f"Clustering complete — {len(clusters)} hotspots detected",
-        "cluster_count": len(clusters),
-        "clusters": [
-            {
-                "id": c.get("id"),
-                "centroid": [c["centroid_lat"], c["centroid_lon"]],
-                "request_count": c["request_count"],
-                "priority_label": c["priority_label"],
-            }
-            for c in clusters
-        ],
-    })
+    return JSONResponse(
+        content={
+            "message": f"Clustering complete — {len(clusters)} hotspots detected",
+            "cluster_count": len(clusters),
+            "clusters": [
+                {
+                    "id": c.get("id"),
+                    "centroid": [c["centroid_lat"], c["centroid_lon"]],
+                    "request_count": c["request_count"],
+                    "priority_label": c["priority_label"],
+                }
+                for c in clusters
+            ],
+        }
+    )

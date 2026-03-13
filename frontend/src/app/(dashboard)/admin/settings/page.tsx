@@ -124,7 +124,7 @@ export default function AdminSettingsPage() {
         { key: 'auto_allocate' as const, label: 'Automatic Resource Allocation', desc: 'LP solver runs allocation automatically for new requests' },
         { key: 'ingestion_enabled' as const, label: 'Data Ingestion Pipeline', desc: 'Fetch data from USGS, GDACS, NASA, weather sources' },
         { key: 'email_notifications' as const, label: 'Email Notifications', desc: 'Send email alerts for critical events' },
-        { key: 'sms_alerts' as const, label: 'SMS Alerts', desc: 'Send SMS for disaster alerts (carrier charges may apply)' },
+        { key: 'sms_alerts' as const, label: 'SMS Alerts', desc: 'Send SMS for emergency alerts (carrier charges may apply)' },
         { key: 'maintenance_mode' as const, label: 'Maintenance Mode', desc: 'Put platform in maintenance mode (users see maintenance page)' },
     ]
 

@@ -12,6 +12,7 @@ Features:
     • Model checkpoint saving (best epoch)
     • Per-horizon evaluation: MAE, RMSE, coverage probability
 """
+
 from __future__ import annotations
 
 import argparse
@@ -42,28 +43,20 @@ DATA_DIR = BASE_DIR.parent / "training_data" / "tft_processed"
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train TFT severity forecaster")
-    p.add_argument("--emdat", type=str, default=None,
-                   help="Path to EM-DAT CSV. If omitted, uses synthetic data.")
-    p.add_argument("--synthetic", action="store_true",
-                   help="Force synthetic dataset generation (no API calls)")
-    p.add_argument("--max-events", type=int, default=200,
-                   help="Max events to use from EM-DAT (default: 200)")
-    p.add_argument("--epochs", type=int, default=20,
-                   help="Max training epochs (default: 20)")
-    p.add_argument("--batch-size", type=int, default=32,
-                   help="Batch size (default: 32)")
-    p.add_argument("--lr", type=float, default=1e-3,
-                   help="Learning rate (default: 1e-3)")
-    p.add_argument("--hidden-size", type=int, default=32,
-                   help="TFT hidden size (default: 32)")
-    p.add_argument("--gpu", action="store_true",
-                   help="Use GPU if available")
+    p.add_argument("--emdat", type=str, default=None, help="Path to EM-DAT CSV. If omitted, uses synthetic data.")
+    p.add_argument("--synthetic", action="store_true", help="Force synthetic dataset generation (no API calls)")
+    p.add_argument("--max-events", type=int, default=200, help="Max events to use from EM-DAT (default: 200)")
+    p.add_argument("--epochs", type=int, default=20, help="Max training epochs (default: 20)")
+    p.add_argument("--batch-size", type=int, default=32, help="Batch size (default: 32)")
+    p.add_argument("--lr", type=float, default=1e-3, help="Learning rate (default: 1e-3)")
+    p.add_argument("--hidden-size", type=int, default=32, help="TFT hidden size (default: 32)")
+    p.add_argument("--gpu", action="store_true", help="Use GPU if available")
     return p.parse_args()
 
 
 async def prepare_dataset(args: argparse.Namespace) -> pd.DataFrame:
     """Load or generate the TFT training dataset."""
-    from ml.data_pipeline import build_tft_dataset, _generate_synthetic_dataset
+    from ml.data_pipeline import _generate_synthetic_dataset, build_tft_dataset
 
     cached_path = DATA_DIR / "tft_dataset.parquet"
 
@@ -94,8 +87,8 @@ def train(args: argparse.Namespace, dataset: pd.DataFrame) -> Path:
 
     Returns the path to the best model checkpoint.
     """
-    import torch
     import lightning.pytorch as pl
+    import torch
     from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
     from ml.tft_model import build_tft_datasets, create_tft_model
@@ -113,8 +106,7 @@ def train(args: argparse.Namespace, dataset: pd.DataFrame) -> Path:
         batch_size=args.batch_size,
     )
 
-    logger.info("Training samples: %d, Validation samples: %d",
-                len(training_dataset), len(val_dataset))
+    logger.info("Training samples: %d, Validation samples: %d", len(training_dataset), len(val_dataset))
 
     # Create model
     model = create_tft_model(
@@ -166,6 +158,7 @@ def train(args: argparse.Namespace, dataset: pd.DataFrame) -> Path:
     standard_path = MODEL_DIR / "best_model.ckpt"
     if best_path != standard_path and best_path.exists():
         import shutil
+
         shutil.copy2(best_path, standard_path)
         logger.info("Copied best checkpoint → %s", standard_path)
 
@@ -176,8 +169,8 @@ def evaluate(model_path: Path, dataset: pd.DataFrame) -> None:
     """Evaluate the trained TFT model: MAE, RMSE, coverage probability per horizon."""
     import torch
     from pytorch_forecasting import TemporalFusionTransformer
-    from ml.tft_model import build_tft_datasets, FORECAST_HORIZONS, QUANTILES
-    from ml.data_pipeline import SEVERITY_INV
+
+    from ml.tft_model import FORECAST_HORIZONS, build_tft_datasets
 
     logger.info("=" * 60)
     logger.info("Model Evaluation")
@@ -225,7 +218,7 @@ def evaluate(model_path: Path, dataset: pd.DataFrame) -> None:
         # MAE and RMSE (against median prediction)
         errors = q50 - actual
         mae = float(np.mean(np.abs(errors)))
-        rmse = float(np.sqrt(np.mean(errors ** 2)))
+        rmse = float(np.sqrt(np.mean(errors**2)))
 
         # Coverage probability: fraction of actuals within [q10, q90]
         in_interval = (actual >= q10) & (actual <= q90)
@@ -253,7 +246,7 @@ def evaluate(model_path: Path, dataset: pd.DataFrame) -> None:
     all_act = all_actual[valid_mask]
     overall_coverage = float(np.mean((all_act >= all_q10) & (all_act <= all_q90)))
     print(f"  Overall 80% PI coverage: {overall_coverage:.2%}")
-    print(f"  (target: ~80%)")
+    print("  (target: ~80%)")
     print()
 
 
@@ -268,8 +261,7 @@ def main() -> None:
         logger.error("No dataset available. Aborting.")
         sys.exit(1)
 
-    logger.info("Dataset loaded: %d rows, %d groups",
-                len(dataset), dataset["group_id"].nunique())
+    logger.info("Dataset loaded: %d rows, %d groups", len(dataset), dataset["group_id"].nunique())
 
     # Phase 2: Train
     logger.info("Phase 2: Training TFT model")

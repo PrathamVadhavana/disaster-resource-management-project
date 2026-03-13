@@ -14,15 +14,18 @@ import OutcomeTrackingPanel from '@/components/coordinator/OutcomeTrackingPanel'
 import MLDashboard from '@/components/coordinator/MLDashboard'
 import { TFTForecastWidget } from '@/components/admin/TFTForecastWidget'
 import { PINNHeatmap } from '@/components/admin/PINNHeatmap'
-import UnifiedDisasterGPT from '@/components/admin/UnifiedDisasterGPT'
+import ScheduleSitrepButton from '@/components/admin/ScheduleSitrepButton'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Download, Printer, Search, Sparkle, BrainCircuit } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { ErrorBoundary } from '@/components/shared/ErrorBoundary'
 
 const mdComponents = {
     table: (props: any) => (
-        <div className="overflow-x-auto my-4 rounded-xl border border-slate-200 dark:border-white/10">
-            <table className="w-full text-sm" {...props} />
+        <div className="w-full overflow-x-auto my-6 rounded-xl border border-slate-200 dark:border-white/10">
+            <table className="w-full min-w-[600px] border-collapse text-sm" {...props} />
         </div>
     ),
     thead: (props: any) => <thead className="bg-gradient-to-r from-purple-50 to-indigo-50 dark:from-purple-500/10 dark:to-indigo-500/10" {...props} />,
@@ -46,6 +49,14 @@ export default function AdminCoordinatorPage() {
     const qc = useQueryClient()
     const [query, setQuery] = useState('')
     const [activeTab, setActiveTab] = useState<'sitrep' | 'query' | 'history' | 'anomalies' | 'outcomes' | 'ml_sandbox' | 'disastergpt' | 'hotspots' | 'forecast' | 'spread'>('sitrep')
+    const [selectedSitrep, setSelectedSitrep] = useState<any>(null)
+    
+    // AI Query conversation memory - keep last 5 Q&A pairs
+    const [conversationHistory, setConversationHistory] = useState<Array<{
+        question: string
+        answer: string
+        timestamp: Date
+    }>>([])
 
     // ── Hotspot queries ──────────────────────────────────────
     const { data: hotspots, isLoading: hotspotsLoading } = useQuery({
@@ -83,15 +94,40 @@ export default function AdminCoordinatorPage() {
 
     const generateMutation = useMutation({
         mutationFn: () => api.generateSitrep(),
-        onSuccess: () => {
-            qc.invalidateQueries({ queryKey: ['latest-sitrep'] })
-            qc.invalidateQueries({ queryKey: ['sitreps'] })
+        onMutate: () => setIsRefreshing(true),
+        onSuccess: async () => {
+            await Promise.all([
+                qc.invalidateQueries({ queryKey: ['latest-sitrep'] }),
+                qc.invalidateQueries({ queryKey: ['sitreps'] })
+            ])
+            setIsRefreshing(false)
         },
+        onError: () => setIsRefreshing(false)
     })
 
     const askMutation = useMutation({
-        mutationFn: (q: string) => api.askCoordinatorQuery(q),
-        onSuccess: () => {
+        mutationFn: (q: string) => {
+            // Prepare context from conversation history (last 5 Q&A pairs)
+            const context = conversationHistory.slice(-5).map(item => ({
+                question: item.question,
+                answer: item.answer
+            }))
+            
+            return api.askCoordinatorQuery(q, undefined, undefined, context)
+        },
+        onSuccess: (data, queryText) => {
+            // Add successful Q&A to conversation history
+            const answer = (data as any)?.answer || (data as any)?.response || 'No response available'
+            setConversationHistory(prev => {
+                const newHistory = [...prev, {
+                    question: queryText,
+                    answer: answer,
+                    timestamp: new Date()
+                }]
+                // Keep only last 5 entries
+                return newHistory.slice(-5)
+            })
+            
             qc.invalidateQueries({ queryKey: ['query-history'] })
             setQuery('')
         },
@@ -105,13 +141,16 @@ export default function AdminCoordinatorPage() {
         { id: 'anomalies', label: 'Anomaly Detector', icon: AlertTriangle },
         { id: 'outcomes', label: 'Outcome Tracking', icon: BarChart3 },
         { id: 'ml_sandbox', label: 'ML Sandbox', icon: BrainCircuit },
-        { id: 'disastergpt', label: 'DisasterGPT', icon: Zap },
         { id: 'hotspots', label: 'Hotspots', icon: MapPin },
         { id: 'forecast', label: 'Severity Forecast', icon: Activity },
         { id: 'spread', label: 'Spread Map', icon: FlaskConical },
         { id: 'query', label: 'AI Query', icon: MessageSquare },
         { id: 'history', label: 'Query History', icon: Clock },
     ] as const
+
+    const [isRefreshing, setIsRefreshing] = useState(false)
+
+    // ... rest of state
 
     return (
         <div className="space-y-6">
@@ -122,39 +161,45 @@ export default function AdminCoordinatorPage() {
                         AI Coordinator
                     </h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                        LLM-powered situation awareness, natural language queries &amp; automated reports
+                        LLM-powered situation awareness, natural language queries & automated reports
                     </p>
                 </div>
-                <button
-                    onClick={() => generateMutation.mutate()}
-                    disabled={generateMutation.isPending}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-purple-600/20"
-                >
-                    {generateMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                    Generate SitRep
-                </button>
+                <div className="flex items-center gap-2">
+                    <button
+                        onClick={() => generateMutation.mutate()}
+                        disabled={generateMutation.isPending || isRefreshing}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-purple-600/20"
+                    >
+                        {generateMutation.isPending || isRefreshing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                        {generateMutation.isPending || isRefreshing ? 'Refreshing...' : 'Generate SitRep'}
+                    </button>
+                    <ScheduleSitrepButton />
+                </div>
             </div>
 
             {/* Tabs */}
-            <div className="flex gap-1 bg-slate-100 dark:bg-white/5 p-1 rounded-xl w-fit">
-                {tabs.map((tab) => {
-                    const Icon = tab.icon
-                    return (
-                        <button
-                            key={tab.id}
-                            onClick={() => setActiveTab(tab.id)}
-                            className={cn(
-                                'flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all',
-                                activeTab === tab.id
-                                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
-                                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
-                            )}
-                        >
-                            <Icon className="w-4 h-4" />
-                            {tab.label}
-                        </button>
-                    )
-                })}
+            <div className="overflow-x-auto -mx-1 px-1 pb-1 scrollbar-hide">
+                <div className="flex gap-1 bg-slate-100 dark:bg-white/5 p-1 rounded-xl w-max min-w-full sm:w-fit">
+                    {tabs.map((tab) => {
+                        const Icon = tab.icon
+                        return (
+                            <button
+                                key={tab.id}
+                                onClick={() => setActiveTab(tab.id)}
+                                className={cn(
+                                    'flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all whitespace-nowrap',
+                                    activeTab === tab.id
+                                        ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm'
+                                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                                )}
+                            >
+                                <Icon className="w-4 h-4 shrink-0" />
+                                <span className="hidden sm:inline">{tab.label}</span>
+                                <span className="sm:hidden">{tab.label.split(' ')[0]}</span>
+                            </button>
+                        )
+                    })}
+                </div>
             </div>
 
             {/* SitRep Tab */}
@@ -165,15 +210,44 @@ export default function AdminCoordinatorPage() {
                             <Loader2 className="w-8 h-8 animate-spin text-purple-500 mx-auto mb-3" />
                             <p className="text-sm text-slate-500">Loading situation reports...</p>
                         </div>
-                    ) : latestSitrep ? (
+                    ) : (selectedSitrep || latestSitrep) ? (() => {
+                        const displaySitrep = selectedSitrep || latestSitrep;
+                        return (
                         <div className="space-y-4">
                             <div className="flex items-center justify-between">
-                                <h3 className="text-sm font-bold text-slate-900 dark:text-white">Active Intelligence Report</h3>
                                 <div className="flex items-center gap-2">
-                                    <button className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-slate-500" title="Print Report">
+                                    {selectedSitrep && (
+                                        <button onClick={() => setSelectedSitrep(null)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 text-slate-500" title="Back to latest">
+                                            ←
+                                        </button>
+                                    )}
+                                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                                        {selectedSitrep ? 'Historical Report' : 'Active Intelligence Report'}
+                                    </h3>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <button 
+                                        onClick={() => window.print()}
+                                        className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-slate-500" 
+                                        title="Print Report"
+                                    >
                                         <Printer className="w-4 h-4" />
                                     </button>
-                                    <button className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-slate-500" title="Download PDF">
+                                    <button 
+                                        onClick={() => {
+                                            const blob = new Blob([displaySitrep.markdown_body || displaySitrep.summary || displaySitrep.content || 'No content'], { type: 'text/markdown' });
+                                            const url = URL.createObjectURL(blob);
+                                            const a = document.createElement('a');
+                                            a.href = url;
+                                            a.download = `sitrep-${displaySitrep.id || 'report'}.md`;
+                                            document.body.appendChild(a);
+                                            a.click();
+                                            document.body.removeChild(a);
+                                            URL.revokeObjectURL(url);
+                                        }}
+                                        className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 transition-colors text-slate-500" 
+                                        title="Download Markdown"
+                                    >
                                         <Download className="w-4 h-4" />
                                     </button>
                                 </div>
@@ -189,30 +263,30 @@ export default function AdminCoordinatorPage() {
                                                 <Sparkle className="w-3 h-3" /> AI Generated Intelligence
                                             </div>
                                             <h2 className="text-3xl md:text-4xl font-black text-slate-900 dark:text-white tracking-tight">
-                                                {latestSitrep.title || 'Situation Report'}
+                                                {displaySitrep.title || 'Situation Report'}
                                             </h2>
                                             <p className="text-slate-500 dark:text-slate-400 mt-2 font-medium">
-                                                Operational Assessment · {latestSitrep.report_type?.toUpperCase()}
+                                                Operational Assessment · {displaySitrep.report_type?.toUpperCase()}
                                             </p>
                                         </div>
                                         <div className="text-right flex flex-col items-end">
                                             <div className="text-2xl font-bold text-slate-900 dark:text-white tabular-nums">
-                                                {latestSitrep.created_at ? new Date(latestSitrep.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A'}
+                                                {displaySitrep.created_at ? new Date(displaySitrep.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'N/A'}
                                             </div>
                                             <p className="text-xs text-slate-400 uppercase tracking-widest font-bold">
-                                                Timestamp: {latestSitrep.created_at ? new Date(latestSitrep.created_at).toLocaleTimeString() : 'N/A'}
+                                                Timestamp: {displaySitrep.created_at ? new Date(displaySitrep.created_at).toLocaleTimeString() : 'N/A'}
                                             </p>
                                         </div>
                                     </div>
 
                                     {/* Metrics Grid inside report */}
-                                    {latestSitrep.key_metrics && (
+                                    {displaySitrep.key_metrics ? (
                                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
                                             {[
-                                                { label: 'Disasters', value: latestSitrep.key_metrics.active_disasters, color: 'text-red-600' },
-                                                { label: 'Utilization', value: `${latestSitrep.key_metrics.resource_utilization_pct}%`, color: 'text-blue-600' },
-                                                { label: 'Requests', value: latestSitrep.key_metrics.total_open_requests, color: 'text-amber-600' },
-                                                { label: 'Anomalies', value: latestSitrep.key_metrics.active_anomalies, color: 'text-purple-600' }
+                                                { label: 'Intelligence', value: displaySitrep.key_metrics.active_disasters, color: 'text-red-600' },
+                                                { label: 'Utilization', value: `${displaySitrep.key_metrics.resource_utilization_pct}%`, color: 'text-blue-600' },
+                                                { label: 'Requests', value: displaySitrep.key_metrics.total_open_requests, color: 'text-amber-600' },
+                                                { label: 'Anomalies', value: displaySitrep.key_metrics.active_anomalies, color: 'text-purple-600' }
                                             ].map((stat, idx) => (
                                                 <div key={idx} className="p-4 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-100 dark:border-white/5">
                                                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">{stat.label}</p>
@@ -220,22 +294,30 @@ export default function AdminCoordinatorPage() {
                                                 </div>
                                             ))}
                                         </div>
+                                    ) : (
+                                        <div className="flex items-center gap-3 mb-12 p-6 rounded-2xl bg-slate-50 dark:bg-white/5 border border-dashed border-slate-200 dark:border-white/10">
+                                            <Loader2 className="w-5 h-5 animate-spin text-purple-500" />
+                                            <span className="text-sm font-medium text-slate-500 italic">Analyzing intelligence metrics...</span>
+                                        </div>
                                     )}
 
                                     <div className="max-w-none">
                                         <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                                            {latestSitrep.markdown_body || latestSitrep.summary || latestSitrep.content || 'No content available.'}
+                                            {(displaySitrep.markdown_body || displaySitrep.summary || displaySitrep.content || 'No content available.')
+                                                .replace(/^#\s+.*?\n/i, '')
+                                                .trim()}
                                         </ReactMarkdown>
                                     </div>
 
                                     <div className="mt-12 pt-8 border-t border-slate-100 dark:border-white/5 flex items-center justify-between opacity-50 italic text-xs">
-                                        <p>Verification Hash: {Math.random().toString(36).substring(7).toUpperCase()}</p>
+                                        <p>Verification Hash: {displaySitrep.id?.slice(-8)?.toUpperCase() || 'N/A'}</p>
                                         <p>© HopeInChaos SitRep Engine v2.0</p>
                                     </div>
                                 </div>
                             </div>
                         </div>
-                    ) : (
+                        );
+                    })() : (
                         <div className="rounded-2xl border border-dashed border-slate-300 dark:border-white/10 p-12 text-center">
                             <Brain className="w-12 h-12 mx-auto mb-3 text-slate-300 dark:text-slate-600" />
                             <p className="text-sm font-medium text-slate-900 dark:text-white">No situation reports yet</p>
@@ -248,18 +330,39 @@ export default function AdminCoordinatorPage() {
                         <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5">
                             <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-3">Previous Reports</h3>
                             <div className="space-y-2">
-                                {sitreps.slice(1, 6).map((s: any, i: number) => (
-                                    <div key={i} className="flex items-center justify-between py-2 border-b border-slate-100 dark:border-white/5 last:border-0">
+                                {sitreps.slice(1, 10).map((s: any, i: number) => (
+                                    <button
+                                        key={s.id || i}
+                                        onClick={async () => {
+                                            try {
+                                                if (s.id) {
+                                                    const fullReport = await api.getSitrep(s.id);
+                                                    setSelectedSitrep(fullReport);
+                                                } else {
+                                                    setSelectedSitrep(s);
+                                                }
+                                            } catch {
+                                                setSelectedSitrep(s);
+                                            }
+                                        }}
+                                        className={cn(
+                                            'flex items-center justify-between py-2.5 px-3 rounded-lg w-full text-left border-b border-slate-100 dark:border-white/5 last:border-0 hover:bg-purple-50 dark:hover:bg-purple-500/5 transition-colors cursor-pointer group',
+                                            selectedSitrep?.id === s.id && 'bg-purple-50 dark:bg-purple-500/10 border-purple-200 dark:border-purple-500/20'
+                                        )}
+                                    >
                                         <div className="flex items-center gap-2">
-                                            <FileText className="w-4 h-4 text-slate-400" />
-                                            <span className="text-sm text-slate-700 dark:text-slate-300">
-                                                SitRep #{sitreps.length - i}
-                                            </span>
+                                            <FileText className="w-4 h-4 text-slate-400 group-hover:text-purple-500 transition-colors" />
+                                            <div>
+                                                <span className="text-sm text-slate-700 dark:text-slate-300 group-hover:text-purple-700 dark:group-hover:text-purple-300 font-medium">
+                                                    {s.title || `SitRep #${sitreps.length - i}`}
+                                                </span>
+                                                {s.report_type && <span className="text-[10px] ml-2 text-slate-400 uppercase">{s.report_type}</span>}
+                                            </div>
                                         </div>
                                         <span className="text-xs text-slate-400">
                                             {s.created_at ? new Date(s.created_at).toLocaleDateString() : 'Unknown'}
                                         </span>
-                                    </div>
+                                    </button>
                                 ))}
                             </div>
                         </div>
@@ -270,21 +373,27 @@ export default function AdminCoordinatorPage() {
             {/* Outcomes Tab */}
             {activeTab === 'outcomes' && (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
-                    <OutcomeTrackingPanel />
+                    <ErrorBoundary>
+                        <OutcomeTrackingPanel />
+                    </ErrorBoundary>
                 </div>
             )}
 
             {/* ML Sandbox Tab */}
             {activeTab === 'ml_sandbox' && (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
-                    <MLDashboard />
+                    <ErrorBoundary>
+                        <MLDashboard />
+                    </ErrorBoundary>
                 </div>
             )}
 
             {/* Anomalies Tab */}
             {activeTab === 'anomalies' && (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
-                    <AnomalyAlertPanel />
+                    <ErrorBoundary>
+                        <AnomalyAlertPanel />
+                    </ErrorBoundary>
                 </div>
             )}
 
@@ -292,10 +401,21 @@ export default function AdminCoordinatorPage() {
             {activeTab === 'query' && (
                 <div className="space-y-4">
                     <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
-                        <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-3">Ask the AI Coordinator</h3>
-                        <p className="text-xs text-slate-500 mb-4">
-                            Ask natural language questions about disasters, resources, predictions, and operational status.
-                        </p>
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h3 className="text-sm font-bold text-slate-900 dark:text-white">AI Coordinator Chat</h3>
+                                <p className="text-xs text-slate-500">Ask natural language questions about disasters, resources, predictions, and operational status.</p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs text-slate-400">Memory: {conversationHistory.length}/5 Q&A pairs</span>
+                                <button
+                                    onClick={() => setConversationHistory([])}
+                                    className="px-3 py-1.5 rounded-lg text-xs border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors"
+                                >
+                                    Clear Memory
+                                </button>
+                            </div>
+                        </div>
 
                         {/* Rule-based fallback indicator */}
                         {askMutation.data && (askMutation.data as any)?.model === 'rule-based' && (
@@ -311,6 +431,49 @@ export default function AdminCoordinatorPage() {
                                 {(askMutation.error as any)?.message || 'Query failed. Please try again.'}
                             </div>
                         )}
+
+                        {/* Chat Thread */}
+                        {conversationHistory.length > 0 && (
+                            <div className="mb-4 max-h-96 overflow-y-auto border border-slate-100 dark:border-white/5 rounded-xl bg-slate-50/30 dark:bg-white/[0.02]">
+                                {conversationHistory.map((item, index) => (
+                                    <div key={index} className="border-b border-slate-100 dark:border-white/5 last:border-0">
+                                        {/* User Question */}
+                                        <div className="p-4 bg-white dark:bg-slate-900/50">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <div className="w-6 h-6 rounded-full bg-purple-100 dark:bg-purple-500/20 flex items-center justify-center">
+                                                    <MessageSquare className="w-3 h-3 text-purple-600 dark:text-purple-400" />
+                                                </div>
+                                                <span className="text-xs font-medium text-slate-600 dark:text-slate-400">You</span>
+                                                <span className="text-[10px] text-slate-400 ml-auto">
+                                                    {item.timestamp.toLocaleTimeString()}
+                                                </span>
+                                            </div>
+                                            <p className="text-sm text-slate-700 dark:text-slate-300">{item.question}</p>
+                                        </div>
+                                        
+                                        {/* AI Response */}
+                                        <div className="p-4 bg-slate-50/50 dark:bg-white/[0.02]">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <div className="w-6 h-6 rounded-full bg-purple-100 dark:bg-purple-500/20 flex items-center justify-center">
+                                                    <Sparkles className="w-3 h-3 text-purple-600 dark:text-purple-400" />
+                                                </div>
+                                                <span className="text-xs font-medium text-slate-600 dark:text-slate-400">AI Coordinator</span>
+                                                <span className="text-[10px] text-slate-400 ml-auto">
+                                                    {item.timestamp.toLocaleTimeString()}
+                                                </span>
+                                            </div>
+                                            <div className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed prose prose-sm prose-slate dark:prose-invert max-w-none prose-headings:text-slate-800 dark:prose-headings:text-white prose-strong:text-slate-800 dark:prose-strong:text-white prose-p:my-1">
+                                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                                                    {item.answer}
+                                                </ReactMarkdown>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Input Area */}
                         <div className="flex gap-3">
                             <input
                                 value={query}
@@ -325,36 +488,9 @@ export default function AdminCoordinatorPage() {
                                 className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 disabled:opacity-50"
                             >
                                 {askMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                                Ask
+                                Send
                             </button>
                         </div>
-
-                        {/* Latest response */}
-                        {askMutation.data && (
-                            <div className="mt-4 p-4 rounded-xl bg-purple-50 dark:bg-purple-500/5 border border-purple-200 dark:border-purple-500/20">
-                                <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2">
-                                        <Sparkles className="w-4 h-4 text-purple-500" />
-                                        <span className="text-xs font-bold text-purple-700 dark:text-purple-400">AI Response</span>
-                                    </div>
-                                    {(askMutation.data as any)?.model && (
-                                        <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-purple-200/50 dark:bg-purple-500/20 text-purple-600 dark:text-purple-400">
-                                            {(askMutation.data as any).model === 'rule-based' ? '📊 Rule-based' : '🤖 HuggingFace AI'}
-                                        </span>
-                                    )}
-                                </div>
-                                <div className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed prose prose-sm prose-slate dark:prose-invert max-w-none prose-headings:text-slate-800 dark:prose-headings:text-white prose-strong:text-slate-800 dark:prose-strong:text-white prose-p:my-1">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                                        {(askMutation.data as any)?.answer || (askMutation.data as any)?.response || JSON.stringify(askMutation.data)}
-                                    </ReactMarkdown>
-                                </div>
-                                {(askMutation.data as any)?.latency_ms && (
-                                    <p className="text-[10px] text-slate-400 mt-2 pt-2 border-t border-purple-200/50 dark:border-purple-500/10">
-                                        ⚡ {(askMutation.data as any).latency_ms}ms · {(askMutation.data as any)?.tools_called?.length || 0} data queries
-                                    </p>
-                                )}
-                            </div>
-                        )}
 
                         {/* Suggested queries */}
                         <div className="mt-4">
@@ -385,7 +521,13 @@ export default function AdminCoordinatorPage() {
                         <div className="space-y-3">
                             {queryHistory.slice(0, 20).map((entry: any, i: number) => (
                                 <div key={entry.id || i} className="rounded-xl border border-slate-100 dark:border-white/5 overflow-hidden">
-                                    <div className="px-4 py-3 bg-slate-50/50 dark:bg-white/[0.02] border-b border-slate-100 dark:border-white/5">
+                                    <div 
+                                        className="px-4 py-3 bg-slate-50/50 dark:bg-white/[0.02] border-b border-slate-100 dark:border-white/5 cursor-pointer"
+                                        onClick={() => {
+                                            setQuery(entry.query_text || entry.query || entry.question);
+                                            setActiveTab('query');
+                                        }}
+                                    >
                                         <div className="flex items-center gap-2">
                                             <MessageSquare className="w-4 h-4 text-purple-500 shrink-0" />
                                             <p className="text-sm font-semibold text-slate-900 dark:text-white flex-1">{entry.query_text || entry.query || entry.question}</p>
@@ -396,8 +538,15 @@ export default function AdminCoordinatorPage() {
                                             )}
                                         </div>
                                     </div>
-                                    <div className="px-4 py-3">
-                                        <div className="text-xs text-slate-600 dark:text-slate-300 max-w-none">
+                                    <div 
+                                        onClick={() => {
+                                            setQuery(entry.query_text || entry.query || entry.question);
+                                            setActiveTab('query');
+                                            askMutation.mutate(entry.query_text || entry.query || entry.question);
+                                        }}
+                                        className="px-4 py-3 cursor-pointer hover:bg-slate-50 dark:hover:bg-white/[0.01] transition-colors"
+                                    >
+                                        <div className="text-xs text-slate-600 dark:text-slate-300 max-w-none pointer-events-none">
                                             <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                                                 {entry.response_text || entry.answer || entry.response || 'No response'}
                                             </ReactMarkdown>
@@ -430,121 +579,117 @@ export default function AdminCoordinatorPage() {
                 </div>
             )}
 
-            {/* Unified DisasterGPT Tab */}
-            {activeTab === 'disastergpt' && (
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
-                    <UnifiedDisasterGPT />
-                </div>
-            )}
 
             {/* Hotspots Tab */}
             {activeTab === 'hotspots' && (
                 <div className="space-y-4">
                     <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
-                        <div className="flex items-center gap-2 mb-1">
-                            <MapPin className="w-5 h-5 text-red-500" />
-                            <h3 className="text-sm font-bold text-slate-900 dark:text-white">Disaster Hotspot Clusters</h3>
-                        </div>
-                        <p className="text-xs text-slate-500 mb-4">
-                            DBSCAN-based spatial clustering of disaster events. Each cluster represents a geographic hotspot.
-                        </p>
-                        {hotspotsLoading ? (
-                            <div className="py-8 text-center">
-                                <Loader2 className="w-6 h-6 animate-spin text-red-500 mx-auto mb-2" />
-                                <p className="text-xs text-slate-500">Computing hotspot clusters...</p>
+                        <ErrorBoundary>
+                            <div className="flex items-center gap-2 mb-1">
+                                <MapPin className="w-5 h-5 text-red-500" />
+                                <h3 className="text-sm font-bold text-slate-900 dark:text-white">Hotspot Clusters</h3>
                             </div>
-                        ) : hotspots && (() => {
-                            // Extract clusters from GeoJSON FeatureCollection, plain array, or .clusters property
-                            const raw = hotspots?.features
-                                ? hotspots.features
-                                : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
-                            return raw.length > 0
-                        })() ? (
-                            <div className="space-y-3">
-                                {(() => {
-                                    const clusters = hotspots?.features
-                                        ? hotspots.features.map((f: any) => {
-                                            const p = f.properties || {}
-                                            const coords = p.centroid?.coordinates || f.geometry?.coordinates
-                                            return {
-                                                cluster_id: p.id ?? p.cluster_id,
-                                                priority: p.priority_label || p.priority || 'medium',
-                                                event_count: p.request_count ?? p.event_count ?? p.size ?? 0,
-                                                centroid: coords ? { lat: coords[1], lng: coords[0] } : null,
-                                                radius_km: p.radius_km,
-                                                avg_severity: p.avg_priority ?? p.avg_severity,
-                                                dominant_type: p.dominant_type,
-                                                total_people: p.total_people,
-                                                detected_at: p.detected_at,
-                                            }
-                                        })
-                                        : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
-                                    return clusters
-                                })().map((cluster: any, i: number) => (
-                                    <div key={cluster.cluster_id || i} className="rounded-xl border border-slate-100 dark:border-white/5 overflow-hidden">
-                                        <div className="px-4 py-3 bg-red-50/50 dark:bg-red-500/5 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-                                            <div className="flex items-center gap-2">
-                                                <div className={cn(
-                                                    "w-3 h-3 rounded-full",
-                                                    cluster.priority === 'critical' ? 'bg-red-500' :
-                                                    cluster.priority === 'high' ? 'bg-orange-500' :
-                                                    cluster.priority === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
-                                                )} />
-                                                <span className="text-sm font-semibold text-slate-900 dark:text-white">
-                                                    Cluster #{cluster.cluster_id ?? i + 1}
-                                                </span>
-                                                {cluster.priority && (
-                                                    <span className={cn(
-                                                        "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase",
-                                                        cluster.priority === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400' :
-                                                        cluster.priority === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400' :
-                                                        'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/10 dark:text-yellow-400'
-                                                    )}>
-                                                        {cluster.priority}
+                            <p className="text-xs text-slate-500 mb-4">
+                                DBSCAN-based spatial clustering of disaster events. Each cluster represents a geographic hotspot.
+                            </p>
+                            {hotspotsLoading ? (
+                                <div className="py-8 text-center">
+                                    <Loader2 className="w-6 h-6 animate-spin text-red-500 mx-auto mb-2" />
+                                    <p className="text-xs text-slate-500">Computing hotspot clusters...</p>
+                                </div>
+                            ) : hotspots && (() => {
+                                // Extract clusters from GeoJSON FeatureCollection, plain array, or .clusters property
+                                const raw = hotspots?.features
+                                    ? hotspots.features
+                                    : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
+                                return raw.length > 0
+                            })() ? (
+                                <div className="space-y-3">
+                                    {(() => {
+                                        const clusters = hotspots?.features
+                                            ? hotspots.features.map((f: any) => {
+                                                const p = f.properties || {}
+                                                const coords = p.centroid?.coordinates || f.geometry?.coordinates
+                                                return {
+                                                    cluster_id: p.id ?? p.cluster_id,
+                                                    priority: p.priority_label || p.priority || 'medium',
+                                                    event_count: p.request_count ?? p.event_count ?? p.size ?? 0,
+                                                    centroid: coords ? { lat: coords[1], lng: coords[0] } : null,
+                                                    radius_km: p.radius_km,
+                                                    avg_severity: p.avg_priority ?? p.avg_severity,
+                                                    dominant_type: p.dominant_type,
+                                                    total_people: p.total_people,
+                                                    detected_at: p.detected_at,
+                                                }
+                                            })
+                                            : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
+                                        return clusters
+                                    })().map((cluster: any, i: number) => (
+                                        <div key={cluster.cluster_id || i} className="rounded-xl border border-slate-100 dark:border-white/5 overflow-hidden">
+                                            <div className="px-4 py-3 bg-red-50/50 dark:bg-red-500/5 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
+                                                <div className="flex items-center gap-2">
+                                                    <div className={cn(
+                                                        "w-3 h-3 rounded-full",
+                                                        cluster.priority === 'critical' ? 'bg-red-500' :
+                                                        cluster.priority === 'high' ? 'bg-orange-500' :
+                                                        cluster.priority === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
+                                                    )} />
+                                                    <span className="text-sm font-semibold text-slate-900 dark:text-white">
+                                                        Cluster #{cluster.cluster_id ?? i + 1}
                                                     </span>
+                                                    {cluster.priority && (
+                                                        <span className={cn(
+                                                            "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase",
+                                                            cluster.priority === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400' :
+                                                            cluster.priority === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400' :
+                                                            'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/10 dark:text-yellow-400'
+                                                        )}>
+                                                            {cluster.priority}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <span className="text-xs text-slate-400">
+                                                    {cluster.event_count || cluster.size || '?'} events
+                                                </span>
+                                            </div>
+                                            <div className="px-4 py-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+                                                {cluster.centroid && (
+                                                    <div>
+                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Centroid</p>
+                                                        <p className="text-xs text-slate-700 dark:text-slate-300">
+                                                            {cluster.centroid.lat?.toFixed(4)}, {cluster.centroid.lng?.toFixed(4)}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                                {cluster.radius_km !== undefined && (
+                                                    <div>
+                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Radius</p>
+                                                        <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.radius_km?.toFixed(1)} km</p>
+                                                    </div>
+                                                )}
+                                                {cluster.avg_severity !== undefined && (
+                                                    <div>
+                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Avg Severity</p>
+                                                        <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.avg_severity?.toFixed(2)}</p>
+                                                    </div>
+                                                )}
+                                                {cluster.dominant_type && (
+                                                    <div>
+                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Type</p>
+                                                        <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.dominant_type}</p>
+                                                    </div>
                                                 )}
                                             </div>
-                                            <span className="text-xs text-slate-400">
-                                                {cluster.event_count || cluster.size || '?'} events
-                                            </span>
                                         </div>
-                                        <div className="px-4 py-3 grid grid-cols-2 md:grid-cols-4 gap-3">
-                                            {cluster.centroid && (
-                                                <div>
-                                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Centroid</p>
-                                                    <p className="text-xs text-slate-700 dark:text-slate-300">
-                                                        {cluster.centroid.lat?.toFixed(4)}, {cluster.centroid.lng?.toFixed(4)}
-                                                    </p>
-                                                </div>
-                                            )}
-                                            {cluster.radius_km !== undefined && (
-                                                <div>
-                                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Radius</p>
-                                                    <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.radius_km?.toFixed(1)} km</p>
-                                                </div>
-                                            )}
-                                            {cluster.avg_severity !== undefined && (
-                                                <div>
-                                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Avg Severity</p>
-                                                    <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.avg_severity?.toFixed(2)}</p>
-                                                </div>
-                                            )}
-                                            {cluster.dominant_type && (
-                                                <div>
-                                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Type</p>
-                                                    <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.dominant_type}</p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        ) : (
-                            <div className="py-8 text-center text-slate-400">
-                                <MapPin className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                <p className="text-sm">No hotspot clusters detected. Ensure disaster data is seeded.</p>
-                            </div>
-                        )}
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="py-8 text-center text-slate-400">
+                                    <MapPin className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                    <p className="text-sm">No hotspot clusters detected. Ensure disaster data is seeded.</p>
+                                </div>
+                            )}
+                        </ErrorBoundary>
                     </div>
                 </div>
             )}
@@ -552,14 +697,18 @@ export default function AdminCoordinatorPage() {
             {/* Severity Forecast Tab */}
             {activeTab === 'forecast' && (
                 <div className="space-y-4">
-                    <TFTForecastWidget />
+                    <ErrorBoundary>
+                        <TFTForecastWidget />
+                    </ErrorBoundary>
                 </div>
             )}
 
             {/* Spread Map Tab */}
             {activeTab === 'spread' && (
                 <div className="space-y-4">
-                    <PINNHeatmap />
+                    <ErrorBoundary>
+                        <PINNHeatmap />
+                    </ErrorBoundary>
                 </div>
             )}
         </div>

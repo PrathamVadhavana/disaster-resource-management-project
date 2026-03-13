@@ -6,28 +6,36 @@ structured resource request creation using rule-based NLP.
 Zero external API dependencies — fully self-contained state-machine
 conversation engine.
 """
+
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import uuid
-import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any
+from datetime import UTC, datetime
+from enum import StrEnum
 
 from app.services.nlp_service import (
-    classify_resource_type,
-    extract_urgency_signals,
-    estimate_quantity,
     classify_request,
+    classify_resource_type,
+    estimate_quantity,
+    extract_urgency_signals,
 )
+from app.services.distance import haversine
 
 logger = logging.getLogger(__name__)
 
+# ── Database client (lazy import to avoid initialization issues) ────────────────────
+def _get_db():
+    """Get database client, avoiding circular imports."""
+    from app.database import db_admin
+    return db_admin
+
 
 # ── Conversation states ────────────────────────────────────────────────────────
-class ConvState(str, Enum):
+class ConvState(StrEnum):
     GREETING = "greeting"
     ASK_SITUATION = "ask_situation"
     ASK_RESOURCE = "ask_resource"
@@ -44,13 +52,14 @@ class ConvState(str, Enum):
 class ChatMessage:
     role: str  # "user" | "assistant"
     content: str
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     metadata: dict | None = None
 
 
 @dataclass
 class ExtractedData:
     """Progressively built request data from conversation."""
+
     situation_description: str = ""
     resource_types: list[str] = field(default_factory=list)
     resource_type_scores: dict[str, float] = field(default_factory=dict)
@@ -59,6 +68,7 @@ class ExtractedData:
     people_count: int = 1
     has_medical_needs: bool = False
     medical_details: str = ""
+    disaster_type: str | None = None
     urgency_signals: list[dict] = field(default_factory=list)
     recommended_priority: str = "medium"
     priority_escalated: bool = False
@@ -75,6 +85,7 @@ class ExtractedData:
             "people_count": self.people_count,
             "has_medical_needs": self.has_medical_needs,
             "medical_details": self.medical_details,
+            "disaster_type": self.disaster_type,
             "urgency_signals": self.urgency_signals,
             "recommended_priority": self.recommended_priority,
             "priority_escalated": self.priority_escalated,
@@ -88,8 +99,9 @@ class ChatSession:
     state: ConvState = ConvState.GREETING
     messages: list[ChatMessage] = field(default_factory=list)
     extracted: ExtractedData = field(default_factory=ExtractedData)
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    states_visited: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 # ── In-memory session store ────────────────────────────────────────────────────
@@ -140,8 +152,7 @@ RESOURCE_ASK = (
 )
 
 QUANTITY_ASK_TEMPLATE = (
-    "How many **{resource}** units/items do you need? "
-    "And for how many people? (e.g., '5 water bottles for 3 people')"
+    "How many **{resource}** units/items do you need? And for how many people? (e.g., '5 water bottles for 3 people')"
 )
 
 LOCATION_ASK = (
@@ -155,8 +166,7 @@ PEOPLE_ASK = (
 )
 
 MEDICAL_ASK = (
-    "Does anyone in your group have medical needs or injuries that require attention? "
-    "If yes, please describe briefly."
+    "Does anyone in your group have medical needs or injuries that require attention? If yes, please describe briefly."
 )
 
 CONFIRM_TEMPLATE = (
@@ -181,10 +191,15 @@ SUBMITTED_MSG = (
 
 # ── Conversation engine ───────────────────────────────────────────────────────
 
+
 def _detect_yes(text: str) -> bool:
     """Check if user is affirming."""
     text_lower = text.strip().lower()
-    return bool(re.match(r"^(yes|yeah|yep|yup|correct|sure|ok|okay|y|confirm|right|that'?s? (right|correct))[\.\!\s]*$", text_lower))
+    return bool(
+        re.match(
+            r"^(yes|yeah|yep|yup|correct|sure|ok|okay|y|confirm|right|that'?s? (right|correct))[\.\!\s]*$", text_lower
+        )
+    )
 
 
 def _detect_no(text: str) -> bool:
@@ -203,7 +218,9 @@ def _extract_number(text: str) -> int | None:
 
 def _detect_medical(text: str) -> bool:
     """Check if text mentions medical needs."""
-    medical_kw = r"\b(injur|wound|bleed|fracture|medic|sick|fever|pain|diabet|asthma|chronic|surgery|pregnant|disability)\b"
+    medical_kw = (
+        r"\b(injur|wound|bleed|fracture|medic|sick|fever|pain|diabet|asthma|chronic|surgery|pregnant|disability)\b"
+    )
     return bool(re.search(medical_kw, text.lower()))
 
 
@@ -213,7 +230,7 @@ def process_message(session_id: str | None, user_message: str) -> dict:
     Returns the chatbot response with metadata.
     """
     session = get_or_create_session(session_id)
-    session.updated_at = datetime.now(timezone.utc).isoformat()
+    session.updated_at = datetime.now(UTC).isoformat()
 
     # Store user message
     session.messages.append(ChatMessage(role="user", content=user_message))
@@ -236,7 +253,11 @@ def process_message(session_id: str | None, user_message: str) -> dict:
 
 def _handle_state(session: ChatSession, user_input: str) -> tuple[str, dict]:
     """Route user input through the conversation state machine."""
-    metadata: dict[str, Any] = {}
+
+    # Track state transitions
+    current_state = session.state.value
+    if current_state not in session.states_visited:
+        session.states_visited.append(current_state)
 
     # ── GREETING: first interaction ──
     if session.state == ConvState.GREETING:
@@ -274,8 +295,7 @@ def _handle_state(session: ChatSession, user_input: str) -> tuple[str, dict]:
     # ── SUBMITTED: already done ──
     elif session.state == ConvState.SUBMITTED:
         return (
-            "Your request has already been submitted. "
-            "Start a new conversation if you need additional help.",
+            "Your request has already been submitted. Start a new conversation if you need additional help.",
             {"already_submitted": True},
         )
 
@@ -297,6 +317,7 @@ def _handle_situation(session: ChatSession, text: str) -> tuple[str, dict]:
     session.extracted.confidence = classification.confidence
     session.extracted.resource_types = classification.resource_types
     session.extracted.resource_type_scores = classification.resource_type_scores
+    session.extracted.disaster_type = classification.disaster_type
 
     # Try to detect quantity from situation text
     qty = estimate_quantity(text)
@@ -341,20 +362,25 @@ def _handle_resource(session: ChatSession, text: str) -> tuple[str, dict]:
     # Still couldn't detect — try mapping free text directly
     text_lower = text.strip().lower()
     direct_map = {
-        "food": "Food", "water": "Water", "medical": "Medical",
-        "shelter": "Shelter", "clothing": "Clothing", "clothes": "Clothing",
-        "evacuation": "Evacuation", "volunteers": "Volunteers",
-        "financial": "Financial Aid", "money": "Financial Aid",
+        "food": "Food",
+        "water": "Water",
+        "medical": "Medical",
+        "shelter": "Shelter",
+        "clothing": "Clothing",
+        "clothes": "Clothing",
+        "evacuation": "Evacuation",
+        "volunteers": "Volunteers",
+        "financial": "Financial Aid",
+        "money": "Financial Aid",
     }
     for key, rtype in direct_map.items():
         if key in text_lower:
             session.extracted.resource_types = [rtype]
             session.extracted.resource_type_scores = {rtype: 0.8}
             session.state = ConvState.ASK_QUANTITY
-            return (
-                f"Got it — **{rtype}**.\n\n"
-                + QUANTITY_ASK_TEMPLATE.format(resource=rtype)
-            ), {"updated_types": [rtype]}
+            return (f"Got it — **{rtype}**.\n\n" + QUANTITY_ASK_TEMPLATE.format(resource=rtype)), {
+                "updated_types": [rtype]
+            }
 
     # Still can't determine
     return (
@@ -394,13 +420,12 @@ def _handle_people(session: ChatSession, text: str) -> tuple[str, dict]:
     # Check for vulnerabilities (may trigger priority escalation)
     signals = extract_urgency_signals(text)
     if signals:
-        new_signals = [
-            {"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost}
-            for s in signals
-        ]
+        new_signals = [{"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost} for s in signals]
         session.extracted.urgency_signals.extend(new_signals)
         # Re-escalate priority
-        from app.services.nlp_service import escalate_priority, UrgencySignal as US
+        from app.services.nlp_service import UrgencySignal as US
+        from app.services.nlp_service import escalate_priority
+
         signal_objects = [
             US(keyword=s["keyword"], label=s["label"], severity_boost=s["severity_boost"], offset=0)
             for s in session.extracted.urgency_signals
@@ -432,11 +457,12 @@ def _handle_medical(session: ChatSession, text: str) -> tuple[str, dict]:
         signals = extract_urgency_signals(text)
         if signals:
             new_signals = [
-                {"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost}
-                for s in signals
+                {"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost} for s in signals
             ]
             session.extracted.urgency_signals.extend(new_signals)
-            from app.services.nlp_service import escalate_priority, UrgencySignal as US
+            from app.services.nlp_service import UrgencySignal as US
+            from app.services.nlp_service import escalate_priority
+
             signal_objects = [
                 US(keyword=s["keyword"], label=s["label"], severity_boost=s["severity_boost"], offset=0)
                 for s in session.extracted.urgency_signals
@@ -473,12 +499,86 @@ def _handle_confirm(session: ChatSession, text: str) -> tuple[str, dict]:
     """Handle confirmation response."""
     if _detect_yes(text):
         session.state = ConvState.SUBMITTED
+        # Track final state
+        if ConvState.CONFIRM.value not in session.states_visited:
+            session.states_visited.append(ConvState.CONFIRM.value)
+        if ConvState.SUBMITTED.value not in session.states_visited:
+            session.states_visited.append(ConvState.SUBMITTED.value)
+
+        # Log the completed session
+        from functools import partial
+
+        # Extract data for logging
+        final_resource = session.extracted.resource_types[0] if session.extracted.resource_types else None
+        final_priority = session.extracted.recommended_priority
+
+        # Run async logging in sync context using asyncio.run (or fire-and-forget)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're in an async context, create a task
+                asyncio.create_task(
+                    log_chatbot_session(
+                        session_id=session.session_id,
+                        user_id=None,  # Will be set when user authentication is integrated
+                        states_visited=session.states_visited,
+                        final_resource_type=final_resource,
+                        final_priority=final_priority,
+                        completion_status="completed"
+                    )
+                )
+            else:
+                loop.run_until_complete(
+                    log_chatbot_session(
+                        session_id=session.session_id,
+                        user_id=None,
+                        states_visited=session.states_visited,
+                        final_resource_type=final_resource,
+                        final_priority=final_priority,
+                        completion_status="completed"
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"Failed to log completed session: {e}")
+
         return SUBMITTED_MSG, {
             "submitted": True,
             "extracted_data": session.extracted.to_dict(),
         }
     elif _detect_no(text):
-        # Reset to start
+        # Reset to start - log as abandoned
+        # Track the confirm state before resetting
+        if ConvState.CONFIRM.value not in session.states_visited:
+            session.states_visited.append(ConvState.CONFIRM.value)
+
+        # Log abandoned session
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(
+                    log_chatbot_session(
+                        session_id=session.session_id,
+                        user_id=None,
+                        states_visited=session.states_visited,
+                        final_resource_type=None,
+                        final_priority=None,
+                        completion_status="abandoned"
+                    )
+                )
+            else:
+                loop.run_until_complete(
+                    log_chatbot_session(
+                        session_id=session.session_id,
+                        user_id=None,
+                        states_visited=session.states_visited,
+                        final_resource_type=None,
+                        final_priority=None,
+                        completion_status="abandoned"
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"Failed to log abandoned session: {e}")
+
         session.state = ConvState.ASK_SITUATION
         session.extracted = ExtractedData()
         return (
@@ -487,7 +587,238 @@ def _handle_confirm(session: ChatSession, text: str) -> tuple[str, dict]:
             "What happened and what do you need?"
         ), {"reset": True}
     else:
-        return (
-            "Please confirm by saying **yes** to submit your request, "
-            "or **no** to start over."
-        ), {"awaiting_confirmation": True}
+        return ("Please confirm by saying **yes** to submit your request, or **no** to start over."), {
+            "awaiting_confirmation": True
+        }
+
+
+# ── Smart Defaults & Urgency Context Services ─────────────────────────────────────
+
+
+@dataclass
+class SmartDefaultsResult:
+    """Result of get_smart_defaults query."""
+    top_resource_types: list[str]
+    area_message: str
+    has_data: bool
+
+
+@dataclass
+class UrgencyContextResult:
+    """Result of get_urgency_context check."""
+    has_active_disaster: bool
+    disaster_type: str | None
+    disaster_title: str | None
+    priority_boost: int
+    urgency_message: str | None
+
+
+async def get_smart_defaults(user_location: tuple[float, float]) -> SmartDefaultsResult:
+    """
+    Query resource_requests from the last 30 days where latitude/longitude
+    is within 50km of user_location. Return the top 3 most requested types.
+
+    Args:
+        user_location: Tuple of (latitude, longitude)
+
+    Returns:
+        SmartDefaultsResult with top resource types and a message for the user
+    """
+    from datetime import timedelta
+
+    user_lat, user_lon = user_location
+    thirty_days_ago = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+
+    try:
+        db = _get_db()
+        # Fetch resource requests from last 30 days with location data
+        response = await db.table("resource_requests").select(
+            "id, resource_type, latitude, longitude, created_at"
+        ).gte("created_at", thirty_days_ago).execute()
+
+        requests = response.data or []
+        if not requests:
+            return SmartDefaultsResult(
+                top_resource_types=[],
+                area_message="",
+                has_data=False
+            )
+
+        # Count resource types within 50km
+        type_counts: dict[str, int] = {}
+        for req in requests:
+            req_lat = req.get("latitude")
+            req_lon = req.get("longitude")
+            if req_lat is None or req_lon is None:
+                continue
+
+            distance = haversine(user_lat, user_lon, req_lat, req_lon)
+            if distance <= 50:  # Within 50km
+                resource_type = req.get("resource_type", "unknown")
+                if resource_type:
+                    type_counts[resource_type] = type_counts.get(resource_type, 0) + 1
+
+        if not type_counts:
+            return SmartDefaultsResult(
+                top_resource_types=[],
+                area_message="",
+                has_data=False
+            )
+
+        # Get top 3 most requested types
+        sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
+        top_3 = [t[0] for t in sorted_types[:3]]
+
+        # Build user-friendly message
+        if top_3:
+            if len(top_3) == 1:
+                area_message = f"In your area, most people are requesting {top_3[0]}. Is that what you need too?"
+            elif len(top_3) == 2:
+                area_message = f"In your area, most people are requesting {top_3[0]} and {top_3[1]}. Is either of these what you need?"
+            else:
+                area_message = f"In your area, most people are requesting {top_3[0]}, {top_3[1]}, or {top_3[2]}. Is any of these what you need?"
+        else:
+            area_message = ""
+
+        return SmartDefaultsResult(
+            top_resource_types=top_3,
+            area_message=area_message,
+            has_data=True
+        )
+
+    except Exception as e:
+        logger.warning(f"Error getting smart defaults: {e}")
+        return SmartDefaultsResult(
+            top_resource_types=[],
+            area_message="",
+            has_data=False
+        )
+
+
+async def get_urgency_context(user_location: tuple[float, float]) -> UrgencyContextResult:
+    """
+    Check for any active (status='active') disaster within 100km of user_location.
+    If found, auto-boost priority by 1 level and inform the user.
+
+    Args:
+        user_location: Tuple of (latitude, longitude)
+
+    Returns:
+        UrgencyContextResult with disaster info and priority boost
+    """
+    user_lat, user_lon = user_location
+
+    try:
+        db = _get_db()
+        # Fetch active disasters
+        response = await db.table("disasters").select(
+            "id, type, title, status, location_id"
+        ).eq("status", "active").execute()
+
+        disasters = response.data or []
+        if not disasters:
+            return UrgencyContextResult(
+                has_active_disaster=False,
+                disaster_type=None,
+                disaster_title=None,
+                priority_boost=0,
+                urgency_message=None
+            )
+
+        # Need to get location data for each disaster to calculate distance
+        location_ids = [d.get("location_id") for d in disasters if d.get("location_id")]
+        location_map = {}
+
+        if location_ids:
+            loc_response = await db.table("locations").select(
+                "id, latitude, longitude"
+            ).in_("id", location_ids).execute()
+            for loc in loc_response.data or []:
+                location_map[loc["id"]] = loc
+
+        # Check each disaster within 100km
+        for disaster in disasters:
+            location_id = disaster.get("location_id")
+            if not location_id or location_id not in location_map:
+                continue
+
+            loc = location_map[location_id]
+            disaster_lat = loc.get("latitude")
+            disaster_lon = loc.get("longitude")
+
+            if disaster_lat is None or disaster_lon is None:
+                continue
+
+            distance = haversine(user_lat, user_lon, disaster_lat, disaster_lon)
+
+            if distance <= 100:  # Within 100km
+                disaster_type = disaster.get("type", "disaster")
+                disaster_title = disaster.get("title", "")
+
+                return UrgencyContextResult(
+                    has_active_disaster=True,
+                    disaster_type=disaster_type,
+                    disaster_title=disaster_title,
+                    priority_boost=1,
+                    urgency_message=f"There's an active {disaster_type} near you. We've marked your request as high priority."
+                )
+
+        return UrgencyContextResult(
+            has_active_disaster=False,
+            disaster_type=None,
+            disaster_title=None,
+            priority_boost=0,
+            urgency_message=None
+        )
+
+    except Exception as e:
+        logger.warning(f"Error getting urgency context: {e}")
+        return UrgencyContextResult(
+            has_active_disaster=False,
+            disaster_type=None,
+            disaster_title=None,
+            priority_boost=0,
+            urgency_message=None
+        )
+
+
+async def log_chatbot_session(
+    session_id: str,
+    user_id: str | None,
+    states_visited: list[str],
+    final_resource_type: str | None,
+    final_priority: str | None,
+    completion_status: str
+) -> bool:
+    """
+    Log a completed chatbot session to the chatbot_sessions table.
+
+    Args:
+        session_id: The unique session identifier
+        user_id: The user ID if authenticated
+        states_visited: List of conversation states visited
+        final_resource_type: The resource type selected
+        final_priority: The priority of the request
+        completion_status: 'completed' or 'abandoned'
+
+    Returns:
+        True if logged successfully, False otherwise
+    """
+    try:
+        db = _get_db()
+        insert_data = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "states_visited": states_visited,
+            "final_resource_type": final_resource_type,
+            "final_priority": final_priority,
+            "completion_status": completion_status,
+        }
+
+        await db.table("chatbot_sessions").insert(insert_data).execute()
+        logger.info(f"Logged chatbot session {session_id} as {completion_status}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error logging chatbot session {session_id}: {e}")
+        return False

@@ -39,6 +39,7 @@ export default function AdminUsersPage() {
     const [verifyError, setVerifyError] = useState<string | null>(null)
     const [verifySuccess, setVerifySuccess] = useState<string | null>(null)
     const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+    const [reviewingRequest, setReviewingRequest] = useState<string | null>(null)
 
     const toggleMenu = useCallback((userId: string) => {
         if (openMenu === userId) {
@@ -123,6 +124,22 @@ export default function AdminUsersPage() {
         },
     })
 
+    const reviewRoleRequestMutation = useMutation({
+        mutationFn: ({ userId, requestedRole, requestId, action }: { userId: string; requestedRole: string; requestId?: string; action: 'approve' | 'reject' }) =>
+            api.reviewRoleSwitchRequest(userId, {
+                action,
+                requested_role: requestedRole,
+                request_id: requestId,
+                reason: action === 'approve' ? 'Approved from admin panel' : 'Rejected from admin panel',
+            }),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+        },
+        onSettled: () => {
+            setReviewingRequest(null)
+        },
+    })
+
     const userList = Array.isArray(users) ? users : []
 
     const filteredUsers = useMemo(() => {
@@ -137,6 +154,41 @@ export default function AdminUsersPage() {
         const c: Record<string, number> = { all: userList.length }
         userList.forEach((u: any) => { c[u.role] = (c[u.role] || 0) + 1 })
         return c
+    }, [userList])
+
+    const pendingRoleRequests = useMemo(() => {
+        const rows: Array<{
+            userId: string
+            fullName: string
+            email: string
+            currentRole: string
+            requestedRole: string
+            requestedAt: string
+            requestId?: string
+        }> = []
+
+        userList.forEach((user: any) => {
+            const requests = user?.metadata?.pending_role_switch_requests
+            if (!Array.isArray(requests)) return
+            requests.forEach((req: any) => {
+                if (req?.status !== 'pending') return
+                rows.push({
+                    userId: user.id,
+                    fullName: user.full_name || 'No Name',
+                    email: user.email || '—',
+                    currentRole: req.current_role || user.role,
+                    requestedRole: req.requested_role || '—',
+                    requestedAt: req.requested_at || '',
+                    requestId: req.request_id,
+                })
+            })
+        })
+
+        return rows.sort((a, b) => {
+            const aTs = a.requestedAt ? new Date(a.requestedAt).getTime() : 0
+            const bTs = b.requestedAt ? new Date(b.requestedAt).getTime() : 0
+            return bTs - aTs
+        })
     }, [userList])
 
     const handleExport = () => {
@@ -203,6 +255,67 @@ export default function AdminUsersPage() {
                         placeholder="Search users by name or email..."
                         className="w-full h-10 pl-10 pr-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm focus:ring-2 focus:ring-purple-500 focus:outline-none" />
                 </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-slate-900 dark:text-white">Pending Role Requests</h2>
+                    <span className="text-xs text-slate-500">{pendingRoleRequests.length} pending</span>
+                </div>
+                {pendingRoleRequests.length === 0 ? (
+                    <div className="px-4 py-6 text-sm text-slate-400">No pending role switch requests.</div>
+                ) : (
+                    <div className="divide-y divide-slate-100 dark:divide-white/5">
+                        {pendingRoleRequests.map((req) => {
+                            const rowKey = req.requestId || `${req.userId}-${req.requestedRole}-${req.requestedAt}`
+                            const busy = reviewingRequest === rowKey && reviewRoleRequestMutation.isPending
+                            return (
+                                <div key={rowKey} className="px-4 py-3 flex items-center justify-between gap-4">
+                                    <div>
+                                        <p className="text-sm font-medium text-slate-900 dark:text-white">{req.fullName}</p>
+                                        <p className="text-xs text-slate-500">{req.email}</p>
+                                        <p className="text-xs text-slate-400 mt-1">
+                                            {req.currentRole} → {req.requestedRole}
+                                            {req.requestedAt ? ` • ${new Date(req.requestedAt).toLocaleString()}` : ''}
+                                        </p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => {
+                                                setReviewingRequest(rowKey)
+                                                reviewRoleRequestMutation.mutate({
+                                                    userId: req.userId,
+                                                    requestedRole: req.requestedRole,
+                                                    requestId: req.requestId,
+                                                    action: 'approve',
+                                                })
+                                            }}
+                                            disabled={busy}
+                                            className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                                        >
+                                            {busy ? '...' : 'Approve'}
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setReviewingRequest(rowKey)
+                                                reviewRoleRequestMutation.mutate({
+                                                    userId: req.userId,
+                                                    requestedRole: req.requestedRole,
+                                                    requestId: req.requestId,
+                                                    action: 'reject',
+                                                })
+                                            }}
+                                            disabled={busy}
+                                            className="px-3 py-1.5 rounded-lg border border-red-200 dark:border-red-500/30 text-red-600 text-xs font-semibold hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-50"
+                                        >
+                                            {busy ? '...' : 'Reject'}
+                                        </button>
+                                    </div>
+                                </div>
+                            )
+                        })}
+                    </div>
+                )}
             </div>
 
             {/* Users Table */}

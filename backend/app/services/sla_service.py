@@ -11,14 +11,13 @@ Runs as a periodic background task (every 10 minutes).
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from datetime import UTC, datetime, timedelta
 
 from app.database import db_admin
 from app.services.notification_service import (
+    create_audit_entry,
     notify_all_admins,
     notify_all_by_role,
-    create_audit_entry,
 )
 
 logger = logging.getLogger("sla_service")
@@ -37,16 +36,10 @@ PRIORITY_ESCALATION = {
 }
 
 
-async def _get_sla_settings() -> Dict:
+async def _get_sla_settings() -> dict:
     """Fetch SLA configuration from platform_settings."""
     try:
-        resp = (
-            await db_admin.table("platform_settings")
-            .select("*")
-            .eq("id", 1)
-            .maybe_single()
-            .async_execute()
-        )
+        resp = await db_admin.table("platform_settings").select("*").eq("id", 1).maybe_single().async_execute()
         if resp.data:
             return {
                 "approved_sla_hours": resp.data.get("approved_sla_hours", DEFAULT_APPROVED_SLA_HOURS),
@@ -64,15 +57,15 @@ async def _get_sla_settings() -> Dict:
     }
 
 
-def _parse_dt(val) -> Optional[datetime]:
+def _parse_dt(val) -> datetime | None:
     """Parse a datetime from the database (string or datetime)."""
     if val is None:
         return None
     if isinstance(val, datetime):
-        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+        return val if val.tzinfo else val.replace(tzinfo=UTC)
     try:
         dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except Exception:
         return None
 
@@ -83,7 +76,7 @@ async def check_sla_violations():
     if not settings.get("sla_enabled", True):
         return
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # 1. Check approved requests with no NGO response
     await _check_approved_sla(now, settings["approved_sla_hours"])
@@ -117,15 +110,25 @@ async def _check_approved_sla(now: datetime, sla_hours: float):
 
             if new_priority != current_priority:
                 # Escalate priority
-                await db_admin.table("resource_requests").update({
-                    "priority": new_priority,
-                    "sla_escalated_at": now.isoformat(),
-                    "updated_at": now.isoformat(),
-                }).eq("id", req["id"]).async_execute()
+                await (
+                    db_admin.table("resource_requests")
+                    .update(
+                        {
+                            "priority": new_priority,
+                            "sla_escalated_at": now.isoformat(),
+                            "updated_at": now.isoformat(),
+                        }
+                    )
+                    .eq("id", req["id"])
+                    .async_execute()
+                )
 
                 logger.info(
                     "SLA escalation: request %s priority %s → %s (approved >%sh without NGO response)",
-                    req["id"][:8], current_priority, new_priority, sla_hours,
+                    req["id"][:8],
+                    current_priority,
+                    new_priority,
+                    sla_hours,
                 )
 
                 # Re-notify NGOs/donors
@@ -182,9 +185,16 @@ async def _check_assigned_sla(now: datetime, sla_hours: float):
             if req.get("sla_admin_alerted"):
                 continue
 
-            await db_admin.table("resource_requests").update({
-                "sla_admin_alerted": True,
-            }).eq("id", req["id"]).async_execute()
+            await (
+                db_admin.table("resource_requests")
+                .update(
+                    {
+                        "sla_admin_alerted": True,
+                    }
+                )
+                .eq("id", req["id"])
+                .async_execute()
+            )
 
             await notify_all_admins(
                 title="⏰ Assigned Request Stalled",
@@ -221,9 +231,16 @@ async def _check_in_progress_sla(now: datetime, sla_hours: float):
             if req.get("sla_delivery_alerted"):
                 continue
 
-            await db_admin.table("resource_requests").update({
-                "sla_delivery_alerted": True,
-            }).eq("id", req["id"]).async_execute()
+            await (
+                db_admin.table("resource_requests")
+                .update(
+                    {
+                        "sla_delivery_alerted": True,
+                    }
+                )
+                .eq("id", req["id"])
+                .async_execute()
+            )
 
             await notify_all_admins(
                 title="🚛 Delivery Overdue",

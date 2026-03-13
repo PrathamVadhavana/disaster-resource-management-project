@@ -10,7 +10,7 @@ The pipeline:
   2. On query: embed question → retrieve top-K relevant documents
   3. Fetch live disaster state from the database
   4. Compose prompt: system context + retrieved docs + live state + user query
-  5. Generate response via DisasterGPT (local) or fallback to HuggingFace API
+    5. Generate response via Groq API, local model, or rule-based fallback
 
 Usage:
     # Index data
@@ -19,17 +19,18 @@ Usage:
     # Query
     python -m ml.disaster_rag query "What resources are needed for the Mumbai flood?"
 """
+
 from __future__ import annotations
 
 import argparse
-import json
 import hashlib
+import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -46,8 +47,8 @@ COLLECTION_NAME = "disaster_knowledge"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # sentence-transformers, fast & good quality
 TOP_K = 5
 
-# LLM backends — tried in order: groq (best free) > local > huggingface > rule-based
-LLM_BACKEND = os.getenv("DISASTERGPT_BACKEND", "auto")  # auto | groq | local | huggingface
+# LLM backends — tried in order: groq (best free) > local > rule-based
+LLM_BACKEND = os.getenv("DISASTERGPT_BACKEND", "auto")  # auto | groq | local
 
 # Groq Cloud API (free tier — fast inference with Llama 3.3 70B)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -56,10 +57,6 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 # Local model paths (set after fine-tuning)
 LOCAL_GGUF_PATH = os.getenv("DISASTERGPT_GGUF", "models/disaster-gpt-gguf/unsloth.Q4_K_M.gguf")
 LOCAL_ADAPTER_PATH = os.getenv("DISASTERGPT_ADAPTER", "models/disaster-gpt/lora-adapter")
-
-# HuggingFace Inference API (free tier)
-HF_MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
-
 
 # ── System prompt ───────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are DisasterGPT, the AI coordinator for HopeInChaos — a disaster resource management platform that tracks active disasters, manages resource allocation, processes victim requests, and coordinates emergency response.
@@ -101,6 +98,7 @@ class DisasterKnowledgeBase:
 
         # Use sentence-transformers embedding function
         from chromadb.utils import embedding_functions
+
         self._ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=EMBEDDING_MODEL,
         )
@@ -119,9 +117,11 @@ class DisasterKnowledgeBase:
             # Corrupted ChromaDB (e.g. version mismatch) — nuke & recreate
             logger.warning(
                 "ChromaDB init failed (%s), resetting database at %s",
-                exc, persist_dir,
+                exc,
+                persist_dir,
             )
             import shutil
+
             try:
                 shutil.rmtree(persist_dir, ignore_errors=True)
             except Exception:
@@ -138,7 +138,8 @@ class DisasterKnowledgeBase:
             )
         logger.info(
             "ChromaDB collection '%s': %d documents",
-            COLLECTION_NAME, self._collection.count(),
+            COLLECTION_NAME,
+            self._collection.count(),
         )
 
     # ── Indexing ─────────────────────────────────────────────────────────────
@@ -156,16 +157,18 @@ class DisasterKnowledgeBase:
                 continue
             doc_id = self._doc_id("db_disaster", str(d.get("id", "")))
             docs.append(doc_text)
-            metas.append({
-                "source": "database",
-                "type": "disaster_record",
-                "disaster_id": str(d.get("id", "")),
-                "disaster_type": str(d.get("type", d.get("disaster_type", ""))),
-                "severity": str(d.get("severity", "")),
-                "location": str(d.get("location", d.get("location_name", ""))),
-                "status": str(d.get("status", "")),
-                "created_at": str(d.get("created_at", "")),
-            })
+            metas.append(
+                {
+                    "source": "database",
+                    "type": "disaster_record",
+                    "disaster_id": str(d.get("id", "")),
+                    "disaster_type": str(d.get("type", d.get("disaster_type", ""))),
+                    "severity": str(d.get("severity", "")),
+                    "location": str(d.get("location", d.get("location_name", ""))),
+                    "status": str(d.get("status", "")),
+                    "created_at": str(d.get("created_at", "")),
+                }
+            )
             ids.append(doc_id)
 
         if docs:
@@ -182,7 +185,7 @@ class DisasterKnowledgeBase:
 
         docs, metas, ids = [], [], []
         seen_ids: set[str] = set()
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -199,9 +202,7 @@ class DisasterKnowledgeBase:
 
                 # Use first 2000 chars for embedding (keeps vectors focused)
                 doc_text = f"{instruction}\n\n{output[:2000]}"
-                doc_id = self._doc_id("sitrep", hashlib.md5(
-                    (instruction + output[:500]).encode()
-                ).hexdigest())
+                doc_id = self._doc_id("sitrep", hashlib.md5((instruction + output[:500]).encode()).hexdigest())
 
                 # Deduplicate within this batch
                 if doc_id in seen_ids:
@@ -209,20 +210,22 @@ class DisasterKnowledgeBase:
                 seen_ids.add(doc_id)
 
                 docs.append(doc_text)
-                metas.append({
-                    "source": "reliefweb",
-                    "type": "situation_report",
-                    "instruction": instruction[:500],
-                })
+                metas.append(
+                    {
+                        "source": "reliefweb",
+                        "type": "situation_report",
+                        "instruction": instruction[:500],
+                    }
+                )
                 ids.append(doc_id)
 
         if docs:
             # Batch upsert in chunks of 500 (ChromaDB limit)
             for i in range(0, len(docs), 500):
                 self._collection.upsert(
-                    documents=docs[i:i + 500],
-                    metadatas=metas[i:i + 500],
-                    ids=ids[i:i + 500],
+                    documents=docs[i : i + 500],
+                    metadatas=metas[i : i + 500],
+                    ids=ids[i : i + 500],
                 )
         logger.info("Indexed %d situation reports.", len(docs))
         return len(docs)
@@ -258,11 +261,13 @@ class DisasterKnowledgeBase:
                 results["metadatas"][0],
                 results["distances"][0],
             ):
-                retrieved.append({
-                    "content": doc,
-                    "metadata": meta,
-                    "relevance_score": round(1 - dist, 4),  # cosine distance → similarity
-                })
+                retrieved.append(
+                    {
+                        "content": doc,
+                        "metadata": meta,
+                        "relevance_score": round(1 - dist, 4),  # cosine distance → similarity
+                    }
+                )
         return retrieved
 
     # ── Helpers ──────────────────────────────────────────────────────────────
@@ -273,9 +278,18 @@ class DisasterKnowledgeBase:
         title = d.get("title") or d.get("name") or d.get("disaster_type", "Disaster")
         parts.append(f"Disaster: {title}")
 
-        for field in ["type", "disaster_type", "severity", "status",
-                      "location", "location_name", "description",
-                      "affected_population", "casualties", "damage_estimate"]:
+        for field in [
+            "type",
+            "disaster_type",
+            "severity",
+            "status",
+            "location",
+            "location_name",
+            "description",
+            "affected_population",
+            "casualties",
+            "damage_estimate",
+        ]:
             val = d.get(field)
             if val:
                 label = field.replace("_", " ").title()
@@ -434,8 +448,7 @@ async def fetch_live_context(disaster_id: str | None = None) -> str:
             sections.append("\n=== ACTIVE ANOMALY ALERTS ===")
             for a in anom_resp.data:
                 sections.append(
-                    f"- [{a.get('severity', 'N/A').upper()}] {a.get('title', 'N/A')}: "
-                    f"{a.get('description', '')[:200]}"
+                    f"- [{a.get('severity', 'N/A').upper()}] {a.get('title', 'N/A')}: {a.get('description', '')[:200]}"
                 )
 
         # ── Recent situation reports ──
@@ -468,7 +481,9 @@ class LLMBackend:
     async def generate(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
         raise NotImplementedError
 
-    async def generate_stream(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> AsyncIterator[str]:
+    async def generate_stream(
+        self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7
+    ) -> AsyncIterator[str]:
         # Default: yield full result at once
         result = await self.generate(prompt, max_tokens, temperature)
         yield result
@@ -479,6 +494,7 @@ class LocalLlamaBackend(LLMBackend):
 
     def __init__(self, model_path: str = LOCAL_GGUF_PATH):
         from llama_cpp import Llama
+
         logger.info("Loading local GGUF model: %s", model_path)
         self._llm = Llama(
             model_path=model_path,
@@ -493,23 +509,30 @@ class LocalLlamaBackend(LLMBackend):
     def _has_gpu() -> bool:
         try:
             import torch
+
             return torch.cuda.is_available()
         except ImportError:
             return False
 
     async def generate(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
         import asyncio
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: self._llm(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=0.9,
-            stop=["### Instruction:", "\n\n\n"],
-        ))
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: self._llm(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=0.9,
+                stop=["### Instruction:", "\n\n\n"],
+            ),
+        )
         return result["choices"][0]["text"].strip()
 
-    async def generate_stream(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> AsyncIterator[str]:
+    async def generate_stream(
+        self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7
+    ) -> AsyncIterator[str]:
         import asyncio
 
         def _stream():
@@ -522,7 +545,7 @@ class LocalLlamaBackend(LLMBackend):
                 stream=True,
             )
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         stream = await loop.run_in_executor(None, _stream)
         for chunk in stream:
             token = chunk["choices"][0].get("text", "")
@@ -530,75 +553,12 @@ class LocalLlamaBackend(LLMBackend):
                 yield token
 
 
-class HuggingFaceBackend(LLMBackend):
-    """HuggingFace Inference API backend (free tier)."""
-
-    def __init__(self):
-        from huggingface_hub import InferenceClient
-
-        self._token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_API_KEY") or None
-        self._model = HF_MODEL
-        self._client = InferenceClient(token=self._token)
-        logger.info("HuggingFace Inference API backend initialised: %s", self._model)
-
-    async def generate(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
-        import asyncio
-
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self._client.chat_completion(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=max(temperature, 0.01),
-            ),
-        )
-        return response.choices[0].message.content
-
-    async def generate_stream(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> AsyncIterator[str]:
-        import asyncio
-        import queue
-        import threading
-
-        q: queue.Queue = queue.Queue()
-        sentinel = object()
-
-        def _run_stream():
-            try:
-                response = self._client.chat_completion(
-                    model=self._model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                    temperature=max(temperature, 0.01),
-                    stream=True,
-                )
-                for chunk in response:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        q.put(chunk.choices[0].delta.content)
-            except Exception as exc:
-                q.put(exc)
-            finally:
-                q.put(sentinel)
-
-        thread = threading.Thread(target=_run_stream, daemon=True)
-        thread.start()
-
-        loop = asyncio.get_event_loop()
-        while True:
-            item = await loop.run_in_executor(None, q.get)
-            if item is sentinel:
-                break
-            if isinstance(item, Exception):
-                raise item
-            yield item
-
-
 class GroqBackend(LLMBackend):
     """Groq Cloud API backend — free tier with fast inference on Llama 3.3 70B."""
 
     def __init__(self):
         from groq import Groq
+
         self._api_key = GROQ_API_KEY
         self._model = GROQ_MODEL
         self._client = Groq(api_key=self._api_key)
@@ -619,10 +579,12 @@ class GroqBackend(LLMBackend):
             )
             return response.choices[0].message.content
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _call)
 
-    async def generate_stream(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> AsyncIterator[str]:
+    async def generate_stream(
+        self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7
+    ) -> AsyncIterator[str]:
         import asyncio
         import queue
         import threading
@@ -653,7 +615,7 @@ class GroqBackend(LLMBackend):
         thread = threading.Thread(target=_run_stream, daemon=True)
         thread.start()
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             item = await loop.run_in_executor(None, q.get)
             if item is sentinel:
@@ -677,7 +639,9 @@ class RuleBasedBackend(LLMBackend):
     async def generate(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> str:
         return self._format_response(prompt)
 
-    async def generate_stream(self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7) -> AsyncIterator[str]:
+    async def generate_stream(
+        self, prompt: str, max_tokens: int = 1024, temperature: float = 0.7
+    ) -> AsyncIterator[str]:
         text = self._format_response(prompt)
         # Stream word-by-word for natural feel
         for word in text.split(" "):
@@ -725,7 +689,19 @@ class RuleBasedBackend(LLMBackend):
             for line in prompt.split("\n"):
                 line = line.strip()
                 if line and not line.startswith("You are") and not line.startswith("Guidelines") and len(line) > 20:
-                    if any(kw in line.lower() for kw in ["disaster", "resource", "active", "severity", "status", "flood", "earthquake", "cyclone"]):
+                    if any(
+                        kw in line.lower()
+                        for kw in [
+                            "disaster",
+                            "resource",
+                            "active",
+                            "severity",
+                            "status",
+                            "flood",
+                            "earthquake",
+                            "cyclone",
+                        ]
+                    ):
                         parts.append(f"- {line[:200]}")
 
         parts.append("\n---")
@@ -751,10 +727,14 @@ class RuleBasedBackend(LLMBackend):
 def _create_backend() -> LLMBackend:
     """Create the best available LLM backend.
 
-    Priority: Groq (free, fast, 70B) > Local GGUF > HuggingFace > Rule-based.
+    Priority: Groq (free, fast, 70B) > Local GGUF > Rule-based.
     Always succeeds — falls back to RuleBasedBackend if no API is available.
     """
     backend = LLM_BACKEND.lower()
+
+    if backend == "huggingface":
+        logger.warning("DISASTERGPT_BACKEND=huggingface is deprecated. Use 'groq' or 'auto'.")
+        backend = "groq"
 
     if backend in ("groq", "auto"):
         if GROQ_API_KEY:
@@ -774,14 +754,6 @@ def _create_backend() -> LLMBackend:
                 logger.warning("Local model failed: %s", exc)
                 if backend == "local":
                     raise
-
-    if backend in ("huggingface", "auto"):
-        try:
-            return HuggingFaceBackend()
-        except Exception as exc:
-            logger.warning("HuggingFace backend failed: %s", exc)
-            if backend == "huggingface":
-                raise
 
     # Ultimate fallback — always works, no external API needed
     logger.info("No LLM API available — using rule-based backend")
@@ -817,6 +789,7 @@ class DisasterRAG:
         logger.info("Knowledge base empty — auto-indexing from database...")
         try:
             from app.database import db
+
             resp = db.table("disasters").select("*").execute()
             if resp.data:
                 count = self._kb.index_disasters_from_db(resp.data)
@@ -919,8 +892,7 @@ class DisasterRAG:
             async for token in self._llm.generate_stream(prompt, max_tokens, temperature):
                 yield json.dumps({"type": "token", "data": token}) + "\n"
         except Exception as exc:
-            logger.warning("LLM stream failed (%s), falling back to rule-based: %s",
-                           type(self._llm).__name__, exc)
+            logger.warning("LLM stream failed (%s), falling back to rule-based: %s", type(self._llm).__name__, exc)
             # Switch to rule-based for this and future requests
             self._llm = RuleBasedBackend()
             async for token in self._llm.generate_stream(prompt, max_tokens, temperature):
@@ -938,7 +910,7 @@ class DisasterRAG:
         live_context: str,
     ) -> str:
         """Build the full augmented prompt.
-        
+
         Note: For Groq backend, the system prompt is sent separately via the
         messages API. For other backends, we prepend it here.
         """
@@ -956,8 +928,7 @@ class DisasterRAG:
                 source = doc["metadata"].get("source", "unknown")
                 doc_type = doc["metadata"].get("type", "unknown")
                 sections.append(
-                    f"[Document {i} | Source: {source} | Type: {doc_type} | "
-                    f"Relevance: {doc['relevance_score']:.2f}]"
+                    f"[Document {i} | Source: {source} | Type: {doc_type} | Relevance: {doc['relevance_score']:.2f}]"
                 )
                 sections.append(doc["content"][:1500])
                 sections.append("")
@@ -994,7 +965,7 @@ class DisasterRAG:
         length_factor = min(resp_len / 500, 1.0) if resp_len > 0 else 0.5
 
         # Weighted combination
-        confidence = (0.5 * avg_relevance + 0.3 * doc_count_factor + 0.2 * length_factor)
+        confidence = 0.5 * avg_relevance + 0.3 * doc_count_factor + 0.2 * length_factor
         return round(min(max(confidence, 0.1), 1.0), 3)
 
 
@@ -1017,16 +988,23 @@ def main():
 
     # Index command
     idx = sub.add_parser("index", help="Index data into ChromaDB")
-    idx.add_argument("--reports", default="training_data/disaster_instructions.jsonl",
-                     help="JSONL file of situation reports to index")
+    idx.add_argument(
+        "--reports",
+        default="training_data/disaster_instructions.jsonl",
+        help="JSONL file of situation reports to index",
+    )
 
     # Query command
     q = sub.add_parser("query", help="Query the RAG pipeline")
     q.add_argument("question", type=str, help="Question to ask DisasterGPT")
     q.add_argument("--disaster-id", default=None, help="Optional disaster ID for context")
     q.add_argument("--top-k", type=int, default=TOP_K, help="Number of documents to retrieve")
-    q.add_argument("--retrieve-only", action="store_true", default=False,
-                   help="Only retrieve relevant documents (skip LLM generation)")
+    q.add_argument(
+        "--retrieve-only",
+        action="store_true",
+        default=False,
+        help="Only retrieve relevant documents (skip LLM generation)",
+    )
 
     # Stats command
     sub.add_parser("stats", help="Show knowledge base statistics")
@@ -1043,28 +1021,33 @@ def main():
             # Retrieval-only mode — no LLM needed
             kb = DisasterKnowledgeBase()
             results = kb.query(args.question, top_k=args.top_k)
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Retrieved {len(results)} documents for: {args.question}")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             for i, doc in enumerate(results, 1):
                 meta = doc["metadata"]
-                print(f"\n[{i}] Relevance: {doc['relevance_score']:.2%} | "
-                      f"Source: {meta.get('source', '?')} | Type: {meta.get('type', '?')}")
+                print(
+                    f"\n[{i}] Relevance: {doc['relevance_score']:.2%} | "
+                    f"Source: {meta.get('source', '?')} | Type: {meta.get('type', '?')}"
+                )
                 print(f"    {doc['content'][:300]}...")
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
         else:
             import asyncio
+
             rag = get_rag()
-            result = asyncio.run(rag.query(
-                question=args.question,
-                disaster_id=args.disaster_id,
-                top_k=args.top_k,
-            ))
-            print(f"\n{'='*60}")
+            result = asyncio.run(
+                rag.query(
+                    question=args.question,
+                    disaster_id=args.disaster_id,
+                    top_k=args.top_k,
+                )
+            )
+            print(f"\n{'=' * 60}")
             print(f"Response (confidence: {result['confidence']:.1%}):")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             print(result["response"])
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Sources ({len(result['sources'])}):")
             for s in result["sources"]:
                 print(f"  - [{s['source']}/{s['type']}] relevance={s['relevance']:.2f}: {s['content_preview'][:80]}...")

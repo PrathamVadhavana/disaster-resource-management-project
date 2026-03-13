@@ -1,14 +1,16 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from datetime import datetime, timezone
-import os
 import logging
+import os
 import re
+from datetime import UTC, datetime
+from urllib.parse import urlparse
 
-from app.database import db, db_admin
-from app.schemas import UserLogin, UserRegister, Token, ForgotPasswordRequest, ResetPasswordRequest
-from app.dependencies import get_current_user, _verify_supabase_token
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from app.database import db_admin
 from app.db_client import get_supabase_client
+from app.dependencies import _verify_supabase_token, get_current_user
+from app.schemas import ForgotPasswordRequest, ResetPasswordRequest, Token, UserLogin, UserRegister, EmailVerificationResponse
 
 try:
     from app.middleware.rate_limit import limiter
@@ -32,15 +34,19 @@ async def register(request: Request, user: UserRegister):
 
         # 1. Create auth user in Supabase (or find existing OAuth user)
         existing_user = False
+        user_created = False
         try:
-            auth_resp = sb.auth.admin.create_user({
-                "email": user.email,
-                "password": user.password if user.password else None,
-                "email_confirm": True,
-                "user_metadata": {"full_name": user.full_name, "role": user.role},
-                "app_metadata": {"role": user.role},
-            })
+            auth_resp = sb.auth.admin.create_user(
+                {
+                    "email": user.email,
+                    "password": user.password if user.password else None,
+                    "email_confirm": False,
+                    "user_metadata": {"full_name": user.full_name, "role": user.role},
+                    "app_metadata": {"role": user.role},
+                }
+            )
             sb_user = auth_resp.user
+            user_created = True
         except Exception as auth_err:
             err_msg = str(auth_err)
             if "already" in err_msg.lower() or "duplicate" in err_msg.lower():
@@ -55,19 +61,42 @@ async def register(request: Request, user: UserRegister):
                         uid_from_token = decoded["uid"]
                         sb_user = sb.auth.admin.get_user_by_id(uid_from_token)
                         # Update app_metadata with the role
-                        sb.auth.admin.update_user_by_id(uid_from_token, {
-                            "app_metadata": {"role": user.role},
-                            "user_metadata": {
-                                "full_name": user.full_name or (sb_user.user_metadata or {}).get("full_name", ""),
-                                "role": user.role,
+                        sb.auth.admin.update_user_by_id(
+                            uid_from_token,
+                            {
+                                "app_metadata": {"role": user.role},
+                                "user_metadata": {
+                                    "full_name": user.full_name or (sb_user.user_metadata or {}).get("full_name", ""),
+                                    "role": user.role,
+                                },
                             },
-                        })
+                        )
                     except Exception:
                         raise HTTPException(status_code=400, detail="Email already registered")
                 else:
                     raise HTTPException(status_code=400, detail="Email already registered")
             else:
                 raise HTTPException(status_code=500, detail=f"Auth creation failed: {err_msg}")
+
+        # 2. Send verification email for newly created users
+        # Always try to send verification email (Supabase handles duplicates gracefully)
+        try:
+            allowed_origins = _parse_allowed_origins()
+            default_origin = allowed_origins[0] if allowed_origins else "http://localhost:3000"
+            request_origin = (request.headers.get("origin") or "").strip().rstrip("/")
+            if request_origin and request_origin in allowed_origins:
+                default_origin = request_origin
+            
+            redirect_url = f"{default_origin}/auth/callback"
+            
+            sb.auth.resend({
+                "type": "signup",
+                "email": user.email,
+                "redirect_to": redirect_url,
+            })
+            logger.info("Verification email sent for email (hash: %s)", hash(user.email))
+        except Exception as e:
+            logger.warning(f"Failed to send verification email: {e}")
 
         uid = sb_user.id
 
@@ -78,8 +107,8 @@ async def register(request: Request, user: UserRegister):
             "full_name": user.full_name,
             "role": user.role,
             "verification_status": "pending",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
 
         try:
@@ -101,10 +130,12 @@ async def register(request: Request, user: UserRegister):
         access_token = uid  # fallback
         if user.password:
             try:
-                sign_in_resp = sb.auth.sign_in_with_password({
-                    "email": user.email,
-                    "password": user.password,
-                })
+                sign_in_resp = sb.auth.sign_in_with_password(
+                    {
+                        "email": user.email,
+                        "password": user.password,
+                    }
+                )
                 access_token = sign_in_resp.session.access_token
             except Exception:
                 pass
@@ -131,10 +162,12 @@ async def login(request: Request, credentials: UserLogin):
     """
     try:
         sb = get_supabase_client()
-        resp = sb.auth.sign_in_with_password({
-            "email": credentials.email,
-            "password": credentials.password,
-        })
+        resp = sb.auth.sign_in_with_password(
+            {
+                "email": credentials.email,
+                "password": credentials.password,
+            }
+        )
 
         if not resp.session:
             raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -159,7 +192,7 @@ async def login(request: Request, credentials: UserLogin):
 async def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Logout user — invalidate session server-side."""
     try:
-        decoded = _verify_supabase_token(credentials.credentials)
+        _verify_supabase_token(credentials.credentials)
         # Supabase handles session invalidation on the client side
         # The token will simply expire
         return {"message": "Logged out successfully"}
@@ -172,17 +205,11 @@ async def me(user: dict = Depends(get_current_user)):
     """Get current user profile"""
     try:
         # Get user profile from DB
-        response = (
-            await db_admin.table("users")
-            .select("*")
-            .eq("id", user["id"])
-            .single()
-            .async_execute()
-        )
+        response = await db_admin.table("users").select("*").eq("id", user["id"]).single().async_execute()
 
         return response.data
 
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 
@@ -194,13 +221,13 @@ async def update_me(request: Request, user: dict = Depends(get_current_user)):
         # Prevent updating sensitive fields
         body.pop("id", None)
         body.pop("email", None)
+        body.pop("role", None)
+        body.pop("additional_roles", None)
+        body.pop("verification_status", None)
+        body.pop("verification_notes", None)
+        body.pop("metadata", None)
 
-        response = (
-            await db_admin.table("users")
-            .update(body)
-            .eq("id", user["id"])
-            .async_execute()
-        )
+        response = await db_admin.table("users").update(body).eq("id", user["id"]).async_execute()
         return response.data[0] if response.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -211,13 +238,15 @@ async def upsert_me(request: Request, user: dict = Depends(get_current_user)):
     """Upsert user profile — used during onboarding."""
     try:
         body = await request.json()
+        # Prevent upsert from mutating auth-sensitive fields.
+        body.pop("role", None)
+        body.pop("additional_roles", None)
+        body.pop("verification_status", None)
+        body.pop("verification_notes", None)
+        body.pop("metadata", None)
         body["id"] = user["id"]
 
-        response = (
-            await db_admin.table("users")
-            .upsert(body)
-            .async_execute()
-        )
+        response = await db_admin.table("users").upsert(body).async_execute()
         return response.data[0] if response.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -236,13 +265,9 @@ async def upsert_details(
 
     try:
         body = await request.json()
-        body["user_id"] = user["id"]
+        body["id"] = user["id"]
 
-        response = (
-            await db_admin.table(detail_table)
-            .upsert(body)
-            .async_execute()
-        )
+        response = await db_admin.table(detail_table).upsert(body).async_execute()
         return response.data[0] if response.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -250,16 +275,28 @@ async def upsert_details(
 
 from pydantic import BaseModel as _BaseModel
 
+
 class _RoleSwitchBody(_BaseModel):
     new_role: str
 
 
 @router.post("/me/switch-role")
 async def switch_role(body: _RoleSwitchBody, user: dict = Depends(get_current_user)):
-    """Self-service role switching for donor/victim/volunteer.
-    Admins and NGOs cannot switch roles via this endpoint."""
-    allowed_roles = {"donor", "victim", "volunteer"}
+    """Self-service role switching.
+
+    Rules:
+    - Any non-admin user can initiate a role switch.
+    - Switching to ``victim`` happens immediately.
+    - Switching to any other role requires admin approval and creates a pending request.
+    """
+    allowed_roles = {"donor", "victim", "volunteer", "ngo"}
     current_role = user.get("role", "")
+
+    if current_role == "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Admins must use admin endpoints for role changes",
+        )
 
     if current_role not in allowed_roles:
         raise HTTPException(
@@ -278,39 +315,97 @@ async def switch_role(body: _RoleSwitchBody, user: dict = Depends(get_current_us
 
     uid = user["id"]
 
-    # Update DB
-    metadata_resp = (
-        await db_admin.table("users")
-        .select("metadata")
+    metadata_resp = await db_admin.table("users").select("metadata").eq("id", uid).maybe_single().async_execute()
+    existing_meta = (metadata_resp.data or {}).get("metadata") or {}
+
+    if body.new_role == "victim":
+        history = existing_meta.get("role_history", [])
+        history.append(
+            {
+                "changed_by": uid,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "old_role": current_role,
+                "new_role": body.new_role,
+                "reason": "Self-service role switch to victim",
+            }
+        )
+        existing_meta["role_history"] = history
+
+        await (
+            db_admin.table("users")
+            .update(
+                {
+                    "role": body.new_role,
+                    "metadata": existing_meta,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", uid)
+            .async_execute()
+        )
+
+        try:
+            sb = get_supabase_client()
+            sb.auth.admin.update_user_by_id(uid, {"app_metadata": {"role": body.new_role}})
+        except Exception as e:
+            print(f"Warning: Failed to sync Supabase auth metadata: {e}")
+
+        return {
+            "message": f"Role switched to {body.new_role}",
+            "role": body.new_role,
+            "status": "switched",
+        }
+
+    pending_requests = existing_meta.get("pending_role_switch_requests", [])
+    existing_pending = next(
+        (
+            req
+            for req in pending_requests
+            if req.get("status") == "pending" and req.get("requested_role") == body.new_role
+        ),
+        None,
+    )
+    if existing_pending:
+        return {
+            "message": f"Role switch to {body.new_role} is already pending admin approval",
+            "requested_role": body.new_role,
+            "status": "pending_approval",
+        }
+
+    pending_requests.append(
+        {
+            "request_id": f"{uid}:{body.new_role}:{int(datetime.now(UTC).timestamp())}",
+            "requested_by": uid,
+            "requested_at": datetime.now(UTC).isoformat(),
+            "current_role": current_role,
+            "requested_role": body.new_role,
+            "status": "pending",
+        }
+    )
+    existing_meta["pending_role_switch_requests"] = pending_requests
+    existing_meta["latest_role_switch_request"] = {
+        "requested_role": body.new_role,
+        "status": "pending",
+        "requested_at": datetime.now(UTC).isoformat(),
+    }
+
+    await (
+        db_admin.table("users")
+        .update(
+            {
+                "metadata": existing_meta,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+        )
         .eq("id", uid)
-        .maybe_single()
         .async_execute()
     )
-    existing_meta = (metadata_resp.data or {}).get("metadata") or {}
-    history = existing_meta.get("role_history", [])
-    history.append({
-        "changed_by": uid,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "old_role": current_role,
-        "new_role": body.new_role,
-        "reason": "Self-service role switch",
-    })
-    existing_meta["role_history"] = history
 
-    await db_admin.table("users").update({
-        "role": body.new_role,
-        "metadata": existing_meta,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", uid).async_execute()
-
-    # Sync Supabase auth metadata
-    try:
-        sb = get_supabase_client()
-        sb.auth.admin.update_user_by_id(uid, {"app_metadata": {"role": body.new_role}})
-    except Exception as e:
-        print(f"Warning: Failed to sync Supabase auth metadata: {e}")
-
-    return {"message": f"Role switched to {body.new_role}", "role": body.new_role}
+    return {
+        "message": f"Role switch request to {body.new_role} submitted. Waiting for admin approval.",
+        "requested_role": body.new_role,
+        "status": "pending_approval",
+    }
 
 
 # ============================================================
@@ -322,22 +417,38 @@ _forgot_password_attempts: dict[str, list[float]] = {}
 _FORGOT_PASSWORD_MAX_ATTEMPTS = 5
 _FORGOT_PASSWORD_WINDOW_SECONDS = 300  # 5 minutes
 
-_PASSWORD_REGEX = re.compile(
-    r'^(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$'
-)
+_PASSWORD_REGEX = re.compile(r"^(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$")
+
+
+def _parse_allowed_origins() -> list[str]:
+    origins_raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+    return [origin.strip().rstrip("/") for origin in origins_raw.split(",") if origin.strip()]
+
+
+def _is_allowed_reset_redirect(url: str, allowed_origins: list[str]) -> bool:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+        origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        if origin not in allowed_origins:
+            return False
+        return parsed.path.rstrip("/") == "/reset-password"
+    except Exception:
+        return False
 
 
 def _check_forgot_password_rate_limit(client_ip: str) -> bool:
-    """Return True if the request is allowed, False if rate-limited."""
+    """Return True if request is allowed, False if rate-limited."""
     import time
 
     now = time.time()
     attempts = _forgot_password_attempts.get(client_ip, [])
-    # Keep only attempts within the window
     attempts = [t for t in attempts if now - t < _FORGOT_PASSWORD_WINDOW_SECONDS]
     if len(attempts) >= _FORGOT_PASSWORD_MAX_ATTEMPTS:
         _forgot_password_attempts[client_ip] = attempts
         return False
+
     attempts.append(now)
     _forgot_password_attempts[client_ip] = attempts
     return True
@@ -347,13 +458,8 @@ def _check_forgot_password_rate_limit(client_ip: str) -> bool:
 async def forgot_password(request: Request, body: ForgotPasswordRequest):
     """Request a password reset link.
 
-    Sends a recovery email via Supabase Auth. Always returns a neutral
-    success message regardless of whether the email exists — this prevents
-    user enumeration attacks.
-
-    Rate-limited: 5 requests per 5 minutes per IP.
+    Always returns success message to avoid leaking account existence.
     """
-    # Rate limiting
     client_ip = request.client.host if request.client else "unknown"
     if not _check_forgot_password_rate_limit(client_ip):
         raise HTTPException(
@@ -365,34 +471,34 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
     email = (body.email or "").strip().lower()
     if not email or "@" not in email:
         # Still return success to avoid leaking info
-        return {
-            "message": "If an account exists with this email, a password reset link has been sent."
-        }
+        return {"message": "If an account exists with this email, a password reset link has been sent."}
 
     # Determine the redirect URL for the reset link
-    allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
-    # Take the first origin if multiple are specified
-    frontend_url = allowed_origins.split(",")[0].strip()
-    redirect_url = f"{frontend_url}/reset-password"
+    allowed_origins = _parse_allowed_origins()
+    default_origin = allowed_origins[0] if allowed_origins else "http://localhost:3000"
+
+    request_origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if request_origin and request_origin in allowed_origins:
+        default_origin = request_origin
+
+    redirect_url = f"{default_origin}/reset-password"
+    requested_redirect = (body.redirect_to or "").strip()
+    if requested_redirect and _is_allowed_reset_redirect(requested_redirect, allowed_origins):
+        redirect_url = requested_redirect
 
     try:
         sb = get_supabase_client()
-        # Use Supabase Admin API to generate a recovery link.
-        # This triggers Supabase to send the recovery email to the user.
-        sb.auth.admin.generate_link({
-            "type": "recovery",
-            "email": email,
-            "options": {"redirect_to": redirect_url},
-        })
-        logger.info("Password reset requested for email (hash: %s)", hash(email))
+        sb.auth.reset_password_for_email(
+            email,
+            options={"redirect_to": redirect_url},
+        )
+        logger.info("Password reset email sent for email (hash: %s)", hash(email))
     except Exception as e:
-        # Log but don't expose whether the email exists
-        logger.debug("Forgot password generate_link result: %s", str(e))
+        # Log but never expose whether the email exists
+        logger.warning("Forgot password send result: %s", str(e))
 
     # Always return success — never reveal whether the email exists
-    return {
-        "message": "If an account exists with this email, a password reset link has been sent."
-    }
+    return {"message": "If an account exists with this email, a password reset link has been sent."}
 
 
 @router.post("/reset-password")
@@ -439,3 +545,97 @@ async def reset_password(request: Request, body: ResetPasswordRequest):
             status_code=400,
             detail="Invalid or expired reset token. Please request a new password reset link.",
         )
+
+
+@router.post("/verify-email", response_model=EmailVerificationResponse)
+async def verify_email(user: dict = Depends(get_current_user)):
+    """Verify user's email verification status.
+
+    Checks Supabase to see if the user's email is confirmed and updates
+    the verification_status in the database accordingly.
+    """
+    try:
+        sb = get_supabase_client()
+        uid = user["id"]
+
+        # Get the user's current info from Supabase
+        try:
+            supabase_user = sb.auth.admin.get_user_by_id(uid)
+            email_confirmed = supabase_user.user.email_confirmed_at is not None
+        except Exception as e:
+            logger.warning(f"Failed to get user from Supabase: {e}")
+            email_confirmed = False
+
+        # Determine verification status
+        new_status = "verified" if email_confirmed else "pending"
+
+        # Update the user's verification_status in the database
+        try:
+            await db_admin.table("users").update(
+                {
+                    "verification_status": new_status,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            ).eq("id", uid).async_execute()
+        except Exception as e:
+            logger.warning(f"Failed to update verification status in DB: {e}")
+            # Still return the result even if DB update failed
+
+        if email_confirmed:
+            return EmailVerificationResponse(
+                verified=True,
+                message="Email has been verified successfully",
+                verification_status=new_status,
+            )
+        else:
+            return EmailVerificationResponse(
+                verified=False,
+                message="Email has not been verified yet. Please check your inbox for the verification link.",
+                verification_status=new_status,
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Email verification check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ResendVerificationRequest(_BaseModel):
+    email: str
+
+
+@router.post("/resend-verification")
+async def resend_verification(request: Request, body: ResendVerificationRequest):
+    """Resend the verification email to the user.
+
+    Allows users to request a new verification email if they didn't receive the original.
+    """
+    try:
+        sb = get_supabase_client()
+
+        # Get the origin for redirect
+        allowed_origins = _parse_allowed_origins()
+        default_origin = allowed_origins[0] if allowed_origins else "http://localhost:3000"
+        request_origin = (request.headers.get("origin") or "").strip().rstrip("/")
+        if request_origin and request_origin in allowed_origins:
+            default_origin = request_origin
+
+        redirect_url = f"{default_origin}/auth/callback"
+
+        # Resend the verification email
+        sb.auth.resend(
+            {
+                "type": "signup",
+                "email": body.email,
+                "redirect_to": redirect_url,
+            }
+        )
+
+        logger.info("Verification email resent for email (hash: %s)", hash(body.email))
+        return {"message": "Verification email has been resent. Please check your inbox."}
+
+    except Exception as e:
+        logger.warning("Resend verification failed: %s", str(e))
+        # Always return success to avoid leaking whether email exists
+        return {"message": "Verification email has been resent. Please check your inbox."}

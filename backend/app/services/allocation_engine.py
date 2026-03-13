@@ -27,8 +27,8 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any
 
 import pulp
 
@@ -51,7 +51,7 @@ class AvailableResource:
     location_lng: float
     location_id: str
     # Optional shelf-life / expiry fields for perishables
-    expiry_date: Optional[datetime] = None
+    expiry_date: datetime | None = None
 
 
 @dataclass
@@ -63,6 +63,10 @@ class ResourceNeed:
     urgency: float = 5.0  # 1-10 scale
     zone_lat: float = 0.0
     zone_lng: float = 0.0
+    zone_id: str = ""
+    request_id: str | None = None
+    victim_id: str | None = None
+    head_count: int | None = None
 
 
 @dataclass
@@ -79,8 +83,8 @@ class PriorityWeights:
 class AllocationResult:
     """Output of the optimiser."""
 
-    allocations: List[Dict[str, Any]] = field(default_factory=list)
-    unmet_needs: List[Dict[str, Any]] = field(default_factory=list)
+    allocations: list[dict[str, Any]] = field(default_factory=list)
+    unmet_needs: list[dict[str, Any]] = field(default_factory=list)
     coverage_pct: float = 0.0
     estimated_delivery_km: float = 0.0
     optimization_score: float = 0.0
@@ -109,8 +113,8 @@ def _expiry_score(resource: AvailableResource, now: datetime | None = None) -> f
 
 
 def solve_allocation(
-    resources: List[AvailableResource],
-    needs: List[ResourceNeed],
+    resources: list[AvailableResource],
+    needs: list[ResourceNeed],
     weights: PriorityWeights | None = None,
     max_distance_km: float = 500.0,
 ) -> AllocationResult:
@@ -134,29 +138,47 @@ def solve_allocation(
     if not resources or not needs:
         result.solver_status = "trivial_empty"
         result.unmet_needs = [
-            {"type": n.need_type, "quantity": n.quantity, "urgency": n.urgency}
+            {
+                "type": n.need_type,
+                "quantity": n.quantity,
+                "urgency": n.urgency,
+                "zone_id": n.zone_id,
+                "request_id": n.request_id,
+            }
             for n in needs
         ]
         return result
 
-    n_res = len(resources)
+    # Filter resources to only include those with status 'available'
+    available_resources = [r for r in resources if getattr(r, "status", "available") == "available"]
+    if not available_resources:
+        result.solver_status = "no_available_resources"
+        result.unmet_needs = [
+            {
+                "type": n.need_type,
+                "quantity": n.quantity,
+                "urgency": n.urgency,
+                "zone_id": n.zone_id,
+                "request_id": n.request_id,
+            }
+            for n in needs
+        ]
+        return result
+
+    n_res = len(available_resources)
     n_needs = len(needs)
 
     # ── Pre-compute distance & eligibility matrices ───────────────────
-    dist: List[List[float]] = []
-    eligible: List[List[bool]] = []
-    for i, r in enumerate(resources):
-        row_dist: List[float] = []
-        row_elig: List[bool] = []
+    dist: list[list[float]] = []
+    eligible: list[list[bool]] = []
+    for i, r in enumerate(available_resources):
+        row_dist: list[float] = []
+        row_elig: list[bool] = []
         for j, n in enumerate(needs):
             d = haversine(r.location_lat, r.location_lng, n.zone_lat, n.zone_lng)
             row_dist.append(d)
             # Eligible if same type, within distance, and enough quantity
-            row_elig.append(
-                r.resource_type == n.need_type
-                and d <= max_distance_km
-                and r.quantity >= n.quantity
-            )
+            row_elig.append(r.resource_type == n.need_type and d <= max_distance_km and r.quantity >= n.quantity)
         dist.append(row_dist)
         eligible.append(row_elig)
 
@@ -164,19 +186,13 @@ def solve_allocation(
     prob = pulp.LpProblem("ResourceAllocation", pulp.LpMaximize)
 
     # Binary decision variables
-    x = [
-        [
-            pulp.LpVariable(f"x_{i}_{j}", cat=pulp.LpBinary)
-            for j in range(n_needs)
-        ]
-        for i in range(n_res)
-    ]
+    x = [[pulp.LpVariable(f"x_{i}_{j}", cat=pulp.LpBinary) for j in range(n_needs)] for i in range(n_res)]
 
     # Objective: weighted coverage – distance penalty + expiry bonus
     now = datetime.utcnow()
     obj_terms = []
     for i in range(n_res):
-        exp_s = _expiry_score(resources[i], now)
+        exp_s = _expiry_score(available_resources[i], now)
         for j in range(n_needs):
             if not eligible[i][j]:
                 # Force ineligible pairs to zero
@@ -187,9 +203,7 @@ def solve_allocation(
             dist_penalty = (dist[i][j] / max(max_distance_km, 1)) * weights.distance_weight
             expiry_bonus = exp_s * weights.expiry_weight
 
-            obj_terms.append(
-                x[i][j] * (urgency_val + coverage_val + expiry_bonus - dist_penalty)
-            )
+            obj_terms.append(x[i][j] * (urgency_val + coverage_val + expiry_bonus - dist_penalty))
 
     if obj_terms:
         prob += pulp.lpSum(obj_terms), "TotalObjective"
@@ -197,7 +211,13 @@ def solve_allocation(
         # Nothing eligible — return immediately
         result.solver_status = "infeasible_no_eligible"
         result.unmet_needs = [
-            {"type": n.need_type, "quantity": n.quantity, "urgency": n.urgency}
+            {
+                "type": n.need_type,
+                "quantity": n.quantity,
+                "urgency": n.urgency,
+                "zone_id": n.zone_id,
+                "request_id": n.request_id,
+            }
             for n in needs
         ]
         return result
@@ -225,7 +245,13 @@ def solve_allocation(
     if prob.status != pulp.constants.LpStatusOptimal:
         logger.warning("Solver did not find an optimal solution: %s", result.solver_status)
         result.unmet_needs = [
-            {"type": n.need_type, "quantity": n.quantity, "urgency": n.urgency}
+            {
+                "type": n.need_type,
+                "quantity": n.quantity,
+                "urgency": n.urgency,
+                "zone_id": n.zone_id,
+                "request_id": n.request_id,
+            }
             for n in needs
         ]
         return result
@@ -240,14 +266,18 @@ def solve_allocation(
                 total_dist += dist[i][j]
                 result.allocations.append(
                     {
-                        "resource_id": resources[i].id,
-                        "type": resources[i].resource_type,
+                        "resource_id": available_resources[i].id,
+                        "type": available_resources[i].resource_type,
                         "quantity": needs[j].quantity,
-                        "location": resources[i].location_id,
+                        "location": available_resources[i].location_id,
+                        "zone_id": needs[j].zone_id,
+                        "request_id": needs[j].request_id,
+                        "victim_id": needs[j].victim_id,
+                        "head_count": needs[j].head_count,
                         "distance_km": round(dist[i][j], 2),
                         "expiry_date": (
-                            resources[i].expiry_date.isoformat()
-                            if resources[i].expiry_date
+                            available_resources[i].expiry_date.isoformat()
+                            if available_resources[i].expiry_date
                             else None
                         ),
                     }
@@ -260,15 +290,13 @@ def solve_allocation(
                     "type": needs[j].need_type,
                     "quantity": needs[j].quantity,
                     "urgency": needs[j].urgency,
+                    "zone_id": needs[j].zone_id,
+                    "request_id": needs[j].request_id,
                 }
             )
 
-    result.coverage_pct = round(
-        len(met_indices) / n_needs * 100 if n_needs else 0, 2
-    )
+    result.coverage_pct = round(len(met_indices) / n_needs * 100 if n_needs else 0, 2)
     result.estimated_delivery_km = round(total_dist, 2)
-    result.optimization_score = round(
-        len(met_indices) / n_needs if n_needs else 0, 4
-    )
+    result.optimization_score = round(len(met_indices) / n_needs if n_needs else 0, 4)
 
     return result

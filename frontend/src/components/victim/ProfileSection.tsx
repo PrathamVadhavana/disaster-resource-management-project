@@ -19,6 +19,8 @@ const NEEDS_OPTIONS = ['Food', 'Water', 'Medical', 'Shelter', 'Clothing', 'Finan
 export function ProfileSection() {
     const queryClient = useQueryClient()
     const [saved, setSaved] = useState(false)
+    const [switchError, setSwitchError] = useState('')
+    const [switchMessage, setSwitchMessage] = useState('')
 
     const { data: profile, isLoading } = useQuery<VictimProfile>({
         queryKey: ['victim-profile'],
@@ -52,6 +54,24 @@ export function ProfileSection() {
             queryClient.invalidateQueries({ queryKey: ['victim-profile'] })
             setSaved(true)
             setTimeout(() => setSaved(false), 3000)
+        },
+    })
+
+    const switchRoleMut = useMutation({
+        mutationFn: (newRole: string) => api.switchRole(newRole),
+        onMutate: () => {
+            setSwitchError('')
+            setSwitchMessage('')
+        },
+        onSuccess: (resp: any) => {
+            if (resp?.status === 'switched') {
+                window.location.href = '/'
+                return
+            }
+            setSwitchMessage(resp?.message || 'Role switch request submitted. Waiting for admin approval.')
+        },
+        onError: (err: any) => {
+            setSwitchError(err?.message || 'Failed to switch role')
         },
     })
 
@@ -263,15 +283,30 @@ export function ProfileSection() {
                     <h2 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                         <ArrowRightLeft className="w-4 h-4" /> Switch Role
                     </h2>
-                    <p className="text-xs text-slate-500 mt-0.5">Change your active role on the platform</p>
+                    <p className="text-xs text-slate-500 mt-0.5">Victim switches happen instantly. Other role switches need admin approval.</p>
                 </div>
-                <div className="p-5 flex gap-3">
-                    {(['donor', 'volunteer'] as const).map(role => (
-                        <button key={role} onClick={() => { api.switchRole(role).then(() => { window.location.href = '/' }) }}
-                            className="flex-1 py-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 transition-all capitalize">
-                            Switch to {role}
-                        </button>
-                    ))}
+                <div className="p-5 space-y-3">
+                    {switchError && (
+                        <p className="text-xs text-red-500">{switchError}</p>
+                    )}
+                    {switchMessage && (
+                        <p className="text-xs text-emerald-500">{switchMessage}</p>
+                    )}
+                    <div className="flex gap-3">
+                    {(['donor', 'volunteer', 'ngo'] as const).map(role => {
+
+                        return (
+                            <button key={role} onClick={() => switchRoleMut.mutate(role)}
+                                disabled={updateMut.isPending || switchRoleMut.isPending}
+                                className={cn(
+                                    "flex-1 py-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium transition-all capitalize disabled:opacity-50",
+                                    "text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5"
+                                )}>
+                                Switch to {role}
+                            </button>
+                        )
+                    })}
+                    </div>
                 </div>
             </div>
         </div>

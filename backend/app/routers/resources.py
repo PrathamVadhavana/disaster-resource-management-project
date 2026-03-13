@@ -1,57 +1,58 @@
-from fastapi import APIRouter, HTTPException, Depends
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta, timezone
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import db
+from app.dependencies import require_role
 from app.schemas import (
-    Resource,
-    ResourceCreate,
-    ResourceUpdate,
     AllocationRequest,
     AllocationResponse,
-    OptimizationScoreBreakdown,
-    ForecastResponse,
     ForecastItemSchema,
-    ResourceStatus
+    ForecastResponse,
+    OptimizationScoreBreakdown,
+    Resource,
+    ResourceCreate,
+    ResourceStatus,
+    ResourceType,
+    ResourceUpdate,
 )
 from app.services.allocation_engine import (
     AvailableResource,
-    ResourceNeed,
     PriorityWeights,
+    ResourceNeed,
     solve_allocation,
 )
 from app.services.forecast_service import (
     ConsumptionRecord,
+    backtest_forecast,
     generate_forecast,
 )
-from app.dependencies import require_role
 
 # GNN-based allocator imports
 from ml.gat_model import (
-    GATAllocator,
-    load_checkpoint,
-    hungarian_assignment,
-    explain_assignment,
     DEFAULT_CHECKPOINT,
+    GATAllocator,
+    explain_assignment,
+    hungarian_assignment,
+    load_checkpoint,
 )
 from ml.graph_builder import (
-    VictimNode,
     NgoNode,
+    VictimNode,
     build_graph,
-    victim_node_from_dict,
-    ngo_node_from_dict,
 )
 
 logger = logging.getLogger(__name__)
 
 # ── Lazy-loaded GAT model singleton ──────────────────────────────────────
 
-_gat_model: Optional[GATAllocator] = None
+_gat_model: GATAllocator | None = None
 
 
-def _get_gat_model() -> Optional[GATAllocator]:
+def _get_gat_model() -> GATAllocator | None:
     """Load the trained GAT model once (returns None if checkpoint missing)."""
     global _gat_model
     if _gat_model is not None:
@@ -66,10 +67,11 @@ def _get_gat_model() -> Optional[GATAllocator]:
         logger.info("GAT checkpoint not found at %s — will fall back to LP solver", DEFAULT_CHECKPOINT)
     return _gat_model
 
+
 router = APIRouter()
 
 
-@router.get("/", response_model=List[Resource])
+@router.get("/", response_model=list[Resource])
 async def get_resources(
     location_id: str = None,
     status: ResourceStatus = None,
@@ -79,19 +81,19 @@ async def get_resources(
     """Get all resources with optional filtering"""
     try:
         query = db.table("resources").select("*")
-        
+
         if location_id:
             query = query.eq("location_id", location_id)
         if status:
             query = query.eq("status", status.value)
         if disaster_id:
             query = query.eq("disaster_id", disaster_id)
-        
+
         query = query.order("priority", desc=True).limit(limit)
         response = await query.async_execute()
-        
+
         return response.data
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -99,23 +101,49 @@ async def get_resources(
 @router.post("/", response_model=Resource, status_code=201)
 async def create_resource(
     resource: ResourceCreate,
-    _user: dict = Depends(require_role("admin", "ngo")),
+    user: dict = Depends(require_role("admin", "ngo")),
 ):
     """Create a new resource (admin/ngo only)"""
     try:
         resource_dict = resource.model_dump()
         resource_dict["id"] = str(uuid.uuid4())
-        resource_dict["status"] = ResourceStatus.AVAILABLE.value
-        resource_dict["created_at"] = datetime.now(timezone.utc).isoformat()
-        resource_dict["updated_at"] = datetime.now(timezone.utc).isoformat()
+        resource_dict["provider_id"] = user.get("id")
         
+        # Remove fields that don't exist in the 'resources' table
+        resource_dict.pop("category", None)
+        
+        # Ensure location_id is present (some schemas require it NOT NULL)
+        if not resource_dict.get("location_id"):
+            loc_resp = await db.table("locations").select("id").limit(1).async_execute()
+            if loc_resp.data:
+                resource_dict["location_id"] = loc_resp.data[0]["id"]
+            else:
+                # If no location exists, we must set it to NULL or a sensible default
+                # But it's usually NOT NULL in COMPLETE_SETUP.sql
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Please create at least one location before adding resources"
+                )
+
+        # Ensure status and type are string values for PostgREST
+        if isinstance(resource_dict.get("status"), ResourceStatus):
+            resource_dict["status"] = resource_dict["status"].value
+        elif "status" not in resource_dict:
+            resource_dict["status"] = ResourceStatus.AVAILABLE.value
+
+        if isinstance(resource_dict.get("type"), ResourceType):
+            resource_dict["type"] = resource_dict["type"].value
+
+        resource_dict["created_at"] = datetime.now(UTC).isoformat()
+        resource_dict["updated_at"] = datetime.now(UTC).isoformat()
+
         response = await db.table("resources").insert(resource_dict).async_execute()
-        
+
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to create resource")
-        
+
         return response.data[0]
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -129,20 +157,15 @@ async def update_resource(
     """Update an existing resource (admin/ngo only)"""
     try:
         update_dict = resource_update.model_dump(exclude_unset=True)
-        update_dict["updated_at"] = datetime.now(timezone.utc).isoformat()
-        
-        response = (
-            await db.table("resources")
-            .update(update_dict)
-            .eq("id", resource_id)
-            .async_execute()
-        )
-        
+        update_dict["updated_at"] = datetime.now(UTC).isoformat()
+
+        response = await db.table("resources").update(update_dict).eq("id", resource_id).async_execute()
+
         if not response.data:
             raise HTTPException(status_code=404, detail="Resource not found")
-        
+
         return response.data[0]
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -181,12 +204,7 @@ async def allocate_resources(
         )
 
         # ── Fetch available resources from the database ───────────────
-        response = (
-            await db.table("resources")
-            .select("*")
-            .eq("status", ResourceStatus.AVAILABLE.value)
-            .async_execute()
-        )
+        response = await db.table("resources").select("*").eq("status", ResourceStatus.AVAILABLE.value).async_execute()
         raw_resources = response.data or []
 
         # Resolve locations (lat/lng) for each resource
@@ -194,22 +212,13 @@ async def allocate_resources(
         location_ids = list({r["location_id"] for r in raw_resources})
         if location_ids:
             loc_resp = (
-                await db.table("locations")
-                .select("id, latitude, longitude")
-                .in_("id", location_ids)
-                .async_execute()
+                await db.table("locations").select("id, latitude, longitude").in_("id", location_ids).async_execute()
             )
-            for loc in (loc_resp.data or []):
+            for loc in loc_resp.data or []:
                 location_cache[loc["id"]] = (loc["latitude"], loc["longitude"])
 
         # ── Resolve disaster zone coordinates ─────────────────────────
-        disaster_resp = (
-            await db.table("disasters")
-            .select("location_id")
-            .eq("id", disaster_id)
-            .limit(1)
-            .async_execute()
-        )
+        disaster_resp = await db.table("disasters").select("location_id").eq("id", disaster_id).limit(1).async_execute()
         zone_lat, zone_lng = 0.0, 0.0
         if disaster_resp.data:
             d_loc_id = disaster_resp.data[0]["location_id"]
@@ -243,7 +252,7 @@ async def allocate_resources(
 
         # ── Fallback: LP solver ───────────────────────────────────────
         logger.info("Using LP solver fallback for allocation")
-        available: List[AvailableResource] = []
+        available: list[AvailableResource] = []
         for r in raw_resources:
             lat, lng = location_cache.get(r["location_id"], (0.0, 0.0))
             expiry = None
@@ -265,7 +274,7 @@ async def allocate_resources(
                 )
             )
 
-        needs: List[ResourceNeed] = []
+        needs: list[ResourceNeed] = []
         for req in required_resources:
             needs.append(
                 ResourceNeed(
@@ -286,15 +295,20 @@ async def allocate_resources(
 
         if result.allocations:
             allocated_ids = [alloc["resource_id"] for alloc in result.allocations]
-            now_iso = datetime.now(timezone.utc).isoformat()
-            await db.table("resources").update(
-                {
-                    "status": ResourceStatus.ALLOCATED.value,
-                    "disaster_id": disaster_id,
-                    "allocated_to": disaster_id,
-                    "updated_at": now_iso,
-                }
-            ).in_("id", allocated_ids).async_execute()
+            now_iso = datetime.now(UTC).isoformat()
+            await (
+                db.table("resources")
+                .update(
+                    {
+                        "status": ResourceStatus.ALLOCATED.value,
+                        "disaster_id": disaster_id,
+                        "allocated_to": disaster_id,
+                        "updated_at": now_iso,
+                    }
+                )
+                .in_("id", allocated_ids)
+                .async_execute()
+            )
 
         breakdown = OptimizationScoreBreakdown(
             coverage_pct=result.coverage_pct,
@@ -322,8 +336,8 @@ async def _allocate_with_gnn(
     *,
     gat: GATAllocator,
     disaster_id: str,
-    raw_resources: List[Dict[str, Any]],
-    required_resources: List[Dict[str, Any]],
+    raw_resources: list[dict[str, Any]],
+    required_resources: list[dict[str, Any]],
     location_cache: dict,
     zone_lat: float,
     zone_lng: float,
@@ -333,13 +347,12 @@ async def _allocate_with_gnn(
     Run the GAT model on a bipartite graph built from victim requests and
     NGO/resource data, apply Hungarian matching, and return the allocation.
     """
-    import torch
     from app.services.distance import haversine
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # ── Build victim nodes from required_resources ────────────────────
-    victims: List[VictimNode] = []
+    victims: list[VictimNode] = []
     for i, req in enumerate(required_resources):
         victims.append(
             VictimNode(
@@ -355,7 +368,7 @@ async def _allocate_with_gnn(
 
     # ── Build NGO nodes from available resources ─────────────────────
     # Group resources by location to form NGO nodes
-    ngo_map: Dict[str, Dict[str, Any]] = {}
+    ngo_map: dict[str, dict[str, Any]] = {}
     for r in raw_resources:
         loc_id = r["location_id"]
         if loc_id not in ngo_map:
@@ -372,10 +385,10 @@ async def _allocate_with_gnn(
         ngo_map[loc_id]["resource_ids"].append(r["id"])
         ngo_map[loc_id]["total_quantity"] += r.get("quantity", 0)
 
-    ngos: List[NgoNode] = []
-    ngo_resource_map: List[Dict[str, Any]] = []  # parallel list for look-up
+    ngos: list[NgoNode] = []
+    ngo_resource_map: list[dict[str, Any]] = []  # parallel list for look-up
     for loc_id, info in ngo_map.items():
-        n_resources = len(info["resource_ids"])
+        len(info["resource_ids"])
         ngos.append(
             NgoNode(
                 id=info["id"],
@@ -394,7 +407,10 @@ async def _allocate_with_gnn(
             disaster_id=disaster_id,
             allocations=[],
             optimization_score=0.0,
-            unmet_needs=[{"type": r.get("type"), "quantity": r.get("quantity"), "urgency": r.get("priority", 5)} for r in required_resources],
+            unmet_needs=[
+                {"type": r.get("type"), "quantity": r.get("quantity"), "urgency": r.get("priority", 5)}
+                for r in required_resources
+            ],
             score_breakdown=OptimizationScoreBreakdown(
                 coverage_pct=0.0,
                 unmet_needs=[],
@@ -411,7 +427,7 @@ async def _allocate_with_gnn(
     assignments = hungarian_assignment(graph, edge_probs)
 
     # ── Build allocation results with SHAP explanations ──────────────
-    allocations: List[Dict[str, Any]] = []
+    allocations: list[dict[str, Any]] = []
     met_indices: set = set()
     total_dist = 0.0
 
@@ -440,39 +456,48 @@ async def _allocate_with_gnn(
         # SHAP explanations (top 3)
         explanations = explain_assignment(gat, graph, victim_idx, ngo_idx, top_k=3)
 
-        allocations.append({
-            "resource_id": best_rid,
-            "type": req_type,
-            "quantity": req.get("quantity", 0),
-            "location": ngo_info["id"],
-            "distance_km": round(dist_km, 2),
-            "assignment_probability": round(prob, 4),
-            "explanations": explanations,
-        })
+        allocations.append(
+            {
+                "resource_id": best_rid,
+                "type": req_type,
+                "quantity": req.get("quantity", 0),
+                "location": ngo_info["id"],
+                "distance_km": round(dist_km, 2),
+                "assignment_probability": round(prob, 4),
+                "explanations": explanations,
+            }
+        )
 
     # ── Persist allocation decisions ──────────────────────────────────
     if allocations:
         allocated_ids = [a["resource_id"] for a in allocations if a["resource_id"]]
         if allocated_ids:
             now_iso = now.isoformat()
-            await db.table("resources").update(
-                {
-                    "status": ResourceStatus.ALLOCATED.value,
-                    "disaster_id": disaster_id,
-                    "allocated_to": disaster_id,
-                    "updated_at": now_iso,
-                }
-            ).in_("id", allocated_ids).async_execute()
+            await (
+                db.table("resources")
+                .update(
+                    {
+                        "status": ResourceStatus.ALLOCATED.value,
+                        "disaster_id": disaster_id,
+                        "allocated_to": disaster_id,
+                        "updated_at": now_iso,
+                    }
+                )
+                .in_("id", allocated_ids)
+                .async_execute()
+            )
 
     # ── Compute unmet needs ──────────────────────────────────────────
     unmet = []
     for i, req in enumerate(required_resources):
         if i not in met_indices:
-            unmet.append({
-                "type": req.get("type", "Other"),
-                "quantity": req.get("quantity", 0),
-                "urgency": req.get("priority", 5),
-            })
+            unmet.append(
+                {
+                    "type": req.get("type", "Other"),
+                    "quantity": req.get("quantity", 0),
+                    "urgency": req.get("priority", 5),
+                }
+            )
 
     n_total = len(required_resources)
     coverage_pct = round(len(met_indices) / n_total * 100 if n_total else 0, 2)
@@ -502,21 +527,23 @@ async def deallocate_resource(
     try:
         response = (
             await db.table("resources")
-            .update({
-                'status': ResourceStatus.AVAILABLE.value,
-                'disaster_id': None,
-                'allocated_to': None,
-                'updated_at': datetime.now(timezone.utc).isoformat()
-            })
-            .eq('id', resource_id)
+            .update(
+                {
+                    "status": ResourceStatus.AVAILABLE.value,
+                    "disaster_id": None,
+                    "allocated_to": None,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", resource_id)
             .async_execute()
         )
-        
+
         if not response.data:
             raise HTTPException(status_code=404, detail="Resource not found")
-        
+
         return {"message": "Resource deallocated successfully"}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -538,7 +565,7 @@ async def get_resource_forecast(
         if resource_type:
             query = query.eq("resource_type", resource_type)
         # Pull last 30 days of data
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         query = query.gte("timestamp", cutoff).order("timestamp", desc=False)
         resp = await query.async_execute()
         rows = resp.data or []
@@ -578,3 +605,60 @@ async def get_resource_forecast(
             status_code=500,
             detail=f"Forecast generation failed: {str(e)}",
         )
+
+
+@router.get("/forecast/backtest")
+async def backtest_resource_forecast(
+    resource_type: str | None = None,
+    lookback_days: int = 30,
+    horizon_hours: int = 24,
+    min_train_points: int = 12,
+    _user: dict = Depends(require_role("admin", "ngo")),
+):
+    """Backtest forecasting quality on recent historical consumption data."""
+    try:
+        query = db.table("resource_consumption_log").select("*")
+        if resource_type:
+            query = query.eq("resource_type", resource_type)
+
+        cutoff = (datetime.now(UTC) - timedelta(days=lookback_days)).isoformat()
+        query = query.gte("timestamp", cutoff).order("timestamp", desc=False)
+        resp = await query.async_execute()
+        rows = resp.data or []
+
+        records = [
+            ConsumptionRecord(
+                resource_type=r["resource_type"],
+                timestamp=datetime.fromisoformat(r["timestamp"]),
+                quantity_consumed=r.get("quantity_consumed", 0),
+                quantity_available=r.get("quantity_available", 0),
+            )
+            for r in rows
+        ]
+
+        report = backtest_forecast(
+            records,
+            horizon_hours=horizon_hours,
+            min_train_points=min_train_points,
+        )
+        return {
+            "generated_at": report.generated_at.isoformat(),
+            "lookback_days": lookback_days,
+            "horizon_hours": horizon_hours,
+            "method": report.method,
+            "lookback_points": report.lookback_points,
+            "items": [
+                {
+                    "resource_type": it.resource_type,
+                    "samples": it.samples,
+                    "mae_shortfall": it.mae_shortfall,
+                    "rmse_shortfall": it.rmse_shortfall,
+                    "mape_shortfall": it.mape_shortfall,
+                    "directional_accuracy": it.directional_accuracy,
+                }
+                for it in report.items
+            ],
+            "notes": report.notes,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Forecast backtest failed: {str(e)}")

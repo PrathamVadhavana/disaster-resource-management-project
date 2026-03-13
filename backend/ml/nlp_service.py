@@ -10,13 +10,14 @@ The module lazy-loads the fine-tuned model on first call so it does NOT block
 application startup when the model files are missing (falls back gracefully to
 the existing rule-based NLP service).
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -45,6 +46,7 @@ _embedder_load_attempted = False
 # Model loading helpers
 # ---------------------------------------------------------------------------
 
+
 def _ensure_model() -> bool:
     """Load the fine-tuned DistilBERT model + tokenizer (once).
 
@@ -67,15 +69,13 @@ def _ensure_model() -> bool:
         )
     except ImportError:
         logger.warning(
-            "torch / transformers not installed – "
-            "DistilBERT NLP service unavailable (falling back to rule-based)."
+            "torch / transformers not installed – DistilBERT NLP service unavailable (falling back to rule-based)."
         )
         return False
 
     if not _MODEL_DIR.exists():
         logger.warning(
-            "Fine-tuned model not found at %s – "
-            "run `python -m ml.train_nlp` first. Falling back to rule-based.",
+            "Fine-tuned model not found at %s – run `python -m ml.train_nlp` first. Falling back to rule-based.",
             _MODEL_DIR,
         )
         return False
@@ -94,6 +94,10 @@ def _ensure_model() -> bool:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _model.to(device)
         logger.info("DistilBERT crisis model loaded on %s", device)
+        logger.warning(
+            "DistilBERT crisis model loaded — NOTE: trained on synthetic data (1 epoch, 100%% accuracy). "
+            "Predictions may not generalize to real victim requests. Retrain on CrisisNLP for production use."
+        )
         return True
     except Exception as exc:
         logger.error("Failed to load DistilBERT model: %s", exc)
@@ -124,10 +128,7 @@ def _ensure_embedder() -> bool:
         logger.info("Sentence-transformer loaded for duplicate detection")
         return True
     except ImportError:
-        logger.warning(
-            "sentence-transformers not installed – "
-            "duplicate detection will use TF-IDF cosine similarity."
-        )
+        logger.warning("sentence-transformers not installed – duplicate detection will use TF-IDF cosine similarity.")
         return False
     except Exception as exc:
         logger.error("Failed to load sentence-transformer: %s", exc)
@@ -137,6 +138,7 @@ def _ensure_embedder() -> bool:
 # ---------------------------------------------------------------------------
 # 1. predict_priority
 # ---------------------------------------------------------------------------
+
 
 def predict_priority(description: str) -> dict[str, Any]:
     """Predict urgency class for a free-text disaster request.
@@ -189,10 +191,12 @@ def _predict_with_distilbert(text: str) -> dict[str, Any]:
     confidence = float(probs[pred_id])
     predicted_label = _label_map.get(pred_id, "medium")
 
-    probabilities = {
-        _label_map.get(i, f"class_{i}"): round(float(probs[i]), 4)
-        for i in range(len(probs))
-    }
+    # Temper overconfident predictions (model trained on synthetic data)
+    if confidence > 0.95:
+        confidence = 0.80 + (confidence - 0.95) * 2.0  # Map 0.95-1.0 → 0.80-0.90
+        logger.debug("Tempered overconfident NLP prediction: %s (%.2f)", predicted_label, confidence)
+
+    probabilities = {_label_map.get(i, f"class_{i}"): round(float(probs[i]), 4) for i in range(len(probs))}
 
     return {
         "predicted_priority": predicted_label,
@@ -205,8 +209,8 @@ def _predict_with_distilbert(text: str) -> dict[str, Any]:
 def _predict_rule_based(text: str) -> dict[str, Any]:
     """Lightweight rule-based fallback using the existing keyword banks."""
     from app.services.nlp_service import (
-        extract_urgency_signals,
         escalate_priority,
+        extract_urgency_signals,
     )
 
     signals = extract_urgency_signals(text)
@@ -345,6 +349,7 @@ def extract_needs(description: str) -> list[dict[str, Any]]:
 # 3. find_semantic_duplicates
 # ---------------------------------------------------------------------------
 
+
 def find_semantic_duplicates(
     new_desc: str,
     existing_descs: list[str],
@@ -447,7 +452,8 @@ def _duplicates_with_tfidf(
 # Convenience: combined analysis for the endpoint
 # ---------------------------------------------------------------------------
 
-def analyze_request(description: str, existing_descs: Optional[list[str]] = None) -> dict[str, Any]:
+
+def analyze_request(description: str, existing_descs: list[str] | None = None) -> dict[str, Any]:
     """Run all three NLP analyses in one call.
 
     Returns

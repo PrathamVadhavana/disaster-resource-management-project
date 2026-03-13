@@ -10,11 +10,10 @@ Usage:
     python -m scripts.generate_training_data
 """
 
-import os
-import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
 SEED = 42
 np.random.seed(SEED)
@@ -27,17 +26,36 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 
 DISASTER_TYPES = [
-    "earthquake", "flood", "hurricane", "tornado",
-    "wildfire", "tsunami", "drought", "landslide", "volcano",
+    "earthquake",
+    "flood",
+    "hurricane",
+    "tornado",
+    "wildfire",
+    "tsunami",
+    "drought",
+    "landslide",
+    "volcano",
 ]
 
 SEVERITY_MAP = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 COUNTRY_GDP_PER_CAPITA = {
-    "USA": 63000, "India": 2100, "Japan": 40000, "Philippines": 3500,
-    "Brazil": 8700, "Indonesia": 4300, "China": 12500, "Mexico": 10000,
-    "Bangladesh": 2500, "Haiti": 1400, "Nepal": 1200, "Australia": 55000,
-    "Chile": 15000, "Turkey": 9600, "Pakistan": 1500, "Nigeria": 2100,
+    "USA": 63000,
+    "India": 2100,
+    "Japan": 40000,
+    "Philippines": 3500,
+    "Brazil": 8700,
+    "Indonesia": 4300,
+    "China": 12500,
+    "Mexico": 10000,
+    "Bangladesh": 2500,
+    "Haiti": 1400,
+    "Nepal": 1200,
+    "Australia": 55000,
+    "Chile": 15000,
+    "Turkey": 9600,
+    "Pakistan": 1500,
+    "Nigeria": 2100,
 }
 
 COUNTRIES = list(COUNTRY_GDP_PER_CAPITA.keys())
@@ -117,9 +135,15 @@ def _severity_label(row) -> str:
     score += max(0, (1013 - row["pressure"]) / 130) * 25
     # Disaster type multiplier
     dtype_mult = {
-        "hurricane": 1.3, "tornado": 1.2, "tsunami": 1.25,
-        "earthquake": 1.15, "wildfire": 1.1, "volcano": 1.2,
-        "flood": 1.0, "landslide": 1.0, "drought": 0.85,
+        "hurricane": 1.3,
+        "tornado": 1.2,
+        "tsunami": 1.25,
+        "earthquake": 1.15,
+        "wildfire": 1.1,
+        "volcano": 1.2,
+        "flood": 1.0,
+        "landslide": 1.0,
+        "drought": 0.85,
     }
     score *= dtype_mult.get(row["disaster_type"], 1.0)
     # Add noise
@@ -142,10 +166,11 @@ def generate_emdat_data(n_events: int = 5000) -> pd.DataFrame:
     for dtype in DISASTER_TYPES:
         # Weighted count — some disaster types more common
         weight = {"flood": 2.0, "earthquake": 1.5, "hurricane": 1.2}.get(dtype, 1.0)
-        n = int(n_events * weight / sum(
-            {"flood": 2.0, "earthquake": 1.5, "hurricane": 1.2}.get(d, 1.0)
-            for d in DISASTER_TYPES
-        ))
+        n = int(
+            n_events
+            * weight
+            / sum({"flood": 2.0, "earthquake": 1.5, "hurricane": 1.2}.get(d, 1.0) for d in DISASTER_TYPES)
+        )
         weather = _weather_for_disaster(dtype, n)
         countries = np.random.choice(COUNTRIES, n)
         lats = np.random.uniform(-60, 70, n)
@@ -154,18 +179,20 @@ def generate_emdat_data(n_events: int = 5000) -> pd.DataFrame:
         months = np.random.randint(1, 13, n)
 
         for i in range(n):
-            rows.append({
-                "disaster_type": dtype,
-                "temperature": round(weather["temperature"][i], 1),
-                "wind_speed": round(weather["wind_speed"][i], 1),
-                "humidity": round(weather["humidity"][i], 1),
-                "pressure": round(weather["pressure"][i], 1),
-                "country": countries[i],
-                "latitude": round(lats[i], 4),
-                "longitude": round(lons[i], 4),
-                "year": years[i],
-                "month": months[i],
-            })
+            rows.append(
+                {
+                    "disaster_type": dtype,
+                    "temperature": round(weather["temperature"][i], 1),
+                    "wind_speed": round(weather["wind_speed"][i], 1),
+                    "humidity": round(weather["humidity"][i], 1),
+                    "pressure": round(weather["pressure"][i], 1),
+                    "country": countries[i],
+                    "latitude": round(lats[i], 4),
+                    "longitude": round(lons[i], 4),
+                    "year": years[i],
+                    "month": months[i],
+                }
+            )
 
     df = pd.DataFrame(rows)
     df["severity"] = df.apply(_severity_label, axis=1)
@@ -193,32 +220,38 @@ def generate_spread_data(n: int = 3000) -> pd.DataFrame:
 
         # Terrain multiplier for spread
         terrain_mult = {
-            "flat": 1.2, "hilly": 0.9, "mountainous": 0.7,
-            "forested": 1.5, "urban": 0.6, "coastal": 1.0,
+            "flat": 1.2,
+            "hilly": 0.9,
+            "mountainous": 0.7,
+            "forested": 1.5,
+            "urban": 0.6,
+            "coastal": 1.0,
         }[terrain]
 
         # Realistic spread formula with noise
         base_spread = current_area * (1 + (wind_speed * 0.02 * terrain_mult))
         if dtype == "wildfire":
-            base_spread *= (1 + vegetation_density * 0.5)
+            base_spread *= 1 + vegetation_density * 0.5
             base_spread *= max(0.5, 1 - elevation / 5000)
         else:  # flood
-            base_spread *= (1 + 0.3 * (1 - elevation / 3000))
+            base_spread *= 1 + 0.3 * (1 - elevation / 3000)
 
         noise = np.random.normal(1.0, 0.15)
         predicted_area = max(current_area, base_spread * noise)
 
-        rows.append({
-            "disaster_type": dtype,
-            "current_area_km2": round(current_area, 2),
-            "wind_speed": round(wind_speed, 1),
-            "wind_direction": round(wind_direction, 1),
-            "terrain_type": terrain,
-            "elevation_m": round(elevation, 1),
-            "vegetation_density": round(vegetation_density, 3),
-            "days_active": days_active,
-            "predicted_area_km2": round(predicted_area, 2),
-        })
+        rows.append(
+            {
+                "disaster_type": dtype,
+                "current_area_km2": round(current_area, 2),
+                "wind_speed": round(wind_speed, 1),
+                "wind_direction": round(wind_direction, 1),
+                "terrain_type": terrain,
+                "elevation_m": round(elevation, 1),
+                "vegetation_density": round(vegetation_density, 3),
+                "days_active": days_active,
+                "predicted_area_km2": round(predicted_area, 2),
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -226,6 +259,7 @@ def generate_spread_data(n: int = 3000) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 3. Impact dataset  (casualties + economic damage)
 # ---------------------------------------------------------------------------
+
 
 def generate_impact_data(n: int = 4000) -> pd.DataFrame:
     rows = []
@@ -239,25 +273,27 @@ def generate_impact_data(n: int = 4000) -> pd.DataFrame:
 
         # Casualty model
         base_casualties = affected_pop * severity_score * 0.005
-        base_casualties *= (1.5 - infra_density * 0.8)  # better infra = fewer deaths
+        base_casualties *= 1.5 - infra_density * 0.8  # better infra = fewer deaths
         base_casualties *= max(0.3, 1 - gdp_pc / 80000)  # higher GDP = fewer deaths
         casualties = max(0, int(base_casualties * np.random.lognormal(0, 0.6)))
 
         # Economic damage (millions USD)
         base_damage = affected_pop * gdp_pc * severity_score * 0.001 / 1_000_000
-        base_damage *= (0.5 + infra_density)  # dense areas lose more
+        base_damage *= 0.5 + infra_density  # dense areas lose more
         economic_damage = max(0, base_damage * np.random.lognormal(0, 0.5))
 
-        rows.append({
-            "disaster_type": dtype,
-            "severity_score": round(severity_score, 3),
-            "affected_population": affected_pop,
-            "country": country,
-            "gdp_per_capita": gdp_pc,
-            "infrastructure_density": round(infra_density, 3),
-            "casualties": casualties,
-            "economic_damage_million_usd": round(economic_damage, 2),
-        })
+        rows.append(
+            {
+                "disaster_type": dtype,
+                "severity_score": round(severity_score, 3),
+                "affected_population": affected_pop,
+                "country": country,
+                "gdp_per_capita": gdp_pc,
+                "infrastructure_density": round(infra_density, 3),
+                "casualties": casualties,
+                "economic_damage_million_usd": round(economic_damage, 2),
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -265,6 +301,7 @@ def generate_impact_data(n: int = 4000) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     print("Generating synthetic training data …")

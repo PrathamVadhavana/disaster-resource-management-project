@@ -9,21 +9,23 @@ Endpoints for NGOs to:
 - Audit trail via operational_pulse
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+import math
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime, timezone
-import math
 
-from app.database import db, db_admin
+from app.database import db_admin
 from app.dependencies import require_ngo, require_verified_ngo
 from app.services.notification_service import (
-    notify_request_status_change,
-    notify_all_admins,
-    notify_user,
     generate_delivery_code,
+    notify_all_admins,
+    notify_request_status_change,
+    notify_user,
 )
+from app.services.unified_resource_service import unified_resource_service
+
 
 router = APIRouter()
 security = HTTPBearer()
@@ -65,50 +67,50 @@ for i, s in enumerate(STATUS_ORDER):
 
 
 class ClaimRequestBody(BaseModel):
-    estimated_delivery: Optional[str] = Field(
-        None, description="ISO date for estimated delivery"
-    )
-    notes: Optional[str] = Field(
-        None, description="Internal notes regarding fulfillment"
-    )
+    estimated_delivery: str | None = Field(None, description="ISO date for estimated delivery")
+    notes: str | None = Field(None, description="Internal notes regarding fulfillment")
 
 
 class UpdateFulfillmentBody(BaseModel):
     status: str = Field(..., description="'in_progress' or 'completed'")
-    proof_url: Optional[str] = Field(
-        None, description="URL to delivery proof (image/document)"
-    )
-    notes: Optional[str] = Field(None, description="Update notes")
+    proof_url: str | None = Field(None, description="URL to delivery proof (image/document)")
+    notes: str | None = Field(None, description="Update notes")
 
 
 class AvailabilitySubmission(BaseModel):
     available_quantity: int = Field(..., ge=1)
     estimated_delivery_time: str = Field(..., description="ISO datetime for ETA")
-    assigned_team: Optional[str] = None
-    vehicle_type: Optional[str] = None
-    ngo_latitude: Optional[float] = None
-    ngo_longitude: Optional[float] = None
-    notes: Optional[str] = None
+    assigned_team: str | None = None
+    vehicle_type: str | None = None
+    ngo_latitude: float | None = None
+    ngo_longitude: float | None = None
+    notes: str | None = None
 
 
 class DeliveryStatusUpdate(BaseModel):
     new_status: str = Field(..., description="Next status in strict flow")
-    proof_url: Optional[str] = None
-    notes: Optional[str] = None
-    delivery_latitude: Optional[float] = None
-    delivery_longitude: Optional[float] = None
+    proof_url: str | None = None
+    notes: str | None = None
+    delivery_latitude: float | None = None
+    delivery_longitude: float | None = None
 
 
 class InventoryItem(BaseModel):
-    category: str = Field(..., description="Food, Water, Medical, Shelter, Clothing")
+    category: str = Field(..., description="Food, Water, Medical, Shelter, Clothing, Equipment, Other")
     resource_type: str
     title: str
-    description: Optional[str] = None
+    description: str | None = None
     total_quantity: int = Field(..., ge=1)
     unit: str = "units"
     address_text: str = ""
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    latitude: float | None = None
+    longitude: float | None = None
+    sku: str | None = None
+    min_stock_level: int = 5
+    reorder_point: int = 10
+    item_condition: str = "new"
+    storage_requirements: dict | None = None
+    internal_location: str | None = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -123,33 +125,39 @@ async def _log_pulse(
 ):
     """Write to operational_pulse for audit trail."""
     try:
-        await db_admin.table("operational_pulse").insert(
-            {
-                "actor_id": actor_id,
-                "target_id": target_id,
-                "action_type": action_type,
-                "description": description,
-                "metadata": metadata or {},
-            }
-        ).async_execute()
+        await (
+            db_admin.table("operational_pulse")
+            .insert(
+                {
+                    "actor_id": actor_id,
+                    "target_id": target_id,
+                    "action_type": action_type,
+                    "description": description,
+                    "metadata": metadata or {},
+                }
+            )
+            .async_execute()
+        )
     except Exception as e:
         print(f"Pulse log error: {e}")
 
 
-async def _send_notification(
-    user_id: str, title: str, message: str, priority: str = "medium", data: dict = None
-):
+async def _send_notification(user_id: str, title: str, message: str, priority: str = "medium", data: dict = None):
     """Insert into the notifications table."""
     try:
-        await db_admin.table("notifications").insert(
-            {
-                "user_id": user_id,
-                "title": title,
-                "message": message,
-                "priority": priority,
-                "data": data or {},
-            }
-        ).async_execute()
+        await (
+            db_admin.table("notifications")
+            .insert(
+                {
+                    "user_id": user_id,
+                    "title": title,
+                    "message": message,
+                    "priority": priority,
+                    "data": data or {},
+                }
+            )
+            .async_execute()
+        )
     except Exception as e:
         print(f"Notification insert error: {e}")
 
@@ -160,10 +168,7 @@ async def _enrich_with_victim(requests_list: list) -> list:
     user_map = {}
     if victim_ids:
         users_resp = (
-            await db_admin.table("users")
-            .select("id, full_name, email, phone")
-            .in_("id", victim_ids)
-            .async_execute()
+            await db_admin.table("users").select("id, full_name, email, phone").in_("id", victim_ids).async_execute()
         )
         for u in users_resp.data or []:
             user_map[u["id"]] = u
@@ -183,19 +188,11 @@ async def _enrich_with_victim(requests_list: list) -> list:
 @router.get("/requests/available")
 async def list_available_requests(
     ngo=Depends(require_ngo),
-    resource_type: Optional[str] = Query(None, description="Filter by resource type"),
-    priority: Optional[str] = Query(
-        None, description="Filter by priority: critical,high,medium,low"
-    ),
-    ngo_latitude: Optional[float] = Query(
-        None, description="NGO GPS latitude for distance"
-    ),
-    ngo_longitude: Optional[float] = Query(
-        None, description="NGO GPS longitude for distance"
-    ),
-    sort: Optional[str] = Query(
-        "priority", description="Sort: priority, distance, created_at"
-    ),
+    resource_type: str | None = Query(None, description="Filter by resource type"),
+    priority: str | None = Query(None, description="Filter by priority: critical,high,medium,low"),
+    ngo_latitude: float | None = Query(None, description="NGO GPS latitude for distance"),
+    ngo_longitude: float | None = Query(None, description="NGO GPS longitude for distance"),
+    sort: str | None = Query("priority", description="Sort: priority, distance, created_at"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -207,13 +204,7 @@ async def list_available_requests(
     # Resolve NGO GPS: prefer query params, fall back to stored metadata
     n_lat = ngo_latitude
     n_lon = ngo_longitude
-    ngo_user = (
-        await db_admin.table("users")
-        .select("metadata")
-        .eq("id", ngo_id)
-        .maybe_single()
-        .async_execute()
-    )
+    ngo_user = await db_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().async_execute()
     if n_lat is None or n_lon is None:
         if ngo_user.data and ngo_user.data.get("metadata"):
             n_lat = n_lat or ngo_user.data["metadata"].get("latitude")
@@ -225,9 +216,7 @@ async def list_available_requests(
             meta = (ngo_user.data or {}).get("metadata") or {}
             meta["latitude"] = ngo_latitude
             meta["longitude"] = ngo_longitude
-            await db_admin.table("users").update({"metadata": meta}).eq(
-                "id", ngo_id
-            ).async_execute()
+            await db_admin.table("users").update({"metadata": meta}).eq("id", ngo_id).async_execute()
         except Exception:
             pass
 
@@ -237,7 +226,6 @@ async def list_available_requests(
     # Both distance and priority need client-side sorting (priority because
     # alphabetical ordering puts "critical" after "medium"), so always fetch
     # all matching records and sort/paginate client-side.
-    needs_client_sort = True
 
     query = (
         db_admin.table("resource_requests")
@@ -253,11 +241,7 @@ async def list_available_requests(
     resp = await query.async_execute()
     # Show unassigned requests OR partially fulfilled ones (where donors have
     # contributed but an NGO hasn't claimed yet for delivery)
-    base_requests = [
-        r for r in (resp.data or [])
-        if not r.get("assigned_to")
-        or r.get("status") == "under_review"
-    ]
+    base_requests = [r for r in (resp.data or []) if not r.get("assigned_to") or r.get("status") == "under_review"]
     total_count = len(base_requests)
 
     requests = await _enrich_with_victim(base_requests)
@@ -266,9 +250,7 @@ async def list_available_requests(
     for r in requests:
         r["distance_km"] = None
         if n_lat and n_lon and r.get("latitude") and r.get("longitude"):
-            r["distance_km"] = round(
-                haversine_km(n_lat, n_lon, r["latitude"], r["longitude"]), 2
-            )
+            r["distance_km"] = round(haversine_km(n_lat, n_lon, r["latitude"], r["longitude"]), 2)
 
     # Batch check availability submissions (avoid N+1 queries)
     req_ids = [r["id"] for r in requests]
@@ -292,11 +274,7 @@ async def list_available_requests(
 
     # Sort and paginate client-side
     if sort == "distance" and n_lat and n_lon:
-        requests.sort(
-            key=lambda r: (
-                r["distance_km"] if r["distance_km"] is not None else float("inf")
-            )
-        )
+        requests.sort(key=lambda r: r["distance_km"] if r["distance_km"] is not None else float("inf"))
     else:
         # Sort by priority (critical first) then by created_at descending
         requests.sort(
@@ -324,13 +302,7 @@ async def submit_availability(
     ngo_id = str(ngo.get("id"))
 
     # Verify request exists and is approved
-    existing = (
-        await db_admin.table("resource_requests")
-        .select("*")
-        .eq("id", request_id)
-        .single()
-        .async_execute()
-    )
+    existing = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
 
@@ -362,12 +334,7 @@ async def submit_availability(
 
     # Compute distance
     distance_km = None
-    if (
-        body.ngo_latitude
-        and body.ngo_longitude
-        and existing.data.get("latitude")
-        and existing.data.get("longitude")
-    ):
+    if body.ngo_latitude and body.ngo_longitude and existing.data.get("latitude") and existing.data.get("longitude"):
         distance_km = round(
             haversine_km(
                 body.ngo_latitude,
@@ -408,57 +375,54 @@ async def submit_availability(
             "provider_role": "ngo",
             "donation_type": "resource",
             "amount": 0,
-            "resource_items": [{"resource_type": existing.data.get("resource_type", "Custom"), "quantity": body.available_quantity}],
+            "resource_items": [
+                {"resource_type": existing.data.get("resource_type", "Custom"), "quantity": body.available_quantity}
+            ],
             "status": "availability_submitted",
             "estimated_delivery_time": body.estimated_delivery_time,
             "distance_km": distance_km,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         fulfillment_entries.append(entry)
 
         # Calculate fulfillment percentage
         request_items = existing.data.get("items") or []
-        total_requested = sum(it.get("quantity", 1) for it in request_items) if request_items else existing.data.get("quantity", 1)
+        total_requested = (
+            sum(it.get("quantity", 1) for it in request_items) if request_items else existing.data.get("quantity", 1)
+        )
         total_fulfilled = sum(
-            ri.get("quantity", 0)
-            for fe in fulfillment_entries
-            for ri in (fe.get("resource_items") or [])
+            ri.get("quantity", 0) for fe in fulfillment_entries for ri in (fe.get("resource_items") or [])
         )
         fulfillment_pct = min(100, round((total_fulfilled / max(total_requested, 1)) * 100))
 
         new_status = "under_review" if fulfillment_pct < 100 else "availability_submitted"
-        await db_admin.table("resource_requests").update(
-            {
-                "status": new_status,
-                "fulfillment_entries": fulfillment_entries,
-                "fulfillment_pct": fulfillment_pct,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", request_id).async_execute()
+        await (
+            db_admin.table("resource_requests")
+            .update(
+                {
+                    "status": new_status,
+                    "fulfillment_entries": fulfillment_entries,
+                    "fulfillment_pct": fulfillment_pct,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", request_id)
+            .async_execute()
+        )
 
     # Update NGO user metadata with GPS
     if body.ngo_latitude and body.ngo_longitude:
         try:
-            current = (
-                await db_admin.table("users")
-                .select("metadata")
-                .eq("id", ngo_id)
-                .maybe_single()
-                .async_execute()
-            )
+            current = await db_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().async_execute()
             meta = (current.data or {}).get("metadata") or {}
             meta["latitude"] = body.ngo_latitude
             meta["longitude"] = body.ngo_longitude
-            await db_admin.table("users").update({"metadata": meta}).eq(
-                "id", ngo_id
-            ).async_execute()
+            await db_admin.table("users").update({"metadata": meta}).eq("id", ngo_id).async_execute()
         except Exception:
             pass
 
     # Notify admins
-    admin_users = (
-        await db_admin.table("users").select("id").eq("role", "admin").async_execute()
-    )
+    admin_users = await db_admin.table("users").select("id").eq("role", "admin").async_execute()
     for admin in admin_users.data or []:
         await _send_notification(
             user_id=admin["id"],
@@ -520,15 +484,16 @@ async def get_availability(
 
 
 @router.get("/requests/{request_id}/pool")
-async def get_request_pool_ngo(
-    request_id: str, ngo=Depends(require_ngo)
-):
+async def get_request_pool_ngo(request_id: str, ngo=Depends(require_ngo)):
     """View resource pool for a request — shows all NGO and donor contributors."""
     resp = (
         await db_admin.table("resource_requests")
         .select("id, items, quantity, resource_type, status, fulfillment_entries, fulfillment_pct")
         .eq("id", request_id)
-        .in_("status", ["approved", "assigned", "availability_submitted", "under_review", "in_progress", "delivered", "completed"])
+        .in_(
+            "status",
+            ["approved", "assigned", "availability_submitted", "under_review", "in_progress", "delivered", "completed"],
+        )
         .single()
         .async_execute()
     )
@@ -570,9 +535,7 @@ async def get_request_pool_ngo(
 @router.get("/requests/assigned")
 async def list_assigned_requests(
     ngo=Depends(require_ngo),
-    status: Optional[str] = Query(
-        None, description="Filter by status: assigned,in_progress,completed,delivered"
-    ),
+    status: str | None = Query(None, description="Filter by status: assigned,in_progress,completed,delivered"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -598,25 +561,14 @@ async def list_assigned_requests(
     requests = await _enrich_with_victim(base_requests)
 
     # Compute status counts
-    all_assigned = (
-        await db_admin.table("resource_requests")
-        .select("status")
-        .or_(or_filter)
-        .async_execute()
-    )
+    all_assigned = await db_admin.table("resource_requests").select("status").or_(or_filter).async_execute()
     status_counts = {}
     for r in all_assigned.data or []:
         s = r["status"]
         status_counts[s] = status_counts.get(s, 0) + 1
 
     # Enrich with distance and availability data
-    ngo_user = (
-        await db_admin.table("users")
-        .select("metadata")
-        .eq("id", ngo_id)
-        .maybe_single()
-        .async_execute()
-    )
+    ngo_user = await db_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().async_execute()
     ngo_lat = None
     ngo_lon = None
     if ngo_user.data and ngo_user.data.get("metadata"):
@@ -626,19 +578,27 @@ async def list_assigned_requests(
     for r in requests:
         r["distance_km"] = None
         if ngo_lat and ngo_lon and r.get("latitude") and r.get("longitude"):
-            r["distance_km"] = round(
-                haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"]), 2
-            )
+            r["distance_km"] = round(haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"]), 2)
 
         # Progress percentage
-        current_idx = (
-            STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 0
-        )
+        current_idx = STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 0
         assigned_idx = STATUS_ORDER.index("assigned")
         completed_idx = STATUS_ORDER.index("completed")
         total_steps = completed_idx - assigned_idx
         steps_done = max(0, current_idx - assigned_idx)
         r["progress_pct"] = min(100, round((steps_done / max(1, total_steps)) * 100))
+
+        # Compute this NGO's share of the request from fulfillment_entries (resource pooling)
+        fulfillment_entries = r.get("fulfillment_entries") or []
+        my_entries = [fe for fe in fulfillment_entries if fe.get("provider_id") == ngo_id]
+        my_quantity = sum(
+            ri.get("quantity", 0)
+            for fe in my_entries
+            for ri in (fe.get("resource_items") or [])
+        )
+        # If the NGO has a fulfillment entry but no resource_items recorded, fall back to full quantity
+        r["my_quantity"] = my_quantity if my_quantity > 0 else r.get("quantity", 0)
+        r["is_pooled"] = len(fulfillment_entries) > len(my_entries)  # other contributors exist
 
     return {
         "requests": requests,
@@ -659,20 +619,15 @@ async def claim_request(
     """Assign an available approved request to this NGO."""
     ngo_id = str(ngo.get("id"))
 
-    existing = (
-        await db_admin.table("resource_requests")
-        .select("*")
-        .eq("id", request_id)
-        .single()
-        .async_execute()
-    )
+    existing = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
 
     if existing.data.get("status") not in ("approved", "availability_submitted", "under_review"):
         raise HTTPException(
-            status_code=400, detail="Only 'approved', 'availability_submitted', or 'under_review' requests can be claimed"
+            status_code=400,
+            detail="Only 'approved', 'availability_submitted', or 'under_review' requests can be claimed",
         )
 
     # Block only if already assigned to a different NGO
@@ -684,17 +639,12 @@ async def claim_request(
         "status": "assigned",
         "assigned_to": ngo_id,
         "assigned_role": "ngo",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
     if body.estimated_delivery:
         updates["estimated_delivery"] = body.estimated_delivery
 
-    resp = (
-        await db_admin.table("resource_requests")
-        .update(updates)
-        .eq("id", request_id)
-        .async_execute()
-    )
+    resp = await db_admin.table("resource_requests").update(updates).eq("id", request_id).async_execute()
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to claim request")
@@ -722,13 +672,7 @@ async def update_delivery_status(
     """Update delivery status with strict flow enforcement."""
     ngo_id = str(ngo.get("id"))
 
-    existing = (
-        await db_admin.table("resource_requests")
-        .select("*")
-        .eq("id", request_id)
-        .single()
-        .async_execute()
-    )
+    existing = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -758,7 +702,7 @@ async def update_delivery_status(
 
     updates = {
         "status": body.new_status,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
     # Generate delivery confirmation code when status becomes "delivered"
@@ -767,12 +711,7 @@ async def update_delivery_status(
         delivery_code = generate_delivery_code()
         updates["delivery_confirmation_code"] = delivery_code
 
-    resp = (
-        await db_admin.table("resource_requests")
-        .update(updates)
-        .eq("id", request_id)
-        .async_execute()
-    )
+    resp = await db_admin.table("resource_requests").update(updates).eq("id", request_id).async_execute()
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update delivery status")
@@ -832,10 +771,7 @@ async def update_delivery_status(
     if body.new_status == "completed":
         try:
             donor_resp = (
-                await db_admin.table("donations")
-                .select("user_id")
-                .eq("request_id", request_id)
-                .async_execute()
+                await db_admin.table("donations").select("user_id").eq("request_id", request_id).async_execute()
             )
             for d in donor_resp.data or []:
                 await notify_user(
@@ -864,13 +800,7 @@ async def update_fulfillment_status(
     """Update fulfillment status (e.g., mark as in_progress or completed). Legacy endpoint."""
     ngo_id = str(ngo.get("id"))
 
-    existing = (
-        await db_admin.table("resource_requests")
-        .select("*")
-        .eq("id", request_id)
-        .single()
-        .async_execute()
-    )
+    existing = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
 
     if not existing.data:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -883,15 +813,10 @@ async def update_fulfillment_status(
 
     updates = {
         "status": body.status,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
-    resp = (
-        await db_admin.table("resource_requests")
-        .update(updates)
-        .eq("id", request_id)
-        .async_execute()
-    )
+    resp = await db_admin.table("resource_requests").update(updates).eq("id", request_id).async_execute()
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update request status")
@@ -960,13 +885,7 @@ async def get_ngo_dashboard_stats(
     )
 
     # NGO coordinates for distance calculation
-    ngo_user = (
-        await db_admin.table("users")
-        .select("metadata")
-        .eq("id", ngo_id)
-        .maybe_single()
-        .async_execute()
-    )
+    ngo_user = await db_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().async_execute()
     ngo_lat = None
     ngo_lon = None
     if ngo_user.data and ngo_user.data.get("metadata"):
@@ -976,9 +895,7 @@ async def get_ngo_dashboard_stats(
     total_distance = 0.0
     for r in assigned_requests:
         if ngo_lat and ngo_lon and r.get("latitude") and r.get("longitude"):
-            total_distance += haversine_km(
-                ngo_lat, ngo_lon, r["latitude"], r["longitude"]
-            )
+            total_distance += haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"])
 
     # Compute average response time (approval to assignment)
     response_times = []
@@ -993,11 +910,7 @@ async def get_ngo_dashboard_stats(
             except Exception:
                 pass
 
-    avg_response_time = (
-        round(sum(response_times) / max(1, len(response_times)), 1)
-        if response_times
-        else 0
-    )
+    avg_response_time = round(sum(response_times) / max(1, len(response_times)), 1) if response_times else 0
 
     # Status counts
     status_counts = {}
@@ -1018,8 +931,7 @@ async def get_ngo_dashboard_stats(
         "in_progress": status_counts.get("in_progress", 0),
         "delivered": status_counts.get("delivered", 0),
         "completed": status_counts.get("completed", 0),
-        "active_deliveries": status_counts.get("in_progress", 0)
-        + status_counts.get("assigned", 0),
+        "active_deliveries": status_counts.get("in_progress", 0) + status_counts.get("assigned", 0),
         "urgent_requests": urgent_count,
         "avg_response_time_hours": avg_response_time,
         "total_distance_km": round(total_distance, 1),
@@ -1036,8 +948,8 @@ async def get_ngo_dashboard_stats(
 @router.get("/inventory")
 async def get_ngo_inventory(
     ngo=Depends(require_ngo),
-    category: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
+    category: str | None = Query(None),
+    status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -1065,25 +977,18 @@ async def get_ngo_inventory(
         "total_items": resp.count or 0,
         "total_quantity": sum(i.get("total_quantity", 0) for i in items),
         "reserved_quantity": sum(i.get("claimed_quantity", 0) for i in items),
-        "available_quantity": sum(
-            (i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) for i in items
-        ),
+        "available_quantity": sum((i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) for i in items),
         "low_stock_count": sum(
             1
             for i in items
-            if (i.get("total_quantity", 0) - i.get("claimed_quantity", 0))
-            < max(1, i.get("total_quantity", 0) * 0.2)
+            if (i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) < max(1, i.get("total_quantity", 0) * 0.2)
         ),
     }
 
     # Enrich each item with available quantity
     for i in items:
-        i["available_quantity"] = i.get("total_quantity", 0) - i.get(
-            "claimed_quantity", 0
-        )
-        i["is_low_stock"] = i["available_quantity"] < max(
-            1, i.get("total_quantity", 0) * 0.2
-        )
+        i["available_quantity"] = i.get("total_quantity", 0) - i.get("claimed_quantity", 0)
+        i["is_low_stock"] = i["available_quantity"] < max(1, i.get("total_quantity", 0) * 0.2)
 
     return {"items": items, "summary": summary, "total": resp.count or 0}
 
@@ -1096,41 +1001,39 @@ async def add_inventory_item(
     """Add a resource to this NGO's inventory."""
     ngo_id = str(ngo.get("id"))
 
-    insert_data = {
-        "provider_id": ngo_id,
-        "provider_role": "ngo",
-        "category": body.category,
-        "resource_type": body.resource_type,
-        "title": body.title,
-        "description": body.description,
-        "total_quantity": body.total_quantity,
-        "claimed_quantity": 0,
-        "unit": body.unit,
-        "address_text": body.address_text or "",
-        "status": "available",
-        "is_active": True,
-    }
-
-    resp = await db_admin.table("available_resources").insert(insert_data).async_execute()
-
-    if not resp.data:
-        raise HTTPException(status_code=500, detail="Failed to add inventory item")
+    item = await unified_resource_service.create_inventory_item(
+        provider_id=ngo_id,
+        category=body.category,
+        resource_type=body.resource_type,
+        title=body.title,
+        description=body.description or "",
+        total_quantity=body.total_quantity,
+        unit=body.unit,
+        address_text=body.address_text or "",
+        user_role="ngo",
+        sku=body.sku,
+        min_stock_level=body.min_stock_level,
+        reorder_point=body.reorder_point,
+        item_condition=body.item_condition,
+        storage_requirements=body.storage_requirements,
+        internal_location=body.internal_location,
+    )
 
     await _log_pulse(
         ngo_id,
-        resp.data[0]["resource_id"],
+        item["resource_id"],
         "inventory_added",
         f"Added {body.total_quantity} {body.unit} of {body.title}",
     )
 
-    return resp.data[0]
+    return item
 
 
 @router.patch("/inventory/{resource_id}")
 async def update_inventory_item(
     resource_id: str,
-    total_quantity: Optional[int] = Query(None, ge=0),
-    status: Optional[str] = Query(None),
+    total_quantity: int | None = Query(None, ge=0),
+    status: str | None = Query(None),
     ngo=Depends(require_verified_ngo),
 ):
     """Update an inventory item (quantity or status)."""
@@ -1148,18 +1051,13 @@ async def update_inventory_item(
     if not existing.data:
         raise HTTPException(status_code=404, detail="Inventory item not found")
 
-    updates = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    updates = {"updated_at": datetime.now(UTC).isoformat()}
     if total_quantity is not None:
         updates["total_quantity"] = total_quantity
     if status:
         updates["status"] = status
 
-    resp = (
-        await db_admin.table("available_resources")
-        .update(updates)
-        .eq("resource_id", resource_id)
-        .async_execute()
-    )
+    resp = await db_admin.table("available_resources").update(updates).eq("resource_id", resource_id).async_execute()
 
     return resp.data[0] if resp.data else {"message": "Updated"}
 
@@ -1170,7 +1068,7 @@ async def update_inventory_item(
 @router.get("/audit-log")
 async def get_audit_log(
     ngo=Depends(require_ngo),
-    action_type: Optional[str] = Query(None),
+    action_type: str | None = Query(None),
     limit: int = Query(30, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -1204,11 +1102,7 @@ async def get_ngo_notifications(
     ngo_id = str(ngo.get("id"))
 
     query = (
-        db_admin.table("notifications")
-        .select("*")
-        .eq("user_id", ngo_id)
-        .order("created_at", desc=True)
-        .limit(limit)
+        db_admin.table("notifications").select("*").eq("user_id", ngo_id).order("created_at", desc=True).limit(limit)
     )
     if unread_only:
         query = query.eq("read", False)
@@ -1233,24 +1127,36 @@ async def get_ngo_notifications(
 @router.post("/notifications/mark-read")
 async def mark_notifications_read(
     ngo=Depends(require_ngo),
-    notification_ids: Optional[List[str]] = None,
+    notification_ids: list[str] | None = None,
 ):
     """Mark notifications as read."""
     ngo_id = str(ngo.get("id"))
 
     if notification_ids:
-        await db_admin.table("notifications").update(
-            {
-                "read": True,
-                "read_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).in_("id", notification_ids).eq("user_id", ngo_id).async_execute()
+        await (
+            db_admin.table("notifications")
+            .update(
+                {
+                    "read": True,
+                    "read_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .in_("id", notification_ids)
+            .eq("user_id", ngo_id)
+            .async_execute()
+        )
     else:
-        await db_admin.table("notifications").update(
-            {
-                "read": True,
-                "read_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("user_id", ngo_id).eq("read", False).async_execute()
+        await (
+            db_admin.table("notifications")
+            .update(
+                {
+                    "read": True,
+                    "read_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("user_id", ngo_id)
+            .eq("read", False)
+            .async_execute()
+        )
 
     return {"message": "Notifications marked as read"}

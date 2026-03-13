@@ -1,16 +1,18 @@
 import asyncio
 import os
 import sys
-from sqlalchemy import text
+
 from dotenv import load_dotenv
+from sqlalchemy import text
 
 # Add parent directory to sys.path to allow imports from app
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Load .env explicitly
-load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), '../.env')))
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "../.env")))
 
 from app.database import engine
+
 
 async def run_sql_file(filename: str):
     if not engine:
@@ -18,14 +20,14 @@ async def run_sql_file(filename: str):
         return
 
     # Adjust path if needed
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
-    sql_path = os.path.join(base_dir, 'database', filename)
-    
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    sql_path = os.path.join(base_dir, "database", filename)
+
     if not os.path.exists(sql_path):
         print(f"Error: SQL file not found at {sql_path}")
         return
 
-    with open(sql_path, 'r', encoding='utf-8') as f:
+    with open(sql_path, encoding="utf-8") as f:
         sql = f.read()
 
     print(f"Executing SQL from {filename}...")
@@ -37,6 +39,7 @@ async def run_sql_file(filename: str):
         print("SQL executed successfully.")
     except Exception as e:
         print(f"Error executing SQL: {e}")
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:

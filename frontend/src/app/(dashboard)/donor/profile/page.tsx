@@ -3,17 +3,16 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { useAuth } from '@/lib/auth-provider'
 import { cn } from '@/lib/utils'
 import { Loader2, Save, CheckCircle2, User, Mail, Phone, Building2, ArrowRightLeft } from 'lucide-react'
 
-const SWITCHABLE_ROLES = ['victim', 'volunteer'] as const
+const SWITCHABLE_ROLES = ['victim', 'volunteer', 'ngo'] as const
 
 export default function DonorProfilePage() {
-    const { profile: authProfile } = useAuth()
     const queryClient = useQueryClient()
     const [saved, setSaved] = useState(false)
     const [switchError, setSwitchError] = useState('')
+    const [switchMessage, setSwitchMessage] = useState('')
 
     const { data: profile, isLoading } = useQuery({
         queryKey: ['my-profile'],
@@ -43,8 +42,16 @@ export default function DonorProfilePage() {
 
     const switchRoleMut = useMutation({
         mutationFn: (newRole: string) => api.switchRole(newRole),
-        onSuccess: () => {
-            window.location.href = '/'
+        onMutate: () => {
+            setSwitchError('')
+            setSwitchMessage('')
+        },
+        onSuccess: (resp: any) => {
+            if (resp?.status === 'switched') {
+                window.location.href = '/'
+                return
+            }
+            setSwitchMessage(resp?.message || 'Role switch request submitted. Waiting for admin approval.')
         },
         onError: (err: any) => {
             setSwitchError(err?.message || 'Failed to switch role')
@@ -136,20 +143,28 @@ export default function DonorProfilePage() {
                     <h2 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
                         <ArrowRightLeft className="w-4 h-4" /> Switch Role
                     </h2>
-                    <p className="text-xs text-slate-500 mt-0.5">Change your active role on the platform</p>
+                    <p className="text-xs text-slate-500 mt-0.5">Victim switches happen instantly. Other role switches need admin approval.</p>
                 </div>
                 <div className="p-5 space-y-3">
                     {switchError && (
                         <p className="text-xs text-red-500 mb-2">{switchError}</p>
                     )}
+                    {switchMessage && (
+                        <p className="text-xs text-emerald-500 mb-2">{switchMessage}</p>
+                    )}
                     <div className="flex gap-3">
-                        {SWITCHABLE_ROLES.map(role => (
-                            <button key={role} onClick={() => switchRoleMut.mutate(role)}
-                                disabled={switchRoleMut.isPending}
-                                className="flex-1 py-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 transition-all capitalize disabled:opacity-50">
-                                Switch to {role}
-                            </button>
-                        ))}
+                        {SWITCHABLE_ROLES.map(role => {
+                            return (
+                                <button key={role} onClick={() => switchRoleMut.mutate(role)}
+                                    disabled={switchRoleMut.isPending}
+                                    className={cn(
+                                        "flex-1 py-3 rounded-xl border border-slate-200 dark:border-white/10 text-sm font-medium transition-all capitalize disabled:opacity-50",
+                                        "text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5"
+                                    )}>
+                                    Switch to {role}
+                                </button>
+                            )
+                        })}
                     </div>
                 </div>
             </div>

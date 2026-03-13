@@ -6,12 +6,10 @@ Provides cross-role notification helpers so every workflow handoff
 triggers the right alerts.
 """
 
-from datetime import datetime, timezone
-from typing import Optional, List, Dict
 import logging
 import random
 import string
-import traceback
+from datetime import UTC, datetime
 
 from app.database import db_admin
 
@@ -23,9 +21,9 @@ async def create_notification(
     title: str,
     message: str,
     notification_type: str = "info",  # info, success, warning, error, request_update
-    related_id: Optional[str] = None,  # request_id, disaster_id, etc.
-    related_type: Optional[str] = None,  # request, disaster, resource
-) -> Optional[Dict]:
+    related_id: str | None = None,  # request_id, disaster_id, etc.
+    related_type: str | None = None,  # request, disaster, resource
+) -> dict | None:
     """Create a notification for a user. Stored in DB for persistence."""
     try:
         # Map notification_type to priority for the DB schema
@@ -47,11 +45,7 @@ async def create_notification(
                 "related_id": related_id,
                 "related_type": related_type,
             },
-            "action_url": (
-                f"/victim/requests/{related_id}"
-                if related_id and related_type == "request"
-                else None
-            ),
+            "action_url": (f"/victim/requests/{related_id}" if related_id and related_type == "request" else None),
         }
         resp = await db_admin.table("notifications").insert(record).async_execute()
         return resp.data[0] if resp.data else None
@@ -64,13 +58,13 @@ async def create_notification(
 async def create_audit_entry(
     request_id: str,
     action: str,
-    actor_id: Optional[str] = None,
+    actor_id: str | None = None,
     actor_role: str = "system",
-    old_status: Optional[str] = None,
-    new_status: Optional[str] = None,
-    details: Optional[str] = None,
-    metadata: Optional[Dict] = None,
-) -> Optional[Dict]:
+    old_status: str | None = None,
+    new_status: str | None = None,
+    details: str | None = None,
+    metadata: dict | None = None,
+) -> dict | None:
     """Record an audit trail entry for a request lifecycle event."""
     try:
         record = {
@@ -82,7 +76,7 @@ async def create_audit_entry(
             "new_status": new_status,
             "details": details,
             "metadata": metadata or {},
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         resp = await db_admin.table("request_audit_log").insert(record).async_execute()
         return resp.data[0] if resp.data else None
@@ -91,7 +85,7 @@ async def create_audit_entry(
         return None
 
 
-async def get_request_audit_trail(request_id: str) -> List[Dict]:
+async def get_request_audit_trail(request_id: str) -> list[dict]:
     """Get the full audit trail for a request."""
     try:
         resp = (
@@ -112,7 +106,7 @@ async def get_user_notifications(
     user_id: str,
     unread_only: bool = False,
     limit: int = 50,
-) -> List[Dict]:
+) -> list[dict]:
     """Get notifications for a user."""
     try:
         query = (
@@ -131,14 +125,12 @@ async def get_user_notifications(
         return []
 
 
-async def mark_notifications_read(
-    user_id: str, notification_ids: Optional[List[str]] = None
-) -> int:
+async def mark_notifications_read(user_id: str, notification_ids: list[str] | None = None) -> int:
     """Mark notifications as read. If no IDs given, mark all as read."""
     try:
         query = (
             db_admin.table("notifications")
-            .update({"read": True, "read_at": datetime.now(timezone.utc).isoformat()})
+            .update({"read": True, "read_at": datetime.now(UTC).isoformat()})
             .eq("user_id", user_id)
         )
         if notification_ids:
@@ -161,7 +153,7 @@ async def get_unread_count(user_id: str) -> int:
             .async_execute()
         )
         return resp.count or 0
-    except Exception as e:
+    except Exception:
         return 0
 
 
@@ -202,9 +194,9 @@ async def notify_request_status_change(
     resource_type: str,
     old_status: str,
     new_status: str,
-    admin_id: Optional[str] = None,
-    rejection_reason: Optional[str] = None,
-    admin_note: Optional[str] = None,
+    admin_id: str | None = None,
+    rejection_reason: str | None = None,
+    admin_note: str | None = None,
 ):
     """Send notification to victim and create audit trail entry for a status change."""
     template = NOTIFICATION_TEMPLATES.get(new_status)
@@ -242,7 +234,7 @@ async def notify_request_status_change(
 # ── Cross-role bulk notification helpers ──────────────────────────────────
 
 
-async def _get_users_by_role(role: str) -> List[Dict]:
+async def _get_users_by_role(role: str) -> list[dict]:
     """Return list of user dicts (id, full_name) for the given role.
     Cached in-memory for 5 minutes to reduce database reads.
     """
@@ -266,8 +258,8 @@ async def notify_all_admins(
     title: str,
     message: str,
     notification_type: str = "info",
-    related_id: Optional[str] = None,
-    related_type: Optional[str] = None,
+    related_id: str | None = None,
+    related_type: str | None = None,
 ):
     """Send a notification to every admin user."""
     admins = await _get_users_by_role("admin")
@@ -287,15 +279,13 @@ async def notify_all_by_role(
     title: str,
     message: str,
     notification_type: str = "info",
-    related_id: Optional[str] = None,
-    related_type: Optional[str] = None,
+    related_id: str | None = None,
+    related_type: str | None = None,
 ):
     """Send a notification to every user of the given role (batch insert)."""
     users = await _get_users_by_role(role)
     if not users:
         return
-
-    from datetime import datetime, timezone
 
     type_to_priority = {
         "info": "low",
@@ -307,19 +297,21 @@ async def notify_all_by_role(
 
     records = []
     for u in users:
-        records.append({
-            "user_id": u["id"],
-            "title": title,
-            "message": message,
-            "priority": type_to_priority.get(notification_type, "medium"),
-            "read": False,
-            "data": {
-                "type": notification_type,
-                "related_id": related_id,
-                "related_type": related_type,
-            },
-            "action_url": f"/requests/{related_id}" if related_id else None,
-        })
+        records.append(
+            {
+                "user_id": u["id"],
+                "title": title,
+                "message": message,
+                "priority": type_to_priority.get(notification_type, "medium"),
+                "read": False,
+                "data": {
+                    "type": notification_type,
+                    "related_id": related_id,
+                    "related_type": related_type,
+                },
+                "action_url": f"/requests/{related_id}" if related_id else None,
+            }
+        )
 
     # Single batch insert instead of N individual writes
     if records:
@@ -334,8 +326,8 @@ async def notify_user(
     title: str,
     message: str,
     notification_type: str = "info",
-    related_id: Optional[str] = None,
-    related_type: Optional[str] = None,
+    related_id: str | None = None,
+    related_type: str | None = None,
 ):
     """Convenience wrapper – notify a single user."""
     await create_notification(

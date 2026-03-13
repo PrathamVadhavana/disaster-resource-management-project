@@ -20,12 +20,13 @@ from sklearn.preprocessing import StandardScaler
 
 try:
     from xgboost import XGBRegressor
+
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
     from sklearn.ensemble import GradientBoostingRegressor
 
-from app.services.training.data_pipeline import load_impact_data, DISASTER_TYPES
+from app.services.training.data_pipeline import DISASTER_TYPES, load_impact_data
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def _leave_one_disaster_out_cv(X: pd.DataFrame, y: pd.DataFrame, pipeline) -> di
 
     Returns aggregated metrics.
     """
-    dtype_cols = [c for c in X.columns if c.startswith("dtype_")]
+    [c for c in X.columns if c.startswith("dtype_")]
     all_mae_cas, all_mae_dmg = [], []
 
     for dt in DISASTER_TYPES:
@@ -55,6 +56,7 @@ def _leave_one_disaster_out_cv(X: pd.DataFrame, y: pd.DataFrame, pipeline) -> di
         y_val = y[mask]
 
         from sklearn.base import clone
+
         fold_pipeline = clone(pipeline)
         fold_pipeline.fit(X_train_cv, y_train_cv)
         y_pred = fold_pipeline.predict(X_val)
@@ -114,10 +116,12 @@ def train_impact_model(
             random_state=random_state,
         )
 
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("reg", MultiOutputRegressor(base_reg)),
-    ])
+    pipeline = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("reg", MultiOutputRegressor(base_reg)),
+        ]
+    )
 
     # Leave-one-disaster-out CV
     logger.info("Running leave-one-disaster-out cross-validation …")

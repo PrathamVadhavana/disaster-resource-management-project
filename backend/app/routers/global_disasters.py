@@ -4,7 +4,6 @@ Provides aggregated real-time disaster events from USGS, NASA EONET, GDACS, and 
 """
 
 from fastapi import APIRouter, Query
-from typing import Optional
 
 from app.services.global_disaster_service import get_global_disasters
 
@@ -13,9 +12,9 @@ router = APIRouter()
 
 @router.get("/")
 async def list_global_disasters(
-    source: Optional[str] = Query(None, description="Filter by source: usgs, eonet, gdacs, reliefweb"),
-    type: Optional[str] = Query(None, description="Filter by disaster type: earthquake, flood, cyclone, wildfire, etc."),
-    severity: Optional[str] = Query(None, description="Filter by severity: critical, high, medium, low"),
+    source: str | None = Query(None, description="Filter by source: usgs, eonet, gdacs, reliefweb"),
+    type: str | None = Query(None, description="Filter by disaster type: earthquake, flood, cyclone, wildfire, etc."),
+    severity: str | None = Query(None, description="Filter by severity: critical, high, medium, low"),
     limit: int = Query(500, ge=1, le=2000, description="Max events to return"),
 ):
     """Fetch aggregated live global disaster data from multiple free public APIs.

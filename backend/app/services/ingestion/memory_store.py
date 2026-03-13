@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
-
+from datetime import UTC, datetime
+from typing import Any
 
 _MAX_EVENTS = 2000
 _MAX_WEATHER = 500
@@ -29,11 +28,11 @@ _lock = threading.Lock()
 
 # ── Storage ──────────────────────────────────────────────────────────
 
-_ingested_events: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-_weather_observations: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-_satellite_observations: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-_alert_notifications: OrderedDict[str, Dict[str, Any]] = OrderedDict()
-_external_data_sources: Dict[str, Dict[str, Any]] = {}
+_ingested_events: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_weather_observations: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_satellite_observations: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_alert_notifications: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_external_data_sources: dict[str, dict[str, Any]] = {}
 
 # Dedup sets (external_id values already seen)
 _seen_event_ids: set[str] = set()
@@ -42,12 +41,13 @@ _seen_satellite_ids: set[str] = set()
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+
 def _trim(store: OrderedDict, max_size: int) -> None:
     while len(store) > max_size:
         store.popitem(last=False)
 
 
-def _match(row: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+def _match(row: dict[str, Any], filters: dict[str, Any]) -> bool:
     for key, val in filters.items():
         if val is None:
             continue
@@ -58,7 +58,8 @@ def _match(row: Dict[str, Any], filters: Dict[str, Any]) -> bool:
 
 # ── Ingested Events ─────────────────────────────────────────────────
 
-def add_ingested_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def add_ingested_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     with _lock:
         added = []
         for e in events:
@@ -80,13 +81,13 @@ def event_exists(external_id: str) -> bool:
 
 def query_ingested_events(
     *,
-    event_type: Optional[str] = None,
-    severity: Optional[str] = None,
-    processed: Optional[bool] = None,
-    since: Optional[str] = None,
+    event_type: str | None = None,
+    severity: str | None = None,
+    processed: bool | None = None,
+    since: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     with _lock:
         results = list(reversed(_ingested_events.values()))
 
@@ -103,25 +104,24 @@ def query_ingested_events(
             continue
         filtered.append(e)
 
-    return filtered[offset: offset + limit]
+    return filtered[offset : offset + limit]
 
 
-def get_ingested_event(event_id: str) -> Optional[Dict[str, Any]]:
+def get_ingested_event(event_id: str) -> dict[str, Any] | None:
     return _ingested_events.get(event_id)
 
 
 # ── Weather Observations ────────────────────────────────────────────
 
-def add_weather_observations(observations: List[Dict[str, Any]]) -> None:
+
+def add_weather_observations(observations: list[dict[str, Any]]) -> None:
     with _lock:
         for o in observations:
             _weather_observations[o.get("id", "")] = o
         _trim(_weather_observations, _MAX_WEATHER)
 
 
-def query_weather(
-    *, location_id: Optional[str] = None, limit: int = 50
-) -> List[Dict[str, Any]]:
+def query_weather(*, location_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
     with _lock:
         results = list(reversed(_weather_observations.values()))
     if location_id:
@@ -129,14 +129,15 @@ def query_weather(
     return results[:limit]
 
 
-def latest_weather_for_location(location_id: str) -> Optional[Dict[str, Any]]:
+def latest_weather_for_location(location_id: str) -> dict[str, Any] | None:
     rows = query_weather(location_id=location_id, limit=1)
     return rows[0] if rows else None
 
 
 # ── Satellite Observations ──────────────────────────────────────────
 
-def add_satellite_observations(observations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+def add_satellite_observations(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     with _lock:
         added = []
         for o in observations:
@@ -153,12 +154,12 @@ def add_satellite_observations(observations: List[Dict[str, Any]]) -> List[Dict[
 
 def query_satellites(
     *,
-    disaster_id: Optional[str] = None,
-    confidence: Optional[str] = None,
-    lat_range: Optional[tuple[float, float]] = None,
-    lon_range: Optional[tuple[float, float]] = None,
+    disaster_id: str | None = None,
+    confidence: str | None = None,
+    lat_range: tuple[float, float] | None = None,
+    lon_range: tuple[float, float] | None = None,
     limit: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     with _lock:
         results = list(reversed(_satellite_observations.values()))
     filtered = []
@@ -183,15 +184,14 @@ def query_satellites(
 
 # ── Alert Notifications ─────────────────────────────────────────────
 
-def add_alert_notification(notif: Dict[str, Any]) -> None:
+
+def add_alert_notification(notif: dict[str, Any]) -> None:
     with _lock:
         _alert_notifications[notif.get("id", "")] = notif
         _trim(_alert_notifications, _MAX_ALERTS)
 
 
-def query_alerts(
-    *, severity: Optional[str] = None, status: Optional[str] = None, limit: int = 50
-) -> List[Dict[str, Any]]:
+def query_alerts(*, severity: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
     with _lock:
         results = list(reversed(_alert_notifications.values()))
     filtered = []
@@ -269,9 +269,7 @@ _DEFAULT_SOURCES = {
 
 def _ensure_sources() -> None:
     if not _external_data_sources:
-        _external_data_sources.update(
-            {k: dict(v) for k, v in _DEFAULT_SOURCES.items()}
-        )
+        _external_data_sources.update({k: dict(v) for k, v in _DEFAULT_SOURCES.items()})
 
 
 def get_source_id(source_name: str) -> str:
@@ -294,17 +292,15 @@ def get_source_id(source_name: str) -> str:
     return new_id
 
 
-def update_source_status(
-    source_name: str, status: str, error: Optional[str] = None
-) -> None:
+def update_source_status(source_name: str, status: str, error: str | None = None) -> None:
     _ensure_sources()
     src = _external_data_sources.get(source_name)
     if src:
-        src["last_polled_at"] = datetime.now(timezone.utc).isoformat()
+        src["last_polled_at"] = datetime.now(UTC).isoformat()
         src["last_status"] = status
         src["last_error"] = error[:500] if error else None
 
 
-def get_all_sources() -> List[Dict[str, Any]]:
+def get_all_sources() -> list[dict[str, Any]]:
     _ensure_sources()
     return list(_external_data_sources.values())

@@ -9,7 +9,7 @@ import Link from 'next/link'
 import {
     Loader2, AlertTriangle, Users, Radio, Activity,
     ArrowRight, Brain, Map, CheckCircle2, TrendingUp,
-    ChevronRight, Zap, BarChart3, Shield, Inbox, Package
+    ChevronRight, Zap, BarChart3, Shield, Inbox
 } from 'lucide-react'
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
@@ -29,11 +29,6 @@ function SeverityBadge({ severity }: { severity: string }) {
 export function AdminDashboardOverview() {
     const { profile } = useAuth()
 
-    const { data: disasters, isLoading: dLoad, isError: dError } = useQuery({
-        queryKey: ['admin-disasters'],
-        queryFn: () => api.getDisasters({ limit: 100 }),
-        refetchInterval: 30000,
-    })
 
     const { data: events, isLoading: eLoad } = useQuery({
         queryKey: ['admin-events'],
@@ -53,13 +48,11 @@ export function AdminDashboardOverview() {
         refetchInterval: 30000,
     })
 
-    const disasterList = Array.isArray(disasters) ? disasters : []
     const predictionList = Array.isArray(predictions) ? predictions : []
-    const activeDisasters = disasterList.filter((d: any) => d.status === 'active')
     const orchestratorRunning = ingestion?.orchestrator?.is_running
 
-    const isLoading = dLoad || eLoad || iLoad || pLoad
-    const isError = dError
+    const isLoading = eLoad || iLoad || pLoad
+    const isError = false // Simplified error handling as dError is gone
 
     if (isError) {
         return (
@@ -97,7 +90,6 @@ export function AdminDashboardOverview() {
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {[
-                    { label: 'Active Disasters', value: activeDisasters.length.toString(), icon: AlertTriangle, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-500/10' },
                     { label: 'Ingested Events', value: events?.length?.toString() || '0', icon: Radio, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-500/10' },
                     { label: 'AI Predictions', value: predictionList.length.toString(), icon: Brain, color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-500/10' },
                     { label: 'System Health', value: orchestratorRunning ? 'Online' : 'Offline', icon: Activity, color: orchestratorRunning ? 'text-emerald-500' : 'text-slate-500', bg: orchestratorRunning ? 'bg-emerald-50 dark:bg-emerald-500/10' : 'bg-slate-50 dark:bg-slate-500/10' }
@@ -134,27 +126,6 @@ export function AdminDashboardOverview() {
                         </div>
                     </div>
 
-                    <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
-                        <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-                            <h2 className="font-semibold text-slate-900 dark:text-white">Active Disasters</h2>
-                            <Link href="/admin/disasters" className="text-sm text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1">
-                                All <ArrowRight className="w-3.5 h-3.5" />
-                            </Link>
-                        </div>
-                        <div className="divide-y divide-slate-100 dark:divide-white/5">
-                            {activeDisasters.length ? activeDisasters.slice(0, 5).map((d: any) => (
-                                <div key={d.id} className="flex items-center gap-4 px-5 py-3 hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
-                                    <div className="flex-1 min-w-0">
-                                        <p className="text-sm font-medium text-slate-900 dark:text-white truncate">{d.title}</p>
-                                        <p className="text-[10px] text-slate-400 mt-0.5 capitalize">{d.type} • {d.location_name}</p>
-                                    </div>
-                                    <SeverityBadge severity={d.severity} />
-                                </div>
-                            )) : (
-                                <div className="p-8 text-center text-sm text-slate-400">No active disasters</div>
-                            )}
-                        </div>
-                    </div>
                 </div>
 
                 {/* Sidebar Column */}
@@ -190,10 +161,6 @@ export function AdminDashboardOverview() {
                             <Link href="/admin/requests" className="flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/[0.05] transition-colors group">
                                 <Inbox className="w-5 h-5 text-blue-500" />
                                 <span className="text-[10px] font-medium text-slate-500 group-hover:text-blue-500">Inbox</span>
-                            </Link>
-                            <Link href="/admin/resources" className="flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/[0.05] transition-colors group">
-                                <Package className="w-5 h-5 text-emerald-500" />
-                                <span className="text-[10px] font-medium text-slate-500 group-hover:text-emerald-500">Resources</span>
                             </Link>
                             <Link href="/admin/users" className="flex flex-col items-center gap-2 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-white/[0.05] transition-colors group">
                                 <Users className="w-5 h-5 text-amber-500" />

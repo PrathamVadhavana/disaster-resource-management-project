@@ -28,12 +28,10 @@ from __future__ import annotations
 import copy
 import logging
 import math
-import os
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -45,6 +43,7 @@ try:
     import torch.nn.functional as F
     import torch.optim as optim
     from torch.utils.data import DataLoader, TensorDataset
+
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
@@ -57,6 +56,7 @@ FEDERATED_CHECKPOINT = _MODEL_DIR / "federated_global.pt"
 # ── Local Model Architecture ─────────────────────────────────────────────────
 
 if _HAS_TORCH:
+
     class LocalModel(nn.Module):
         """Small 2-layer MLP for resource demand classification.
 
@@ -84,6 +84,7 @@ else:
 
 # ── Differential Privacy Utilities ────────────────────────────────────────────
 
+
 def clip_gradients(model: Any, max_norm: float = 1.0) -> float:
     """Clip per-parameter gradients and return the total norm before clipping."""
     if not _HAS_TORCH:
@@ -93,11 +94,11 @@ def clip_gradients(model: Any, max_norm: float = 1.0) -> float:
 
 
 def add_dp_noise(
-    state_dict: Dict[str, Any],
+    state_dict: dict[str, Any],
     noise_multiplier: float = 1.0,
     max_grad_norm: float = 1.0,
     n_clients: int = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add calibrated Gaussian noise for (ε, δ)-differential privacy.
 
     Noise scale σ = noise_multiplier × (max_grad_norm / n_clients)
@@ -141,14 +142,16 @@ def compute_privacy_budget(
 
 # ── Federated Client ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class ClientResult:
     """Result from a single client's local training round."""
+
     client_id: str
     n_samples: int
     loss: float
     accuracy: float
-    state_dict: Dict[str, Any] = field(default_factory=dict)
+    state_dict: dict[str, Any] = field(default_factory=dict)
     grad_norm: float = 0.0
 
 
@@ -237,6 +240,7 @@ class FederatedClient:
 
 # ── Federated Server (FedAvg) ────────────────────────────────────────────────
 
+
 class FederatedServer:
     """Central aggregation server implementing Federated Averaging (FedAvg).
 
@@ -259,15 +263,15 @@ class FederatedServer:
         self.max_grad_norm = max_grad_norm
         self.enable_dp = enable_dp
         self.round_number = 0
-        self.history: List[Dict[str, Any]] = []
+        self.history: list[dict[str, Any]] = []
 
-    def get_global_weights(self) -> Dict[str, Any]:
+    def get_global_weights(self) -> dict[str, Any]:
         """Return a copy of the current global model weights."""
         if not _HAS_TORCH or self.global_model is None:
             return {}
         return copy.deepcopy(self.global_model.state_dict())
 
-    def aggregate(self, client_results: List[ClientResult]) -> Dict[str, Any]:
+    def aggregate(self, client_results: list[ClientResult]) -> dict[str, Any]:
         """Perform FedAvg aggregation of client model weights.
 
         Args:
@@ -322,29 +326,36 @@ class FederatedServer:
             "avg_accuracy": round(float(avg_acc), 4),
             "dp_enabled": self.enable_dp,
             "noise_multiplier": self.noise_multiplier,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         self.history.append(round_info)
         logger.info(
             "FedAvg round %d: %d clients, %d samples, loss=%.4f, acc=%.4f",
-            self.round_number, len(client_results), total_samples, avg_loss, avg_acc,
+            self.round_number,
+            len(client_results),
+            total_samples,
+            avg_loss,
+            avg_acc,
         )
         return round_info
 
-    def save_global_model(self, path: Optional[Path] = None) -> Path:
+    def save_global_model(self, path: Path | None = None) -> Path:
         """Save the global model checkpoint."""
         path = path or FEDERATED_CHECKPOINT
         path.parent.mkdir(parents=True, exist_ok=True)
         if _HAS_TORCH:
-            torch.save({
-                "model_state": self.global_model.state_dict(),
-                "round_number": self.round_number,
-                "history": self.history,
-            }, path)
+            torch.save(
+                {
+                    "model_state": self.global_model.state_dict(),
+                    "round_number": self.round_number,
+                    "history": self.history,
+                },
+                path,
+            )
         logger.info("Federated global model saved to %s", path)
         return path
 
-    def load_global_model(self, path: Optional[Path] = None) -> None:
+    def load_global_model(self, path: Path | None = None) -> None:
         """Load a global model checkpoint."""
         path = path or FEDERATED_CHECKPOINT
         if not _HAS_TORCH or not path.exists():
@@ -358,12 +369,13 @@ class FederatedServer:
 
 # ── Synthetic Data Generator ─────────────────────────────────────────────────
 
+
 def _generate_client_data(
     n_samples: int = 200,
     input_dim: int = 12,
     n_classes: int = 4,
     seed: int = 42,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Generate synthetic disaster-resource classification data.
 
     Features simulate:
@@ -392,7 +404,7 @@ def _partition_data(
     y: np.ndarray,
     n_clients: int,
     non_iid: bool = False,
-) -> List[Tuple[np.ndarray, np.ndarray]]:
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Partition data across clients.
 
     Args:
@@ -416,6 +428,7 @@ def _partition_data(
 
 # ── High-Level Service ────────────────────────────────────────────────────────
 
+
 class FederatedService:
     """Production-ready federated learning service.
 
@@ -438,7 +451,7 @@ class FederatedService:
         self.max_grad_norm = max_grad_norm
         self.enable_dp = enable_dp
 
-        self._server: Optional[FederatedServer] = None
+        self._server: FederatedServer | None = None
         self._initialized = False
 
     def _ensure_init(self) -> FederatedServer:
@@ -472,7 +485,8 @@ class FederatedService:
         samples_per_client: int = 200,
         non_iid: bool = False,
         learning_rate: float = 0.01,
-    ) -> Dict[str, Any]:
+        use_real_data: bool = False,
+    ) -> dict[str, Any]:
         """Execute one federated training round.
 
         Simulates local NGO models training on partitioned data,
@@ -490,19 +504,75 @@ class FederatedService:
         """
         server = self._ensure_init()
 
-        # Generate and partition synthetic data
-        total_samples = n_clients * samples_per_client
-        X_all, y_all = _generate_client_data(
-            n_samples=total_samples,
-            input_dim=self.input_dim,
-            n_classes=self.output_dim,
-            seed=server.round_number + 1,
-        )
-        partitions = _partition_data(X_all, y_all, n_clients, non_iid=non_iid)
+        partitions = []
+        if use_real_data:
+            try:
+                from app.database import db
+
+                resp = await db.table("resource_requests").select("*").not_.is_("ngo_id", "null").async_execute()
+                requests = resp.data or []
+
+                if len(requests) >= 50:
+                    ngo_data = {}
+                    rt_map = {
+                        "food": 0,
+                        "water": 1,
+                        "medical": 2,
+                        "shelter": 3,
+                        "clothing": 4,
+                        "financial_aid": 5,
+                        "evacuation": 6,
+                        "volunteers": 7,
+                    }
+                    p_map = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+                    for r in requests:
+                        nid = r.get("ngo_id")
+                        if nid not in ngo_data:
+                            ngo_data[nid] = []
+
+                        rt_vec = [0.0] * 8
+                        rt = str(r.get("resource_type", "")).lower()
+                        if rt in rt_map:
+                            rt_vec[rt_map[rt]] = 1.0
+
+                        pval = p_map.get(str(r.get("priority")).lower(), 1)
+                        feat = [
+                            float(r.get("latitude", 0)),
+                            float(r.get("longitude", 0)),
+                            float(pval),
+                            float(r.get("quantity", 1)),
+                        ] + rt_vec
+                        ngo_data[nid].append((feat, pval))
+
+                    partitions = [
+                        (np.array([d[0] for d in v], dtype=np.float32), np.array([d[1] for d in v], dtype=np.int64))
+                        for v in ngo_data.values()
+                        if len(v) >= 5
+                    ]
+                    if partitions:
+                        n_clients = len(partitions)
+                        logger.info("Using real data from %d NGOs for federated round", n_clients)
+            except Exception as e:
+                logger.warning("Error loading real federated data: %s", e)
+
+        if not partitions:
+            # Generate and partition synthetic data
+            total_samples = n_clients * samples_per_client
+            X_all, y_all = _generate_client_data(
+                n_samples=total_samples,
+                input_dim=self.input_dim,
+                n_classes=self.output_dim,
+                seed=server.round_number + 1,
+            )
+            partitions = _partition_data(X_all, y_all, n_clients, non_iid=non_iid)
+            total_samples = len(X_all)
+        else:
+            total_samples = sum(len(p[0]) for p in partitions)
 
         # Distribute global weights and train locally
         global_weights = server.get_global_weights()
-        client_results: List[ClientResult] = []
+        client_results: list[ClientResult] = []
 
         for i, (X_client, y_client) in enumerate(partitions):
             client_id = f"ngo_node_{i}"
@@ -559,7 +629,7 @@ class FederatedService:
             "data_distribution": "non_iid" if non_iid else "iid",
         }
 
-    async def get_status(self) -> Dict[str, Any]:
+    async def get_status(self) -> dict[str, Any]:
         """Return current federated learning status."""
         if not _HAS_TORCH:
             return {"status": "unavailable", "reason": "PyTorch not installed"}
@@ -585,7 +655,7 @@ class FederatedService:
         n_rounds: int = 10,
         n_clients: int = 5,
         epochs_per_client: int = 3,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run multiple federated rounds (full training session).
 
         Returns aggregate metrics across all rounds.
@@ -604,7 +674,9 @@ class FederatedService:
             "total_rounds": n_rounds,
             "final_accuracy": results[-1].get("avg_accuracy", 0) if results else 0,
             "final_loss": results[-1].get("avg_loss", 0) if results else 0,
-            "privacy_budget_epsilon": results[-1].get("privacy_budget_epsilon", float("inf")) if results else float("inf"),
+            "privacy_budget_epsilon": results[-1].get("privacy_budget_epsilon", float("inf"))
+            if results
+            else float("inf"),
             "round_summaries": [
                 {
                     "round": r.get("round", 0),
@@ -620,6 +692,7 @@ class FederatedService:
 
 if __name__ == "__main__":
     import asyncio
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     async def main():

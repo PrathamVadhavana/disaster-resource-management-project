@@ -11,15 +11,15 @@ The rest of the platform works fully without this service.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import httpx
 
 from app.core.config import ingestion_config as cfg
-from app.services.ingestion.mock_data_service import generate_mock_social_signals
 from app.services.ingestion import memory_store
+from app.services.ingestion.mock_data_service import generate_mock_social_signals
 
 logger = logging.getLogger("ingestion.social")
 
@@ -30,9 +30,9 @@ class SocialMediaService:
     def __init__(self) -> None:
         self.bearer_token = cfg.TWITTER_BEARER_TOKEN
         self.keywords = cfg.SOCIAL_KEYWORDS
-        self._last_since_id: Optional[str] = None
+        self._last_since_id: str | None = None
 
-    async def poll(self) -> List[Dict[str, Any]]:
+    async def poll(self) -> list[dict[str, Any]]:
         """Search for recent tweets matching disaster keywords.
         Falls back to mock SOS data when no API token is configured."""
         if not self.bearer_token:
@@ -56,13 +56,13 @@ class SocialMediaService:
 
     # ── internals ───────────────────────────────────────────────────
 
-    async def _search_recent(self) -> List[Dict[str, Any]]:
+    async def _search_recent(self) -> list[dict[str, Any]]:
         """Call Twitter v2 Recent Search endpoint."""
         query = " OR ".join(f'"{kw}"' for kw in self.keywords)
         query += " -is:retweet lang:en"
 
         url = "https://api.twitter.com/2/tweets/search/recent"
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "query": query,
             "max_results": min(cfg.MAX_EVENTS_PER_POLL, 100),
             "tweet.fields": "created_at,geo,text,author_id,public_metrics",
@@ -100,8 +100,8 @@ class SocialMediaService:
 
         return tweets
 
-    def _tweets_to_events(self, tweets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        events: List[Dict[str, Any]] = []
+    def _tweets_to_events(self, tweets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
         for tw in tweets:
             text = tw.get("text", "")
             tweet_id = tw.get("id", "")
@@ -112,27 +112,29 @@ class SocialMediaService:
             # Estimate severity from keyword density
             severity = self._estimate_severity(text)
 
-            events.append({
-                "external_id": f"twitter-{tweet_id}",
-                "event_type": "social_sos",
-                "title": f"Social SOS: {text[:80]}{'...' if len(text) > 80 else ''}",
-                "description": text,
-                "severity": severity,
-                "latitude": lat,
-                "longitude": lon,
-                "location_name": location_name,
-                "raw_payload": {
-                    "tweet_id": tweet_id,
-                    "author_id": tw.get("author_id"),
-                    "created_at": tw.get("created_at"),
-                    "text": text,
-                    "public_metrics": tw.get("public_metrics"),
-                },
-            })
+            events.append(
+                {
+                    "external_id": f"twitter-{tweet_id}",
+                    "event_type": "social_sos",
+                    "title": f"Social SOS: {text[:80]}{'...' if len(text) > 80 else ''}",
+                    "description": text,
+                    "severity": severity,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "location_name": location_name,
+                    "raw_payload": {
+                        "tweet_id": tweet_id,
+                        "author_id": tw.get("author_id"),
+                        "created_at": tw.get("created_at"),
+                        "text": text,
+                        "public_metrics": tw.get("public_metrics"),
+                    },
+                }
+            )
 
         return events
 
-    def _extract_location(self, tweet: Dict[str, Any]) -> tuple:
+    def _extract_location(self, tweet: dict[str, Any]) -> tuple:
         """Best-effort coordinate + name extraction from tweet geo data."""
         geo = tweet.get("geo", {})
         coords = geo.get("coordinates", {}).get("coordinates")
@@ -167,7 +169,7 @@ class SocialMediaService:
             return "medium"
         return "low"
 
-    async def _deduplicate_and_store(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _deduplicate_and_store(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not items:
             return []
 
@@ -178,11 +180,13 @@ class SocialMediaService:
             ext_id = item.get("external_id")
             if ext_id and memory_store.event_exists(ext_id):
                 continue
-            rows.append({
-                "id": str(uuid4()),
-                "source_id": source_id,
-                **item,
-                "ingested_at": datetime.now(timezone.utc).isoformat(),
-            })
+            rows.append(
+                {
+                    "id": str(uuid4()),
+                    "source_id": source_id,
+                    **item,
+                    "ingested_at": datetime.now(UTC).isoformat(),
+                }
+            )
 
         return memory_store.add_ingested_events(rows)

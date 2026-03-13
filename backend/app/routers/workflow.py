@@ -5,46 +5,376 @@ pre-staging recommendations, event history, what-if analysis, and active learnin
 Consolidates all new workflow improvement endpoints.
 """
 
-from fastapi import APIRouter, HTTPException, Depends, Query
+from collections import Counter
+from datetime import UTC, datetime, timedelta
+from math import asin, cos, radians, sin, sqrt
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPBearer
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
 
 from app.database import db_admin
 from app.dependencies import require_admin, require_role
-from app.services.notification_service import notify_user, create_audit_entry, notify_all_admins
-from app.services.event_sourcing_service import (
-    get_entity_events,
-    emit_delivery_confirmed,
-    emit_request_status_changed,
-)
 from app.services.disaster_linking_service import get_disaster_demand_supply
+from app.services.event_sourcing_service import (
+    emit_delivery_confirmed,
+    get_entity_events,
+)
+from app.services.notification_service import notify_all_admins, notify_user
 from app.services.prestaging_service import generate_prestaging_recommendations
 
 router = APIRouter(prefix="/api/workflow", tags=["Workflow"])
 security = HTTPBearer()
+
+PRIORITY_SCORES = {
+    "low": 2.0,
+    "medium": 5.0,
+    "high": 8.0,
+    "critical": 10.0,
+}
+
+SEVERITY_SCORES = {
+    "low": 2.5,
+    "medium": 5.0,
+    "high": 7.5,
+    "critical": 9.0,
+}
+
+DISASTER_TYPE_SCORES = {
+    "earthquake": 2.0,
+    "flood": 3.0,
+    "hurricane": 4.0,
+    "tornado": 5.0,
+    "wildfire": 6.0,
+    "tsunami": 7.0,
+    "drought": 8.0,
+    "other": 4.5,
+}
+
+ACTIVE_REQUEST_STATUSES = {
+    "pending",
+    "under_review",
+    "approved",
+    "availability_submitted",
+    "assigned",
+    "in_progress",
+    "delivered",
+}
+
+SLA_TRACKED_STATUSES = {"approved", "assigned", "in_progress"}
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number else default
+
+
+def _parse_dt(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except Exception:
+        return None
+
+
+def _mean(values: list[float], default: float = 0.0) -> float:
+    return round(sum(values) / len(values), 2) if values else default
+
+
+def _median(values: list[float], default: float = 0.0) -> float:
+    if not values:
+        return default
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[midpoint], 2)
+    return round((ordered[midpoint - 1] + ordered[midpoint]) / 2.0, 2)
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _priority_score(row: dict) -> float:
+    priority = (row.get("manual_priority") or row.get("priority") or row.get("nlp_priority") or "medium").lower()
+    return PRIORITY_SCORES.get(priority, 5.0)
+
+
+def _severity_score(label: str | None) -> float:
+    return SEVERITY_SCORES.get((label or "medium").lower(), 5.0)
+
+
+def _severity_label(score: float) -> str:
+    if score >= 8.5:
+        return "critical"
+    if score >= 6.5:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
+def _normalise_disaster_type(raw_type: str | None) -> str:
+    if not raw_type:
+        return "other"
+    value = str(raw_type).strip().lower()
+    return value if value in DISASTER_TYPE_SCORES else "other"
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    return 6371.0 * 2 * asin(sqrt(a))
+
+
+def _point_from_row(row: dict | None, locations: dict[str, dict], disasters: dict[str, dict]) -> tuple[float | None, float | None]:
+    if not row:
+        return None, None
+
+    lat = row.get("latitude")
+    lon = row.get("longitude")
+    if lat is not None and lon is not None:
+        return _safe_float(lat), _safe_float(lon)
+
+    location_id = row.get("location_id")
+    if location_id and location_id in locations:
+        location = locations[location_id]
+        if location.get("latitude") is not None and location.get("longitude") is not None:
+            return _safe_float(location.get("latitude")), _safe_float(location.get("longitude"))
+
+    disaster_id = row.get("disaster_id") or row.get("linked_disaster_id")
+    disaster = disasters.get(disaster_id) if disaster_id else None
+    if disaster:
+        return _point_from_row(disaster, locations, disasters)
+
+    return None, None
+
+
+async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
+    request_resp = await db_admin.table("resource_requests").select("*").limit(5000).async_execute()
+    disaster_resp = await db_admin.table("disasters").select("*").limit(2000).async_execute()
+    location_resp = (
+        await db_admin.table("locations")
+        .select("id, name, latitude, longitude, metadata, population, type")
+        .limit(5000)
+        .async_execute()
+    )
+    resource_resp = await db_admin.table("resources").select("*").limit(5000).async_execute()
+    ngo_resp = await db_admin.table("users").select("id, metadata").eq("role", "ngo").limit(2000).async_execute()
+
+    all_requests = request_resp.data or []
+    all_disasters = disaster_resp.data or []
+    all_locations = location_resp.data or []
+    all_resources = resource_resp.data or []
+    all_ngos = ngo_resp.data or []
+
+    disaster_map = {row["id"]: row for row in all_disasters if row.get("id")}
+    location_map = {row["id"]: row for row in all_locations if row.get("id")}
+
+    def _matches_request(row: dict) -> bool:
+        linked_id = row.get("disaster_id") or row.get("linked_disaster_id")
+        if disaster_id:
+            return linked_id == disaster_id
+        return row.get("status") in ACTIVE_REQUEST_STATUSES
+
+    relevant_requests = [row for row in all_requests if _matches_request(row)]
+
+    relevant_disaster_ids = {
+        row.get("disaster_id") or row.get("linked_disaster_id")
+        for row in relevant_requests
+        if row.get("disaster_id") or row.get("linked_disaster_id")
+    }
+    if disaster_id:
+        relevant_disaster_ids.add(disaster_id)
+
+    relevant_disasters = [
+        row for row in all_disasters if row.get("id") in relevant_disaster_ids or (not disaster_id and row.get("status") == "active")
+    ]
+
+    if not relevant_requests and not relevant_disasters:
+        raise HTTPException(status_code=404, detail="No live victim or disaster context found in Supabase")
+
+    victims_impacted = sum(max(int(row.get("head_count") or 1), 1) for row in relevant_requests)
+    unique_victims = len({row.get("victim_id") for row in relevant_requests if row.get("victim_id")})
+    urgent_request_count = sum(1 for row in relevant_requests if _priority_score(row) >= 8.0)
+    requested_units = sum(max(_safe_float(row.get("quantity"), 1.0), 1.0) for row in relevant_requests)
+
+    requested_types = Counter((row.get("resource_type") or "other") for row in relevant_requests)
+    available_resources = [
+        row
+        for row in all_resources
+        if row.get("status") == "available"
+        and (
+            not disaster_id
+            or row.get("disaster_id") in (None, "", disaster_id)
+        )
+    ]
+    available_units = sum(
+        _safe_float(row.get("quantity"), 0.0)
+        for row in available_resources
+        if not requested_types or (row.get("type") or "other") in requested_types
+    )
+    availability_pct = 100.0 if requested_units <= 0 else round(min((available_units / requested_units) * 100.0, 100.0), 2)
+
+    now = datetime.now(UTC)
+    response_times: list[float] = []
+    pending_ages: list[float] = []
+    for row in relevant_requests:
+        created_at = _parse_dt(row.get("created_at"))
+        assigned_at = _parse_dt(row.get("assigned_at"))
+        if created_at and assigned_at and assigned_at >= created_at:
+            response_times.append((assigned_at - created_at).total_seconds() / 3600.0)
+        elif created_at and row.get("status") in {"pending", "under_review", "approved", "availability_submitted"}:
+            pending_ages.append((now - created_at).total_seconds() / 3600.0)
+    response_time_hours = max(_mean(response_times, _mean(pending_ages, 1.0)), 0.5)
+
+    verified_ratio = _mean(
+        [1.0 if row.get("is_verified") or row.get("verification_status") == "verified" else 0.0 for row in relevant_requests],
+        0.0,
+    )
+    fulfillment_ratio = _mean(
+        [_clamp(_safe_float(row.get("fulfillment_pct"), 0.0) / 100.0, 0.0, 1.0) for row in relevant_requests],
+        0.0,
+    )
+    completed_ratio = _mean(
+        [1.0 if row.get("status") in {"delivered", "completed"} else 0.0 for row in relevant_requests],
+        0.0,
+    )
+    resource_quality_score = round(_clamp(1.0 + (verified_ratio + fulfillment_ratio + completed_ratio) * 3.0, 1.0, 10.0), 2)
+
+    severity_values = [_severity_score(row.get("severity")) for row in relevant_disasters if row.get("severity")]
+    if severity_values:
+        weather_severity = _mean(severity_values, 5.0)
+    else:
+        derived_priority_severity = _mean([_priority_score(row) for row in relevant_requests], 5.0)
+        weather_severity = round(_clamp(derived_priority_severity, 1.0, 10.0), 2)
+
+    dominant_disaster_type = "other"
+    if relevant_disasters:
+        dominant_disaster_type = Counter(
+            _normalise_disaster_type(row.get("type")) for row in relevant_disasters
+        ).most_common(1)[0][0]
+
+    disaster_type_score = DISASTER_TYPE_SCORES.get(dominant_disaster_type, DISASTER_TYPE_SCORES["other"])
+
+    direct_casualties = sum(max(int(_safe_float(row.get("casualties"), 0.0)), 0) for row in relevant_disasters)
+    casualties = direct_casualties or sum(
+        max(int(row.get("head_count") or 1), 1)
+        for row in relevant_requests
+        if _priority_score(row) >= 8.0
+    )
+
+    economic_damage_usd = round(
+        sum(max(_safe_float(row.get("estimated_damage"), 0.0), 0.0) for row in relevant_disasters),
+        2,
+    )
+
+    ngo_points: list[tuple[float, float]] = []
+    for ngo in all_ngos:
+        metadata = ngo.get("metadata") or {}
+        if metadata.get("latitude") is not None and metadata.get("longitude") is not None:
+            ngo_points.append((_safe_float(metadata.get("latitude")), _safe_float(metadata.get("longitude"))))
+            continue
+        location_id = metadata.get("location_id")
+        if location_id and location_id in location_map:
+            location = location_map[location_id]
+            if location.get("latitude") is not None and location.get("longitude") is not None:
+                ngo_points.append((_safe_float(location.get("latitude")), _safe_float(location.get("longitude"))))
+
+    if not ngo_points:
+        for resource in available_resources:
+            location = location_map.get(resource.get("location_id"))
+            if location and location.get("latitude") is not None and location.get("longitude") is not None:
+                ngo_points.append((_safe_float(location.get("latitude")), _safe_float(location.get("longitude"))))
+
+    target_points: list[tuple[float, float]] = []
+    for row in relevant_requests:
+        lat, lon = _point_from_row(row, location_map, disaster_map)
+        if lat is not None and lon is not None:
+            target_points.append((lat, lon))
+    if not target_points:
+        for row in relevant_disasters:
+            lat, lon = _point_from_row(row, location_map, disaster_map)
+            if lat is not None and lon is not None:
+                target_points.append((lat, lon))
+
+    nearest_distances: list[float] = []
+    if ngo_points:
+        for lat, lon in target_points:
+            nearest_distances.append(min(_haversine_km(lat, lon, ngo_lat, ngo_lon) for ngo_lat, ngo_lon in ngo_points))
+    ngo_proximity_km = round(_clamp(_median(nearest_distances, 25.0), 1.0, 500.0), 2)
+
+    dominant_severity = _severity_label(weather_severity)
+    model_observation = {
+        "weather_severity": weather_severity,
+        "disaster_type": disaster_type_score,
+        "response_time_hours": round(response_time_hours, 2),
+        "resource_availability": round(_clamp(availability_pct / 10.0, 0.1, 10.0), 2),
+        "ngo_proximity_km": ngo_proximity_km,
+        "resource_quality_score": resource_quality_score,
+        "casualties": float(max(casualties, 0)),
+        "economic_damage_usd": max(economic_damage_usd, 0.0),
+    }
+    ui_observation = {
+        "weather_severity": round(weather_severity, 2),
+        "disaster_type": dominant_disaster_type,
+        "response_time_hours": round(response_time_hours, 2),
+        "resource_availability": round(availability_pct, 2),
+        "ngo_proximity_km": ngo_proximity_km,
+        "resource_quality_score": round(resource_quality_score * 10.0, 2),
+        "casualties": float(max(casualties, 0)),
+        "economic_damage_usd": max(economic_damage_usd, 0.0),
+    }
+
+    return {
+        "disaster_id": disaster_id,
+        "model_observation": model_observation,
+        "ui_observation": ui_observation,
+        "dominant_disaster_type": dominant_disaster_type,
+        "severity_label": dominant_severity,
+        "summary": {
+            "active_request_count": len(relevant_requests),
+            "urgent_request_count": urgent_request_count,
+            "victims_impacted": victims_impacted,
+            "unique_victims": unique_victims,
+            "requested_resource_units": round(requested_units, 2),
+            "available_resource_units": round(available_units, 2),
+            "availability_pct": availability_pct,
+            "active_disaster_count": len(relevant_disasters),
+            "responders_considered": len(ngo_points),
+        },
+        "derived_from": "Supabase victim requests, disasters, resources, locations, and NGO profiles",
+    }
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────
 
 
 class SLAConfigUpdate(BaseModel):
-    approved_sla_hours: Optional[float] = Field(None, ge=0.5, le=72)
-    assigned_sla_hours: Optional[float] = Field(None, ge=0.5, le=72)
-    in_progress_sla_hours: Optional[float] = Field(None, ge=1, le=168)
-    sla_enabled: Optional[bool] = None
+    approved_sla_hours: float | None = Field(None, ge=0.5, le=72)
+    assigned_sla_hours: float | None = Field(None, ge=0.5, le=72)
+    in_progress_sla_hours: float | None = Field(None, ge=1, le=168)
+    sla_enabled: bool | None = None
 
 
 class DeliveryConfirmation(BaseModel):
     confirmation_code: str = Field(..., min_length=4, max_length=10)
-    rating: Optional[int] = Field(None, ge=1, le=5)
-    feedback: Optional[str] = Field(None, max_length=1000)
-    photo_url: Optional[str] = None
+    rating: int | None = Field(None, ge=1, le=5)
+    feedback: str | None = Field(None, max_length=1000)
+    photo_url: str | None = None
 
 
 class WhatIfQuery(BaseModel):
-    disaster_id: Optional[str] = None
+    disaster_id: str | None = None
     intervention_variable: str = Field(..., description="e.g., 'response_time_hours'")
     current_value: float = Field(..., description="Current observed value")
     proposed_value: float = Field(..., description="Proposed counterfactual value")
@@ -55,13 +385,13 @@ class ActiveLearningCorrection(BaseModel):
     request_id: str
     predicted_priority: str
     corrected_priority: str
-    confidence: Optional[float] = None
-    description: Optional[str] = None
+    confidence: float | None = None
+    description: str | None = None
 
 
 class MultiLanguageClassifyRequest(BaseModel):
     text: str = Field(..., min_length=3, max_length=5000)
-    source_language: Optional[str] = Field(None, description="ISO language code, auto-detected if omitted")
+    source_language: str | None = Field(None, description="ISO language code, auto-detected if omitted")
 
 
 # ── SLA Configuration ────────────────────────────────────────────────────
@@ -89,7 +419,7 @@ async def get_sla_config(admin=Depends(require_admin)):
                 if resp.data.get(k) is not None:
                     defaults[k] = resp.data[k]
         return defaults
-    except Exception as e:
+    except Exception:
         return {
             "approved_sla_hours": 2.0,
             "assigned_sla_hours": 4.0,
@@ -106,12 +436,7 @@ async def update_sla_config(body: SLAConfigUpdate, admin=Depends(require_admin))
         raise HTTPException(status_code=400, detail="No fields to update")
 
     try:
-        resp = (
-            await db_admin.table("platform_settings")
-            .update(updates)
-            .eq("id", 1)
-            .async_execute()
-        )
+        resp = await db_admin.table("platform_settings").update(updates).eq("id", 1).async_execute()
         if not resp.data:
             updates["id"] = 1
             resp = await db_admin.table("platform_settings").insert(updates).async_execute()
@@ -125,19 +450,22 @@ async def get_sla_violations(admin=Depends(require_admin)):
     """Get current SLA violations across all requests."""
     from app.services.sla_service import _get_sla_settings, _parse_dt
 
-    settings = _get_sla_settings()
-    now = datetime.now(timezone.utc)
+    settings = await _get_sla_settings()
+    now = datetime.now(UTC)
     violations = []
+    tracked_requests = []
+    at_risk_count = 0
 
     try:
         # Check all active requests
         resp = (
             await db_admin.table("resource_requests")
             .select("id, status, priority, resource_type, updated_at, assigned_to, sla_escalated_at")
-            .in_("status", ["approved", "assigned", "in_progress"])
+            .in_("status", list(SLA_TRACKED_STATUSES))
             .async_execute()
         )
         for req in resp.data or []:
+            tracked_requests.append(req)
             updated = _parse_dt(req.get("updated_at"))
             if not updated:
                 continue
@@ -163,6 +491,9 @@ async def get_sla_violations(admin=Depends(require_admin)):
                     "hours_elapsed": round(hours_elapsed, 1),
                 }
 
+            elif req["status"] == "in_progress" and hours_elapsed > settings["in_progress_sla_hours"] * 0.8:
+                at_risk_count += 1
+
             if violation:
                 violation["request_id"] = req["id"]
                 violation["priority"] = req.get("priority")
@@ -171,11 +502,146 @@ async def get_sla_violations(admin=Depends(require_admin)):
                 violation["assigned_to"] = req.get("assigned_to")
                 violation["escalated"] = req.get("sla_escalated_at") is not None
                 violations.append(violation)
+            elif req["status"] == "approved" and hours_elapsed > settings["approved_sla_hours"] * 0.8:
+                at_risk_count += 1
+            elif req["status"] == "assigned" and hours_elapsed > settings["assigned_sla_hours"] * 0.8:
+                at_risk_count += 1
 
         violations.sort(key=lambda v: -v["hours_elapsed"])
-        return {"violations": violations, "total": len(violations), "settings": settings}
+        total_active_requests = len(tracked_requests)
+        return {
+            "violations": violations,
+            "total": len(violations),
+            "settings": settings,
+            "total_active_requests": total_active_requests,
+            "compliant_active_requests": max(total_active_requests - len(violations), 0),
+            "at_risk_count": at_risk_count,
+            "context_summary": {
+                "tracked_statuses": sorted(SLA_TRACKED_STATUSES),
+                "live_breaches": len(violations),
+                "requests_at_risk": at_risk_count,
+            },
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error checking SLA violations: {str(e)}")
+
+
+# ── SLA History Analytics ─────────────────────────────────────────────────
+
+
+@router.get("/sla/history")
+async def get_sla_history(
+    days: int = Query(30, ge=1, le=365, description="Number of days to look back"),
+    admin=Depends(require_admin),
+):
+    """Get SLA history analytics for the last N days.
+
+    Returns daily counts of SLA violations and average response times.
+    """
+    try:
+        # Get SLA settings for violation calculation
+        from app.services.sla_service import _get_sla_settings, _parse_dt
+
+        settings = await _get_sla_settings()
+        now = datetime.now(UTC)
+        start_date = now - timedelta(days=days)
+
+        # Fetch all requests created in the date range
+        resp = (
+            await db_admin.table("resource_requests")
+            .select("id, status, priority, resource_type, created_at, updated_at, delivery_confirmed_at")
+            .gte("created_at", start_date.isoformat())
+            .limit(10000)
+            .async_execute()
+        )
+        requests = resp.data or []
+
+        # Group by date and calculate metrics
+        daily_metrics = {}
+        for req in requests:
+            created_at = _parse_dt(req.get("created_at"))
+            if not created_at or created_at < start_date:
+                continue
+
+            # Get date key (YYYY-MM-DD)
+            date_key = created_at.date().isoformat()
+            if date_key not in daily_metrics:
+                daily_metrics[date_key] = {
+                    "date": date_key,
+                    "total_requests": 0,
+                    "violations": 0,
+                    "response_times": [],
+                }
+
+            daily_metrics[date_key]["total_requests"] += 1
+
+            # Calculate response time from creation to the best available service timestamp.
+            created = _parse_dt(req.get("created_at"))
+            status = req.get("status")
+            assigned = _parse_dt(req.get("assigned_at"))
+            delivery_confirmed = _parse_dt(req.get("delivery_confirmed_at"))
+            updated = _parse_dt(req.get("updated_at"))
+
+            response_end = (
+                delivery_confirmed
+                or assigned
+                or (updated if status in ["assigned", "in_progress", "delivered", "completed", "closed"] else None)
+            )
+            if created and response_end and response_end >= created:
+                response_time = (response_end - created).total_seconds() / 3600
+                daily_metrics[date_key]["response_times"].append(response_time)
+
+            # Check for violations based on current status and elapsed time
+            current_status = req.get("status", "")
+            updated_at = _parse_dt(req.get("updated_at"))
+
+            if updated_at:
+                hours_elapsed = (now - updated_at).total_seconds() / 3600
+
+                is_violation = False
+                if current_status == "approved" and hours_elapsed > settings["approved_sla_hours"]:
+                    is_violation = True
+                elif current_status == "assigned" and hours_elapsed > settings["assigned_sla_hours"]:
+                    is_violation = True
+                elif current_status == "in_progress" and hours_elapsed > settings["in_progress_sla_hours"]:
+                    is_violation = True
+
+                if is_violation:
+                    daily_metrics[date_key]["violations"] += 1
+
+        # Calculate averages and format for chart
+        chart_data = []
+        for date_key in sorted(daily_metrics.keys()):
+            metrics = daily_metrics[date_key]
+            avg_total_time = round(sum(metrics["response_times"]) / len(metrics["response_times"]), 2) if metrics["response_times"] else 0
+
+            chart_data.append(
+                {
+                    "date": date_key,
+                    "violations": metrics["violations"],
+                    "avg_response_time": avg_total_time,
+                    "total_requests": metrics["total_requests"],
+                }
+            )
+
+        return {
+            "chart_data": chart_data,
+            "summary": {
+                "total_violations": sum(m["violations"] for m in chart_data),
+                "avg_violations_per_day": round(sum(m["violations"] for m in chart_data) / len(chart_data), 2)
+                if chart_data
+                else 0,
+                "avg_response_time": round(sum(m["avg_response_time"] for m in chart_data) / len(chart_data), 2)
+                if chart_data
+                else 0,
+                "total_requests": sum(m["total_requests"] for m in chart_data),
+                "days_analyzed": len(chart_data),
+            },
+            "sla_settings": settings,
+            "date_range": {"start": start_date.date().isoformat(), "end": now.date().isoformat(), "days": days},
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching SLA history: {str(e)}")
 
 
 # ── Delivery Verification ────────────────────────────────────────────────
@@ -218,11 +684,11 @@ async def confirm_delivery(
         # Update request
         updates = {
             "status": "completed",
-            "delivery_confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "delivery_confirmed_at": datetime.now(UTC).isoformat(),
             "delivery_rating": body.rating,
             "delivery_feedback": body.feedback,
             "delivery_photo_url": body.photo_url,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
 
         await db_admin.table("resource_requests").update(updates).eq("id", request_id).async_execute()
@@ -244,7 +710,7 @@ async def confirm_delivery(
                 user_id=req["assigned_to"],
                 title="✅ Delivery Confirmed",
                 message=f"The victim has confirmed delivery of {req.get('resource_type', 'resources')}. "
-                        + (f"Rating: {'⭐' * body.rating}" if body.rating else ""),
+                + (f"Rating: {'⭐' * body.rating}" if body.rating else ""),
                 notification_type="success",
                 related_id=request_id,
                 related_type="request",
@@ -254,7 +720,7 @@ async def confirm_delivery(
         await notify_all_admins(
             title="✅ Delivery Verified by Victim",
             message=f"Request {request_id[:8]}... delivery confirmed"
-                    + (f" (Rating: {body.rating}/5)" if body.rating else ""),
+            + (f" (Rating: {body.rating}/5)" if body.rating else ""),
             notification_type="success",
             related_id=request_id,
             related_type="request",
@@ -290,7 +756,7 @@ async def get_demand_supply(
 async def get_prestaging(admin=Depends(require_admin)):
     """Generate predictive resource pre-staging recommendations."""
     recommendations = await generate_prestaging_recommendations()
-    return {"recommendations": recommendations, "generated_at": datetime.now(timezone.utc).isoformat()}
+    return {"recommendations": recommendations, "generated_at": datetime.now(UTC).isoformat()}
 
 
 # ── Event History ─────────────────────────────────────────────────────────
@@ -317,6 +783,7 @@ def _get_causal_model():
     global _causal_model_instance
     if _causal_model_instance is None:
         from ml.causal_model import DisasterCausalModel
+
         _causal_model_instance = DisasterCausalModel()
     return _causal_model_instance
 
@@ -350,35 +817,33 @@ def _build_observation(body: WhatIfQuery, disaster: dict | None = None) -> dict:
 
     Uses realistic means from the synthetic data distribution.
     """
-    if disaster:
-        dtype_map = {"earthquake": 2, "flood": 3, "hurricane": 4, "tornado": 5,
-                     "wildfire": 6, "tsunami": 7, "drought": 8}
-        obs = {
-            "weather_severity": float(disaster.get("severity_score") or 5.5),
-            "disaster_type": float(dtype_map.get(disaster.get("type", ""), 3)),
-            "response_time_hours": float(disaster.get("response_time_hours") or 6.5),
-            "resource_availability": float(disaster.get("resource_availability") or 4.5),
-            "ngo_proximity_km": float(disaster.get("ngo_proximity_km") or 48.0),
-            "resource_quality_score": float(disaster.get("resource_quality_score") or 5.2),
-            "casualties": float(disaster.get("casualties") or 45),
-            "economic_damage_usd": float(disaster.get("estimated_damage") or disaster.get("economic_damage_usd") or 2_400_000),
-        }
-    else:
-        obs = {
-            "weather_severity": 5.5,
-            "disaster_type": 3.4,
-            "response_time_hours": 6.5,
-            "resource_availability": 4.5,
-            "ngo_proximity_km": 48.0,
-            "resource_quality_score": 5.2,
-            "casualties": 45,
-            "economic_damage_usd": 2_400_000,
-        }
+    obs = {
+        "weather_severity": float(disaster.get("weather_severity") or 5.5),
+        "disaster_type": float(disaster.get("disaster_type") or 4.5),
+        "response_time_hours": float(disaster.get("response_time_hours") or 6.5),
+        "resource_availability": float(disaster.get("resource_availability") or 4.5),
+        "ngo_proximity_km": float(disaster.get("ngo_proximity_km") or 25.0),
+        "resource_quality_score": float(disaster.get("resource_quality_score") or 5.0),
+        "casualties": float(disaster.get("casualties") or 0.0),
+        "economic_damage_usd": float(disaster.get("economic_damage_usd") or disaster.get("estimated_damage") or 0.0),
+    }
     # Apply UI current value (with scale conversion)
-    obs[body.intervention_variable] = _scale_to_model(
-        body.intervention_variable, body.current_value
-    )
+    obs[body.intervention_variable] = _scale_to_model(body.intervention_variable, body.current_value)
     return obs
+
+
+@router.get("/what-if/context")
+async def get_what_if_context(
+    disaster_id: str | None = Query(None, description="Optional disaster to scope the live observation context"),
+    admin=Depends(require_admin),
+):
+    context = await _load_ai_observation_context(disaster_id)
+    return {
+        "disaster_id": disaster_id,
+        "observation": context["ui_observation"],
+        "summary": context["summary"],
+        "derived_from": context["derived_from"],
+    }
 
 
 @router.post("/what-if")
@@ -394,22 +859,8 @@ async def what_if_analysis(
     try:
         model = _get_causal_model()
 
-        # Build observation from disaster data or use realistic defaults
-        disaster = None
-        if body.disaster_id:
-            try:
-                d_resp = (
-                    await db_admin.table("disasters")
-                    .select("*")
-                    .eq("id", body.disaster_id)
-                    .single()
-                    .async_execute()
-                )
-                disaster = d_resp.data
-            except Exception:
-                pass
-
-        observation = _build_observation(body, disaster)
+        context = await _load_ai_observation_context(body.disaster_id)
+        observation = _build_observation(body, context["model_observation"])
 
         # Scale proposed value to model range
         proposed_scaled = _scale_to_model(body.intervention_variable, body.proposed_value)
@@ -434,6 +885,8 @@ async def what_if_analysis(
             "confidence_interval": list(result.confidence_interval),
             "explanation": result.explanation,
             "disaster_id": body.disaster_id,
+            "summary": context["summary"],
+            "derived_from": context["derived_from"],
         }
     except ImportError:
         raise HTTPException(status_code=503, detail="Causal model not available (DoWhy not installed)")
@@ -452,17 +905,8 @@ async def top_interventions(
         outcome_var = body.get("outcome_variable", "casualties")
         k = body.get("k", 5)
 
-        # Use realistic defaults matching synthetic training data distribution
-        observation = body.get("observation") or {
-            "weather_severity": 5.5,
-            "disaster_type": 3.4,
-            "response_time_hours": 6.5,
-            "resource_availability": 4.5,
-            "ngo_proximity_km": 48.0,
-            "resource_quality_score": 5.2,
-            "casualties": 45,
-            "economic_damage_usd": 2_400_000,
-        }
+        context = await _load_ai_observation_context(body.get("disaster_id"))
+        observation = body.get("observation") or context["model_observation"]
 
         results = model.top_counterfactual_interventions(
             observation=observation,
@@ -476,7 +920,12 @@ async def top_interventions(
             item["current_value"] = round(_scale_from_model(var, item.get("current_value", 0)), 2)
             item["proposed_value"] = round(_scale_from_model(var, item.get("proposed_value", 0)), 2)
 
-        return {"interventions": results, "outcome_variable": outcome_var}
+        return {
+            "interventions": results,
+            "outcome_variable": outcome_var,
+            "summary": context["summary"],
+            "derived_from": context["derived_from"],
+        }
     except ImportError:
         raise HTTPException(status_code=503, detail="Causal model not available")
     except Exception as e:
@@ -501,17 +950,24 @@ async def record_nlp_correction(
             "confidence": body.confidence,
             "description": body.description,
             "corrected_by": admin.get("id"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "used_for_training": False,
         }
         resp = await db_admin.table("nlp_corrections").insert(correction).async_execute()
 
         # Update the request with the corrected priority
-        await db_admin.table("resource_requests").update({
-            "priority": body.corrected_priority,
-            "nlp_overridden": True,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", body.request_id).async_execute()
+        await (
+            db_admin.table("resource_requests")
+            .update(
+                {
+                    "priority": body.corrected_priority,
+                    "nlp_overridden": True,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            .eq("id", body.request_id)
+            .async_execute()
+        )
 
         # Check if we have enough corrections for retraining
         count_resp = (
@@ -540,17 +996,12 @@ async def get_nlp_corrections(
 ):
     """Get recorded NLP corrections for active learning review."""
     try:
-        query = (
-            db_admin.table("nlp_corrections")
-            .select("*")
-            .order("created_at", desc=True)
-            .limit(limit)
-        )
+        query = db_admin.table("nlp_corrections").select("*").order("created_at", desc=True).limit(limit)
         if unused_only:
             query = query.eq("used_for_training", False)
         resp = await query.async_execute()
         return {"corrections": resp.data or [], "total": len(resp.data or [])}
-    except Exception as e:
+    except Exception:
         return {"corrections": [], "total": 0}
 
 
@@ -574,7 +1025,7 @@ async def trigger_nlp_retrain(admin=Depends(require_admin)):
             }
 
         # Mark corrections as used
-        correction_ids = [c.get("id") for c in corrections if c.get("id")]
+        [c.get("id") for c in corrections if c.get("id")]
 
         # For corrections without descriptions, fetch from requests
         training_samples = []
@@ -593,19 +1044,28 @@ async def trigger_nlp_retrain(admin=Depends(require_admin)):
                 except Exception:
                     pass
             if desc:
-                training_samples.append({
-                    "text": desc,
-                    "priority": c["corrected_priority"],
-                })
+                training_samples.append(
+                    {
+                        "text": desc,
+                        "priority": c["corrected_priority"],
+                    }
+                )
 
         if not training_samples:
             return {"message": "No valid training samples found", "status": "skipped"}
 
         # Mark as used
         try:
-            await db_admin.table("nlp_corrections").update({
-                "used_for_training": True,
-            }).eq("used_for_training", False).async_execute()
+            await (
+                db_admin.table("nlp_corrections")
+                .update(
+                    {
+                        "used_for_training": True,
+                    }
+                )
+                .eq("used_for_training", False)
+                .async_execute()
+            )
         except Exception:
             pass
 
@@ -638,6 +1098,7 @@ async def classify_multilingual(
         # Try multilingual sentence-transformers for embedding
         try:
             from sentence_transformers import SentenceTransformer
+
             # Use multilingual model if available
             model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
             embedding = model.encode(text).tolist()
@@ -704,8 +1165,9 @@ async def get_recommended_ngo(
 
         # Try GAT model first
         try:
-            from ml.gat_model import load_checkpoint, hungarian_assignment, explain_assignment
             import torch
+
+            from ml.gat_model import explain_assignment, hungarian_assignment, load_checkpoint
 
             # Build simple distance-based ranking as fallback
             raise ImportError("Use distance-based for now")
@@ -757,8 +1219,7 @@ async def get_recommended_ngo(
                     .async_execute()
                 )
                 available_stock = sum(
-                    (r.get("total_quantity", 0) - r.get("claimed_quantity", 0))
-                    for r in (inv_resp.data or [])
+                    (r.get("total_quantity", 0) - r.get("claimed_quantity", 0)) for r in (inv_resp.data or [])
                 )
             except Exception:
                 available_stock = 0
@@ -771,14 +1232,16 @@ async def get_recommended_ngo(
             if available_stock >= (req.get("quantity", 1) or 1):
                 score += 20  # has enough stock
 
-            recommendations.append({
-                "ngo_id": ngo["id"],
-                "ngo_name": ngo.get("full_name") or ngo.get("email"),
-                "distance_km": distance_km,
-                "completed_requests": completed_count,
-                "available_stock": available_stock,
-                "match_score": round(score, 1),
-            })
+            recommendations.append(
+                {
+                    "ngo_id": ngo["id"],
+                    "ngo_name": ngo.get("full_name") or ngo.get("email"),
+                    "distance_km": distance_km,
+                    "completed_requests": completed_count,
+                    "available_stock": available_stock,
+                    "match_score": round(score, 1),
+                }
+            )
 
         recommendations.sort(key=lambda x: -x["match_score"])
         return {
@@ -827,13 +1290,14 @@ async def submit_rl_reward(
             "actual_distance_km": actual_distance_km,
             "computed_reward": round(reward, 4),
             "submitted_by": admin.get("id"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         await db_admin.table("rl_reward_feedback").insert(feedback).async_execute()
 
         # Try to feed reward to online RL agent
         try:
             from ml.rl_allocator import RLAllocator
+
             allocator = RLAllocator()
             # Store transition for experience replay
             allocator.agent.store_transition(
@@ -867,6 +1331,7 @@ async def get_federated_privacy_metrics(admin=Depends(require_admin)):
     vs. model accuracy, for display on the fairness dashboard."""
     try:
         from ml.federated_service import FederatedService
+
         service = FederatedService()
         status = service.get_status()
 
@@ -874,13 +1339,15 @@ async def get_federated_privacy_metrics(admin=Depends(require_admin)):
         history = status.get("history", [])
         metrics = []
         for h in history:
-            metrics.append({
-                "round": h.get("round", 0),
-                "epsilon": h.get("privacy_budget_epsilon", 0),
-                "accuracy": h.get("avg_accuracy", 0),
-                "loss": h.get("avg_loss", 0),
-                "n_clients": h.get("n_clients", 0),
-            })
+            metrics.append(
+                {
+                    "round": h.get("round", 0),
+                    "epsilon": h.get("privacy_budget_epsilon", 0),
+                    "accuracy": h.get("avg_accuracy", 0),
+                    "loss": h.get("avg_loss", 0),
+                    "n_clients": h.get("n_clients", 0),
+                }
+            )
 
         return {
             "dp_enabled": status.get("dp_enabled", True),
@@ -888,8 +1355,8 @@ async def get_federated_privacy_metrics(admin=Depends(require_admin)):
             "current_epsilon": history[-1].get("privacy_budget_epsilon", 0) if history else 0,
             "privacy_accuracy_tradeoff": metrics,
             "use_case": "Each NGO trains a local demand-prediction model on regional data. "
-                       "Federated aggregation creates a global model without sharing raw data. "
-                       "ε tracks the differential privacy budget consumed.",
+            "Federated aggregation creates a global model without sharing raw data. "
+            "ε tracks the differential privacy budget consumed.",
         }
     except ImportError:
         return {
@@ -915,55 +1382,47 @@ async def get_multi_horizon_forecast(
 
     Returns data suitable for a dashboard chart widget.
     """
-    features = body.get("features", {})
-
-    # Ensure minimum features
-    defaults = {
-        "temperature": 25.0,
-        "humidity": 60.0,
-        "wind_speed": 15.0,
-        "pressure": 1013.0,
-        "disaster_type": "flood",
-        "affected_population": 1000,
-        "current_severity": "medium",
-    }
-    for k, v in defaults.items():
-        features.setdefault(k, v)
+    context = await _load_ai_observation_context(body.get("disaster_id"))
+    features = dict(body.get("features") or {})
+    if "disaster_type" not in features:
+        features["disaster_type"] = context["dominant_disaster_type"]
+    if "affected_population" not in features:
+        features["affected_population"] = context["summary"]["victims_impacted"]
+    if "current_severity" not in features:
+        features["current_severity"] = context["severity_label"]
+    if "resource_availability_pct" not in features:
+        features["resource_availability_pct"] = context["summary"]["availability_pct"]
+    if "active_request_count" not in features:
+        features["active_request_count"] = context["summary"]["active_request_count"]
 
     try:
-        from app.services.ml_service import MLService
         from app.dependencies import get_ml_service
+
         ml = get_ml_service()
         result = await ml.predict_severity(features)
 
         horizons = []
         for h in ["6h", "12h", "24h", "48h"]:
             key = f"severity_{h}"
-            horizons.append({
-                "horizon": h,
-                "predicted_severity": result.get(key, "medium"),
-                "lower_bound": (result.get("lower_bound") or {}).get(h, "low"),
-                "upper_bound": (result.get("upper_bound") or {}).get(h, "critical"),
-            })
+            horizons.append(
+                {
+                    "horizon": h,
+                    "predicted_severity": result.get(key, "medium"),
+                    "lower_bound": (result.get("lower_bound") or {}).get(h, "low"),
+                    "upper_bound": (result.get("upper_bound") or {}).get(h, "critical"),
+                }
+            )
 
         return {
             "horizons": horizons,
             "current_severity": result.get("predicted_severity", "medium"),
             "confidence": result.get("confidence_score", 0.5),
             "model_version": result.get("model_version", "unknown"),
+            "summary": context["summary"],
+            "derived_from": context["derived_from"],
         }
     except Exception as e:
-        # Fallback
-        return {
-            "horizons": [
-                {"horizon": h, "predicted_severity": "medium", "lower_bound": "low", "upper_bound": "high"}
-                for h in ["6h", "12h", "24h", "48h"]
-            ],
-            "current_severity": "medium",
-            "confidence": 0.3,
-            "model_version": "fallback",
-            "error": str(e),
-        }
+        raise HTTPException(status_code=503, detail=f"Unable to generate forecast from live context: {str(e)}")
 
 
 # ── PINN Spread Heatmap Data ─────────────────────────────────────────────
@@ -990,6 +1449,7 @@ async def get_spread_heatmap(
 
     try:
         from ml.pinn_spread import PINNSpreadModel
+
         pinn = PINNSpreadModel()
 
         if not pinn.is_trained:
@@ -1019,13 +1479,14 @@ async def get_spread_heatmap(
         }
     except ImportError:
         return _generate_demo_heatmap(center_lat, center_lon, deg_offset, horizons, resolution)
-    except Exception as e:
+    except Exception:
         return _generate_demo_heatmap(center_lat, center_lon, deg_offset, horizons, resolution)
 
 
 def _generate_demo_heatmap(lat, lon, offset, horizons, resolution):
     """Generate synthetic heatmap data for demo purposes."""
     import math
+
     results = {}
     for t in horizons:
         grid = []
@@ -1036,7 +1497,7 @@ def _generate_demo_heatmap(lat, lon, offset, horizons, resolution):
                 y = lat - offset + (2 * offset * i / (resolution - 1))
                 x = lon - offset + (2 * offset * j / (resolution - 1))
                 dist = math.sqrt((y - lat) ** 2 + (x - lon) ** 2) / offset
-                intensity = max(0, math.exp(-dist ** 2 / (2 * spread ** 2)))
+                intensity = max(0, math.exp(-(dist**2) / (2 * spread**2)))
                 row.append(round(intensity, 3))
             grid.append(row)
         results[f"T+{t}h"] = {

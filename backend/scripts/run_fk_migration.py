@@ -1,8 +1,11 @@
 """Run the FK migration directly against PostgreSQL."""
-import os
+
 import asyncio
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import asyncpg

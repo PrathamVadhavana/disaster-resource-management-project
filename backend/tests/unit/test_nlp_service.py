@@ -1,14 +1,14 @@
 """
 Tests for NLP Triage Service — Phase 3
 """
-import pytest
+
 from app.services.nlp_service import (
-    extract_urgency_signals,
-    classify_resource_type,
-    estimate_quantity,
-    escalate_priority,
-    classify_request,
     ClassificationResult,
+    classify_request,
+    classify_resource_type,
+    escalate_priority,
+    estimate_quantity,
+    extract_urgency_signals,
 )
 
 
@@ -127,6 +127,7 @@ class TestPriorityEscalation:
 
     def test_escalates_to_critical(self):
         from app.services.nlp_service import UrgencySignal
+
         signals = [UrgencySignal(keyword="trapped", label="trapped", severity_boost=3, offset=0)]
         priority, escalated = escalate_priority("low", signals)
         assert priority == "critical"
@@ -134,6 +135,7 @@ class TestPriorityEscalation:
 
     def test_escalates_from_medium_to_high(self):
         from app.services.nlp_service import UrgencySignal
+
         signals = [UrgencySignal(keyword="bleeding", label="injury", severity_boost=1, offset=0)]
         priority, escalated = escalate_priority("medium", signals)
         assert priority == "high"
@@ -141,6 +143,7 @@ class TestPriorityEscalation:
 
     def test_already_critical_stays_critical(self):
         from app.services.nlp_service import UrgencySignal
+
         signals = [UrgencySignal(keyword="trapped", label="trapped", severity_boost=3, offset=0)]
         priority, escalated = escalate_priority("critical", signals)
         assert priority == "critical"
@@ -183,6 +186,4 @@ class TestFullClassification:
             "Necesitamos water urgente, hay un infant enfermo",
             user_priority="medium",
         )
-        assert "Water" in result.resource_types or any(
-            s["label"] == "infant" for s in result.urgency_signals
-        )
+        assert "Water" in result.resource_types or any(s["label"] == "infant" for s in result.urgency_signals)

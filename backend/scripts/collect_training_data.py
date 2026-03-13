@@ -9,19 +9,19 @@ Usage:
     python -m scripts.collect_training_data --limit 500 # smaller dataset
     python -m scripts.collect_training_data --output training_data/disaster_instructions.jsonl
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import re
-import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
-
 import os
 import random
+import re
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
@@ -42,10 +42,26 @@ RELIEFWEB_APPNAME = os.environ.get("RELIEFWEB_APPNAME", "")
 
 # Disaster-type keywords for instruction generation
 DISASTER_TYPES = [
-    "flood", "earthquake", "cyclone", "hurricane", "typhoon", "tsunami",
-    "drought", "landslide", "wildfire", "volcanic eruption", "storm",
-    "conflict", "epidemic", "famine", "displacement", "cholera",
-    "tornado", "heatwave", "cold wave", "avalanche",
+    "flood",
+    "earthquake",
+    "cyclone",
+    "hurricane",
+    "typhoon",
+    "tsunami",
+    "drought",
+    "landslide",
+    "wildfire",
+    "volcanic eruption",
+    "storm",
+    "conflict",
+    "epidemic",
+    "famine",
+    "displacement",
+    "cholera",
+    "tornado",
+    "heatwave",
+    "cold wave",
+    "avalanche",
 ]
 
 SEVERITY_LABELS = ["low", "moderate", "high", "critical"]
@@ -74,10 +90,16 @@ def _detect_disaster_type(text: str) -> str:
 def _detect_severity(text: str) -> str:
     """Heuristic severity from keywords in the report body."""
     lower = text.lower()
-    critical_kw = ["catastrophic", "critical", "unprecedented", "mass casualty",
-                   "state of emergency", "declared emergency", "death toll"]
-    high_kw = ["severe", "major", "significant damage", "thousands displaced",
-               "urgent", "emergency"]
+    critical_kw = [
+        "catastrophic",
+        "critical",
+        "unprecedented",
+        "mass casualty",
+        "state of emergency",
+        "declared emergency",
+        "death toll",
+    ]
+    high_kw = ["severe", "major", "significant damage", "thousands displaced", "urgent", "emergency"]
     moderate_kw = ["moderate", "localized", "some damage", "hundreds affected"]
 
     for kw in critical_kw:
@@ -169,8 +191,13 @@ def fetch_reports(limit: int = 5000, appname: str = "") -> list[dict[str, Any]]:
         },
         "fields": {
             "include": [
-                "title", "body", "date.created", "country.name",
-                "primary_country.name", "source.name", "disaster_type.name",
+                "title",
+                "body",
+                "date.created",
+                "country.name",
+                "primary_country.name",
+                "source.name",
+                "disaster_type.name",
             ]
         },
         "sort": ["date.created:desc"],
@@ -239,7 +266,8 @@ def process_reports(reports: list[dict[str, Any]]) -> list[dict[str, str]]:
 
     logger.info(
         "Processed %d instruction pairs (%d skipped).",
-        len(pairs), skipped,
+        len(pairs),
+        skipped,
     )
     return pairs
 
@@ -266,12 +294,14 @@ def augment_instructions(pairs: list[dict[str, str]]) -> list[dict[str, str]]:
 
         # Add 1-2 alternative phrasings (not all — keeps dataset balanced)
         for tmpl in INSTRUCTION_TEMPLATES[1:3]:
-            augmented.append({
-                "instruction": tmpl.format(dtype=dtype, sev=sev, loc=loc),
-                "input": "",
-                "output": pair["output"],
-                "metadata": meta,
-            })
+            augmented.append(
+                {
+                    "instruction": tmpl.format(dtype=dtype, sev=sev, loc=loc),
+                    "input": "",
+                    "output": pair["output"],
+                    "metadata": meta,
+                }
+            )
 
     logger.info("Augmented dataset: %d → %d pairs.", len(pairs), len(augmented))
     return augmented
@@ -306,7 +336,7 @@ def save_metadata(pairs: list[dict], output_path: str | Path) -> Path:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "total_pairs": len(pairs),
                 "source": "reliefweb",
                 "records": pairs,
@@ -324,13 +354,26 @@ def save_metadata(pairs: list[dict], output_path: str | Path) -> Path:
 # Used when ReliefWeb API is unavailable (no registered appname)
 
 _SYNTH_LOCATIONS = [
-    ("Bangladesh", "Dhaka"), ("India", "Mumbai"), ("Nepal", "Kathmandu"),
-    ("Philippines", "Manila"), ("Indonesia", "Jakarta"), ("Pakistan", "Karachi"),
-    ("Haiti", "Port-au-Prince"), ("Mozambique", "Maputo"), ("Japan", "Tokyo"),
-    ("Turkey", "Istanbul"), ("Syria", "Aleppo"), ("Somalia", "Mogadishu"),
-    ("Yemen", "Sanaa"), ("Ethiopia", "Addis Ababa"), ("South Sudan", "Juba"),
-    ("Myanmar", "Yangon"), ("Afghanistan", "Kabul"), ("Nigeria", "Lagos"),
-    ("Kenya", "Nairobi"), ("Colombia", "Bogota"),
+    ("Bangladesh", "Dhaka"),
+    ("India", "Mumbai"),
+    ("Nepal", "Kathmandu"),
+    ("Philippines", "Manila"),
+    ("Indonesia", "Jakarta"),
+    ("Pakistan", "Karachi"),
+    ("Haiti", "Port-au-Prince"),
+    ("Mozambique", "Maputo"),
+    ("Japan", "Tokyo"),
+    ("Turkey", "Istanbul"),
+    ("Syria", "Aleppo"),
+    ("Somalia", "Mogadishu"),
+    ("Yemen", "Sanaa"),
+    ("Ethiopia", "Addis Ababa"),
+    ("South Sudan", "Juba"),
+    ("Myanmar", "Yangon"),
+    ("Afghanistan", "Kabul"),
+    ("Nigeria", "Lagos"),
+    ("Kenya", "Nairobi"),
+    ("Colombia", "Bogota"),
 ]
 
 _SYNTH_TEMPLATES = [
@@ -471,81 +514,99 @@ def generate_synthetic_reports(count: int = 500) -> list[dict[str, Any]]:
     for i in range(count):
         tmpl = random.choice(_SYNTH_TEMPLATES)
         country, city = random.choice(_SYNTH_LOCATIONS)
-        sev = random.choice(SEVERITY_LABELS)
+        random.choice(SEVERITY_LABELS)
 
         params: dict[str, Any] = {
-            "city": city, "country": country,
+            "city": city,
+            "country": country,
             "displaced": _rand(1000, 500000),
             "casualties": _rand(0, 2000),
             "districts": _rand(3, 25),
         }
 
         if tmpl["type"] == "flood":
-            params.update({
-                "water_level": round(random.uniform(1.5, 8.0), 1),
-                "food_need": _rand(5000, 200000),
-                "sar_areas": _rand(5, 30),
-                "shelters": _rand(10, 100),
-                "water_units": _rand(20, 200),
-                "tents": _rand(500, 20000),
-                "med_teams": _rand(5, 50),
-                "boats": _rand(20, 200),
-                "food_packs": _rand(10000, 500000),
-            })
+            params.update(
+                {
+                    "water_level": round(random.uniform(1.5, 8.0), 1),
+                    "food_need": _rand(5000, 200000),
+                    "sar_areas": _rand(5, 30),
+                    "shelters": _rand(10, 100),
+                    "water_units": _rand(20, 200),
+                    "tents": _rand(500, 20000),
+                    "med_teams": _rand(5, 50),
+                    "boats": _rand(20, 200),
+                    "food_packs": _rand(10000, 500000),
+                }
+            )
         elif tmpl["type"] == "earthquake":
-            params.update({
-                "magnitude": round(random.uniform(5.5, 8.5), 1),
-                "time": f"{_rand(0,23):02d}:{_rand(0,59):02d}",
-                "depth": _rand(5, 80),
-                "injured": _rand(500, 50000),
-                "buildings_collapsed": _rand(100, 30000),
-                "infra_damage": random.choice(["major hospital partially collapsed", "bridges damaged", "water main ruptured", "airport runway cracked"]),
-                "power_out": _rand(10000, 500000),
-                "road_blocked": _rand(5, 40),
-                "sar_countries": _rand(3, 15),
-            })
+            params.update(
+                {
+                    "magnitude": round(random.uniform(5.5, 8.5), 1),
+                    "time": f"{_rand(0, 23):02d}:{_rand(0, 59):02d}",
+                    "depth": _rand(5, 80),
+                    "injured": _rand(500, 50000),
+                    "buildings_collapsed": _rand(100, 30000),
+                    "infra_damage": random.choice(
+                        [
+                            "major hospital partially collapsed",
+                            "bridges damaged",
+                            "water main ruptured",
+                            "airport runway cracked",
+                        ]
+                    ),
+                    "power_out": _rand(10000, 500000),
+                    "road_blocked": _rand(5, 40),
+                    "sar_countries": _rand(3, 15),
+                }
+            )
         elif tmpl["type"] == "cyclone":
-            params.update({
-                "name": random.choice(cyclone_names),
-                "category": _rand(2, 5),
-                "wind_speed": _rand(120, 300),
-                "surge": round(random.uniform(2.0, 8.0), 1),
-                "missing": _rand(10, 500),
-                "crop_area": _rand(5000, 200000),
-                "boats_damaged": _rand(50, 2000),
-                "comm_areas": _rand(3, 15),
-                "rc_teams": _rand(5, 30),
-                "fund": _rand(10, 500),
-            })
+            params.update(
+                {
+                    "name": random.choice(cyclone_names),
+                    "category": _rand(2, 5),
+                    "wind_speed": _rand(120, 300),
+                    "surge": round(random.uniform(2.0, 8.0), 1),
+                    "missing": _rand(10, 500),
+                    "crop_area": _rand(5000, 200000),
+                    "boats_damaged": _rand(50, 2000),
+                    "comm_areas": _rand(3, 15),
+                    "rc_teams": _rand(5, 30),
+                    "fund": _rand(10, 500),
+                }
+            )
         elif tmpl["type"] == "drought":
-            params.update({
-                "month": _rand(4, 18),
-                "rain_pct": _rand(10, 45),
-                "affected": _rand(100000, 5000000),
-                "regions": _rand(3, 12),
-                "crisis": _rand(50000, 2000000),
-                "emergency": _rand(10000, 500000),
-                "livestock": _rand(10000, 500000),
-                "crop_loss": _rand(30, 80),
-                "water_sources": _rand(40, 85),
-                "water_served": _rand(10000, 200000),
-                "children": _rand(5000, 200000),
-                "cash": _rand(5000, 100000),
-            })
+            params.update(
+                {
+                    "month": _rand(4, 18),
+                    "rain_pct": _rand(10, 45),
+                    "affected": _rand(100000, 5000000),
+                    "regions": _rand(3, 12),
+                    "crisis": _rand(50000, 2000000),
+                    "emergency": _rand(10000, 500000),
+                    "livestock": _rand(10000, 500000),
+                    "crop_loss": _rand(30, 80),
+                    "water_sources": _rand(40, 85),
+                    "water_served": _rand(10000, 200000),
+                    "children": _rand(5000, 200000),
+                    "cash": _rand(5000, 100000),
+                }
+            )
         elif tmpl["type"] == "epidemic":
-            params.update({
-                "disease": random.choice(diseases),
-                "cases": _rand(500, 50000),
-                "deaths": _rand(10, 2000),
-                "provinces": _rand(3, 20),
-                "cfr": round(random.uniform(0.5, 25.0), 1),
-                "treatment_centers": _rand(5, 50),
-                "health_workers": _rand(100, 5000),
-                "contacts": _rand(1000, 50000),
-                "vax_target": _rand(50000, 2000000),
-                "grade": _rand(1, 3),
-                "gap": _rand(5, 200),
-            })
+            params.update(
+                {
+                    "disease": random.choice(diseases),
+                    "cases": _rand(500, 50000),
+                    "deaths": _rand(10, 2000),
+                    "provinces": _rand(3, 20),
+                    "cfr": round(random.uniform(0.5, 25.0), 1),
+                    "treatment_centers": _rand(5, 50),
+                    "health_workers": _rand(100, 5000),
+                    "contacts": _rand(1000, 50000),
+                    "vax_target": _rand(50000, 2000000),
+                    "grade": _rand(1, 3),
+                    "gap": _rand(5, 200),
+                }
+            )
 
         try:
             body = tmpl["body"].format(**params)
@@ -555,9 +616,9 @@ def generate_synthetic_reports(count: int = 500) -> list[dict[str, Any]]:
         report = {
             "id": f"synth-{i:05d}",
             "fields": {
-                "title": f"{country}: {tmpl['type'].title()} Situation Report #{_rand(1,50)}",
+                "title": f"{country}: {tmpl['type'].title()} Situation Report #{_rand(1, 50)}",
                 "body": body,
-                "date": {"created": datetime.now(timezone.utc).isoformat()},
+                "date": {"created": datetime.now(UTC).isoformat()},
                 "country": [{"name": country}],
                 "primary_country": {"name": country},
             },
@@ -570,32 +631,41 @@ def generate_synthetic_reports(count: int = 500) -> list[dict[str, Any]]:
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(
-        description="Collect ReliefWeb situation reports for DisasterGPT training"
-    )
+    parser = argparse.ArgumentParser(description="Collect ReliefWeb situation reports for DisasterGPT training")
     parser.add_argument(
-        "--limit", type=int, default=5000,
+        "--limit",
+        type=int,
+        default=5000,
         help="Maximum number of reports to fetch (default: 5000)",
     )
     parser.add_argument(
-        "--output", type=str,
+        "--output",
+        type=str,
         default="training_data/disaster_instructions.jsonl",
         help="Output JSONL file path",
     )
     parser.add_argument(
-        "--augment", action="store_true", default=True,
+        "--augment",
+        action="store_true",
+        default=True,
         help="Augment with alternative instruction phrasings",
     )
     parser.add_argument(
-        "--no-augment", dest="augment", action="store_false",
+        "--no-augment",
+        dest="augment",
+        action="store_false",
         help="Disable instruction augmentation",
     )
     parser.add_argument(
-        "--appname", type=str, default="",
+        "--appname",
+        type=str,
+        default="",
         help="ReliefWeb registered appname (or set RELIEFWEB_APPNAME env var)",
     )
     parser.add_argument(
-        "--synthetic", action="store_true", default=False,
+        "--synthetic",
+        action="store_true",
+        default=False,
         help="Force synthetic data generation (skip API)",
     )
     args = parser.parse_args()

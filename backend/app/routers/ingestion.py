@@ -14,8 +14,8 @@ Provides endpoints for:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -40,6 +40,7 @@ def get_orchestrator():
 
 # ── Status & control ────────────────────────────────────────────────
 
+
 @router.get("/status")
 async def ingestion_status():
     """Return status of all external data source feeds."""
@@ -56,7 +57,7 @@ async def manual_poll(source_name: str):
         return {
             "source": source_name,
             "events_ingested": len(events) if events else 0,
-            "polled_at": datetime.now(timezone.utc).isoformat(),
+            "polled_at": datetime.now(UTC).isoformat(),
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -86,11 +87,12 @@ async def stop_orchestrator():
 
 # ── Ingested events ────────────────────────────────────────────────
 
+
 @router.get("/events")
 async def list_ingested_events(
-    event_type: Optional[str] = Query(None, description="Filter by event type"),
-    severity: Optional[str] = Query(None, description="Filter by severity"),
-    processed: Optional[bool] = Query(None, description="Filter by processed status"),
+    event_type: str | None = Query(None, description="Filter by event type"),
+    severity: str | None = Query(None, description="Filter by severity"),
+    processed: bool | None = Query(None, description="Filter by processed status"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -130,9 +132,10 @@ async def get_ingested_event(event_id: str):
 
 # ── Weather observations ────────────────────────────────────────────
 
+
 @router.get("/weather")
 async def list_weather_observations(
-    location_id: Optional[str] = Query(None),
+    location_id: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
 ):
     """List recent weather observations (from memory)."""
@@ -151,25 +154,25 @@ async def latest_weather(location_id: str):
 
 # ── Satellite observations ──────────────────────────────────────────
 
+
 @router.get("/satellites")
 async def list_satellite_observations(
-    disaster_id: Optional[str] = Query(None),
-    confidence: Optional[str] = Query(None, description="low, nominal, high"),
+    disaster_id: str | None = Query(None),
+    confidence: str | None = Query(None, description="low, nominal, high"),
     limit: int = Query(50, ge=1, le=500),
 ):
     """List recent satellite / fire hotspot observations (from memory)."""
-    observations = memory_store.query_satellites(
-        disaster_id=disaster_id, confidence=confidence, limit=limit
-    )
+    observations = memory_store.query_satellites(disaster_id=disaster_id, confidence=confidence, limit=limit)
     return {"observations": observations, "count": len(observations)}
 
 
 # ── Alert notifications ────────────────────────────────────────────
 
+
 @router.get("/alerts")
 async def list_alert_notifications(
-    severity: Optional[str] = Query(None),
-    status: Optional[str] = Query(None, description="pending, sent, failed, acknowledged"),
+    severity: str | None = Query(None),
+    status: str | None = Query(None, description="pending, sent, failed, acknowledged"),
     limit: int = Query(50, ge=1, le=500),
 ):
     """List recent alert notifications (from memory)."""
@@ -179,6 +182,7 @@ async def list_alert_notifications(
 
 # ── Data source management ──────────────────────────────────────────
 
+
 @router.get("/sources")
 async def list_data_sources():
     """List all registered external data sources (from memory)."""
@@ -186,7 +190,7 @@ async def list_data_sources():
 
 
 @router.patch("/sources/{source_id}")
-async def update_data_source(source_id: str, body: Dict[str, Any]):
+async def update_data_source(source_id: str, body: dict[str, Any]):
     """Update a data source config (e.g. toggle is_active, change interval)."""
     allowed_fields = {"is_active", "poll_interval_s"}
     update_data = {k: v for k, v in body.items() if k in allowed_fields}

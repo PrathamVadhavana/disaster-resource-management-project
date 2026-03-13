@@ -1,34 +1,59 @@
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
+import asyncio
+import json
 import logging
 import os
-import json
-import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 load_dotenv(override=True)
 
+from app.database import init_db
+from app.dependencies import init_supabase_auth, set_ml_service
+from app.middleware import configure_logging, setup_logging_middleware, setup_rate_limiting
 from app.routers import (
-    disasters, predictions, resources, auth, victim, victim_profile, retrain, nlp,
-    ingestion, global_disasters, admin, certifications, donor, ngo, volunteer,
-    chat, interactivity, analytics, realtime, hotspots, causal, llm, advanced_ml,
-    workflow
+    admin,
+    advanced_ml,
+    ai_insights,
+    analytics,
+    auth,
+    causal,
+    certifications,
+    chat,
+    disasters,
+    donor,
+    global_disasters,
+    hotspots,
+    ingestion,
+    interactivity,
+    llm,
+    ml_evaluation,
+    ngo,
+    nlp,
+    predictions,
+    realtime,
+    resources,
+    retrain,
+    victim,
+    victim_profile,
+    volunteer,
+    workflow,
 )
-from app.services.ml_service import MLService
-from app.services.ingestion.orchestrator import IngestionOrchestrator
 from app.routers.ingestion import set_orchestrator
 from app.services.anomaly_service import AnomalyDetectionService
+from app.services.ingestion.orchestrator import IngestionOrchestrator
+from app.services.ml_eval_service import run_ml_evaluation
+from app.services.ml_service import MLService
 from app.services.sitrep_service import SitrepService
-from app.database import init_db
-from app.dependencies import set_ml_service, init_supabase_auth
-from app.middleware import setup_rate_limiting, setup_logging_middleware, configure_logging
 
 # Configure structured logging
 configure_logging()
 logger = logging.getLogger(__name__)
+
 
 # Custom JSON encoder to handle datetime objects
 class DateTimeEncoder(json.JSONEncoder):
@@ -84,6 +109,7 @@ async def lifespan(app: FastAPI):
 
     # Phase 6: Start DBSCAN hotspot clustering every 5 minutes
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
     from ml.clustering_service import run_clustering
 
     hotspot_scheduler = AsyncIOScheduler()
@@ -100,24 +126,80 @@ async def lifespan(app: FastAPI):
     app.state.hotspot_scheduler = hotspot_scheduler
     logger.info("Hotspot DBSCAN scheduler started (every 30 min)")
 
+    # Phase 5+: Periodic ML evaluation harness run
+    from app.core.phase5_config import phase5_config
+
+    eval_scheduler = AsyncIOScheduler()
+
+    async def _scheduled_ml_eval_run():
+        try:
+            await run_ml_evaluation(days=phase5_config.EVALUATION_LOOKBACK_DAYS)
+            logger.info("Scheduled ML evaluation completed")
+        except Exception as exc:
+            logger.error("Scheduled ML evaluation failed: %s", exc)
+
+    eval_scheduler.add_job(
+        _scheduled_ml_eval_run,
+        trigger="interval",
+        hours=max(1, phase5_config.EVALUATION_INTERVAL_HOURS),
+        id="ml_eval_harness",
+        name="ML evaluation harness",
+        max_instances=1,
+        replace_existing=True,
+    )
+    eval_scheduler.start()
+    app.state.eval_scheduler = eval_scheduler
+    logger.info(
+        "ML evaluation scheduler started (every %sh, lookback=%sd)",
+        phase5_config.EVALUATION_INTERVAL_HOURS,
+        phase5_config.EVALUATION_LOOKBACK_DAYS,
+    )
+
+    async def _scheduled_fallback_alert_check():
+        try:
+            alerts_payload = ml_service.get_fallback_alerts()
+            if alerts_payload.get("alerts_active"):
+                logger.warning(
+                    "ML fallback alerts active: %s",
+                    json.dumps(alerts_payload.get("alerts", []), default=str),
+                )
+            else:
+                logger.debug("ML fallback alert check: no active alerts")
+        except Exception as exc:
+            logger.error("Scheduled fallback alert check failed: %s", exc)
+
+    eval_scheduler.add_job(
+        _scheduled_fallback_alert_check,
+        trigger="interval",
+        minutes=15,
+        id="ml_fallback_alert_check",
+        name="ML fallback alert monitor",
+        max_instances=1,
+        replace_existing=True,
+    )
+
     # Phase 7: Start SLA monitoring background loop
     from app.services.sla_service import sla_check_loop
+
     sla_task = asyncio.create_task(sla_check_loop())
     app.state.sla_task = sla_task
     logger.info("SLA monitoring background task started")
 
     # Start event store batch flush loop (reduces DB writes)
     from app.services.event_sourcing_service import start_event_flush_loop
+
     event_flush_task = asyncio.create_task(start_event_flush_loop())
     app.state.event_flush_task = event_flush_task
     logger.info("Event store batch flush loop started")
 
     # Start periodic in-memory cache cleanup
     from app.core.query_cache import cleanup_expired
+
     async def _cache_cleanup_loop():
         while True:
             await asyncio.sleep(300)  # every 5 minutes
             cleanup_expired()
+
     cache_cleanup_task = asyncio.create_task(_cache_cleanup_loop())
     app.state.cache_cleanup_task = cache_cleanup_task
 
@@ -137,12 +219,16 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "hotspot_scheduler") and app.state.hotspot_scheduler:
         app.state.hotspot_scheduler.shutdown(wait=False)
         logger.info("Hotspot scheduler stopped")
+    if hasattr(app.state, "eval_scheduler") and app.state.eval_scheduler:
+        app.state.eval_scheduler.shutdown(wait=False)
+        logger.info("ML evaluation scheduler stopped")
     if hasattr(app.state, "sla_task") and app.state.sla_task:
         app.state.sla_task.cancel()
         logger.info("SLA monitoring task stopped")
     if hasattr(app.state, "event_flush_task") and app.state.event_flush_task:
         # Flush remaining events before shutdown
         from app.services.event_sourcing_service import _flush_event_buffer
+
         await _flush_event_buffer()
         app.state.event_flush_task.cancel()
         logger.info("Event flush task stopped")
@@ -155,8 +241,10 @@ async def lifespan(app: FastAPI):
 
 async def _sitrep_cron_loop():
     """Daily cron loop that generates situation reports at the configured hour."""
-    from app.core.phase5_config import phase5_config
     import asyncio
+
+    from app.core.phase5_config import phase5_config
+
     while True:
         try:
             now = datetime.utcnow()
@@ -213,29 +301,19 @@ setup_logging_middleware(app)
 # Health check endpoint
 @app.get("/")
 async def root():
-    return {
-        "message": "Disaster Management API",
-        "status": "operational",
-        "version": "1.0.0"
-    }
+    return {"message": "Disaster Management API", "status": "operational", "version": "1.0.0"}
 
 
 @app.get("/health")
 async def health_check():
     ml = getattr(app.state, "ml_service", None)
-    return {
-        "status": "healthy",
-        "ml_models_loaded": ml is not None and ml.models_loaded
-    }
+    return {"status": "healthy", "ml_models_loaded": ml is not None and ml.models_loaded}
 
 
 @app.get("/test-datetime")
 async def test_datetime():
     """Test endpoint to check datetime serialization"""
-    return {
-        "current_time": datetime.utcnow(),
-        "test_datetime": datetime(2024, 1, 23, 10, 0, 0)
-    }
+    return {"current_time": datetime.utcnow(), "test_datetime": datetime(2024, 1, 23, 10, 0, 0)}
 
 
 # Include routers
@@ -262,14 +340,17 @@ app.include_router(realtime.router)
 app.include_router(hotspots.router, prefix="/api/hotspots", tags=["Hotspot Clusters"])
 app.include_router(causal.router, prefix="/api/causal", tags=["Causal AI Analysis"])
 app.include_router(llm.router, prefix="/api/llm", tags=["DisasterGPT LLM"])
+app.include_router(ml_evaluation.router)
 app.include_router(advanced_ml.router, prefix="/api/ml", tags=["Advanced ML (RL, Federated, Multi-Agent, PINN)"])
 app.include_router(workflow.router, tags=["Workflow & SLA"])
+app.include_router(ai_insights.router, prefix="/api/ai-insights", tags=["AI Insights"])
 
 
 # Global exception handler – never leak internal details in production
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     import traceback
+
     # Let HTTPExceptions pass through with their real detail
     if isinstance(exc, HTTPException):
         return JSONResponse(
@@ -290,14 +371,9 @@ async def global_exception_handler(request, exc):
     )
 
 
-
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        reload_dirs=["app", "ml", "scripts"],
-        log_level="info"
+        "main:app", host="0.0.0.0", port=8000, reload=True, reload_dirs=["app", "ml", "scripts"], log_level="info"
     )

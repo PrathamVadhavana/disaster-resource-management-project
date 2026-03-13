@@ -1,20 +1,14 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import List, Optional, Dict, Any
-from datetime import datetime
 import logging
+from datetime import datetime
+from typing import Any
 
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+
+from app.core.cache import CACHE_TTL_SHORT, cache_get, cache_invalidate_pattern, cache_set
+from app.core.helpers import serialize_datetime_fields, serialize_disaster
 from app.database import db
-from app.schemas import (
-    Disaster,
-    DisasterCreate,
-    DisasterUpdate,
-    DisasterStatus,
-    DisasterSeverity,
-    DisasterType
-)
-from app.core.helpers import serialize_disaster, serialize_datetime_fields
-from app.core.cache import cache_get, cache_set, cache_invalidate_pattern, CACHE_TTL_SHORT
 from app.dependencies import require_role
+from app.schemas import Disaster, DisasterSeverity, DisasterStatus, DisasterType, DisasterUpdate
 from app.services.notification_service import notify_all_by_role
 
 logger = logging.getLogger("disasters_router")
@@ -24,16 +18,18 @@ router = APIRouter()
 
 @router.get("/")
 async def get_disasters(
-    status: Optional[DisasterStatus] = None,
-    severity: Optional[DisasterSeverity] = None,
-    type: Optional[DisasterType] = None,
+    status: DisasterStatus | None = None,
+    severity: DisasterSeverity | None = None,
+    type: DisasterType | None = None,
+    source: str | None = Query(None, description="Filter by source (automated, victim)"),
+    search: str | None = None,
     limit: int = Query(default=100, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     """Get all disasters with optional filtering"""
     try:
         # Build a deterministic cache key from the query params
-        cache_key = f"disasters:list:{status}:{severity}:{type}:{limit}:{offset}"
+        cache_key = f"disasters:list:{status}:{severity}:{type}:{source}:{limit}:{offset}"
         cached = await cache_get(cache_key)
         if cached is not None:
             return cached
@@ -47,6 +43,15 @@ async def get_disasters(
             query = query.eq("severity", severity.value)
         if type:
             query = query.eq("type", type.value)
+        if source:
+            # Filter by source in metadata JSONB
+            query = query.eq("metadata->>source", source)
+        if search:
+            # Search across title, location_name, and type fields
+            search_lower = search.lower()
+            query = query.or_(
+                f"title.ilike.%{search_lower}%,location_name.ilike.%{search_lower}%,type.ilike.%{search_lower}%"
+            )
 
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
 
@@ -57,8 +62,13 @@ async def get_disasters(
         location_ids = list(set(d["location_id"] for d in base_disasters if d.get("location_id")))
         location_map = {}
         if location_ids:
-            loc_resp = await db.table("locations").select("id, latitude, longitude, name, city, country").in_("id", location_ids).async_execute()
-            for loc in (loc_resp.data or []):
+            loc_resp = (
+                await db.table("locations")
+                .select("id, latitude, longitude, name, city, country")
+                .in_("id", location_ids)
+                .async_execute()
+            )
+            for loc in loc_resp.data or []:
                 location_map[loc["id"]] = loc
 
         disasters_data = []
@@ -92,15 +102,37 @@ async def get_disaster(disaster_id: str):
 
 @router.post("/")
 async def create_disaster(
-    disaster_data: Dict[str, Any],
-    _user: dict = Depends(require_role("admin", "ngo")),
+    disaster_data: dict[str, Any],
+    user: dict = Depends(require_role("admin", "ngo", "victim")),
 ):
-    """Create a new disaster record (admin/ngo only)"""
+    """Create a new disaster record (admin/ngo/victim)"""
     try:
         disaster_dict = dict(disaster_data)
         disaster_dict["status"] = "active"
 
-        response = await db.table("disasters").insert(disaster_dict).async_execute()
+        # Set source and reported_by in metadata
+        meta = disaster_dict.get("metadata") or {}
+        if not meta.get("source"):
+            meta["source"] = user.get("role", "admin")
+        if not meta.get("reported_by"):
+            meta["reported_by"] = user.get("id")
+        disaster_dict["metadata"] = meta
+
+        # Filter out location_name if it exists but the column doesn't exist in DB yet
+        # This handles the case where frontend sends location_name but DB schema hasn't been updated
+        if "location_name" in disaster_dict:
+            # Try to insert with location_name first
+            try:
+                response = await db.table("disasters").insert(disaster_dict).async_execute()
+            except Exception as e:
+                if "location_name" in str(e) and "schema cache" in str(e):
+                    # Column doesn't exist, remove it and try again
+                    disaster_dict_filtered = {k: v for k, v in disaster_dict.items() if k != "location_name"}
+                    response = await db.table("disasters").insert(disaster_dict_filtered).async_execute()
+                else:
+                    raise e
+        else:
+            response = await db.table("disasters").insert(disaster_dict).async_execute()
 
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to create disaster")
@@ -133,11 +165,7 @@ async def create_disaster(
         except Exception:
             pass
 
-        return {
-            "id": disaster_id,
-            "message": "Disaster created successfully",
-            "status": "created"
-        }
+        return {"id": disaster_id, "message": "Disaster created successfully", "status": "created"}
 
     except HTTPException:
         raise
@@ -149,34 +177,26 @@ async def create_disaster(
 async def update_disaster(
     disaster_id: str,
     disaster_update: DisasterUpdate,
+    background_tasks: BackgroundTasks,
     _user: dict = Depends(require_role("admin", "ngo")),
 ):
     """Update an existing disaster (admin/ngo only)"""
     try:
         update_dict = disaster_update.model_dump(exclude_unset=True)
 
-        response = (
-            await db.table("disasters")
-            .update(update_dict)
-            .eq("id", disaster_id)
-            .async_execute()
-        )
+        response = await db.table("disasters").update(update_dict).eq("id", disaster_id).async_execute()
 
         if not response.data:
             raise HTTPException(status_code=404, detail="Disaster not found")
 
         await cache_invalidate_pattern("disasters:*")
 
-        # Auto-generate Causal Audit Report when status → resolved
         updated = response.data[0]
-        if update_dict.get("status") == "resolved" or update_dict.get("status") == DisasterStatus.RESOLVED.value:
-            try:
-                from app.services.audit_report_generator import on_disaster_resolved
-                import asyncio
-                asyncio.create_task(on_disaster_resolved(updated))
-                logger.info("Causal audit report generation triggered for %s", disaster_id)
-            except Exception as audit_err:
-                logger.warning("Causal audit trigger failed: %s", audit_err)
+        if update_dict.get("status") in ["resolved", DisasterStatus.RESOLVED.value]:
+            logger.info("Triggering causal audit report generation for disaster %s", disaster_id)
+            from app.services.audit_report_generator import on_disaster_resolved
+
+            background_tasks.add_task(on_disaster_resolved, updated)
 
         return serialize_datetime_fields(updated)
 
@@ -189,25 +209,28 @@ async def update_disaster(
 @router.delete("/{disaster_id}", status_code=204)
 async def delete_disaster(
     disaster_id: str,
+    background_tasks: BackgroundTasks,
     _user: dict = Depends(require_role("admin", "ngo")),
 ):
     """Delete a disaster — soft delete by setting status to resolved (admin/ngo only)"""
     try:
         response = (
             await db.table("disasters")
-            .update({
-                "status": DisasterStatus.RESOLVED.value,
-                "updated_at": datetime.utcnow().isoformat()
-            })
+            .update({"status": DisasterStatus.RESOLVED.value, "updated_at": datetime.utcnow().isoformat()})
             .eq("id", disaster_id)
             .async_execute()
         )
-        
+
         if not response.data:
             raise HTTPException(status_code=404, detail="Disaster not found")
-        
+
+        # Trigger causal audit report
+        from app.services.audit_report_generator import on_disaster_resolved
+
+        background_tasks.add_task(on_disaster_resolved, response.data[0])
+
         return None
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -216,14 +239,51 @@ async def delete_disaster(
 async def get_disaster_resources(disaster_id: str):
     """Get all resources allocated to a specific disaster"""
     try:
+        response = await db.table("resources").select("*").eq("disaster_id", disaster_id).async_execute()
+
+        return response.data
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dropdown/options")
+async def get_disaster_dropdown_options():
+    """Get disasters for dropdown selection - includes active and recent resolved disasters"""
+    try:
+        # Get active disasters and recently resolved ones (last 30 days)
+        from datetime import datetime, timedelta
+
+        thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+
         response = (
-            await db.table("resources")
-            .select("*")
-            .eq("disaster_id", disaster_id)
+            await db.table("disasters")
+            .select("id, title, type, severity, status, created_at")
+            .or_(f"status.eq.active,created_at.gte.{thirty_days_ago}")
+            .order("created_at", desc=True)
+            .limit(50)
             .async_execute()
         )
-        
-        return response.data
-        
+
+        disasters = response.data or []
+
+        # Format for dropdown
+        options = []
+        for d in disasters:
+            status_badge = "🔴 Active" if d.get("status") == "active" else "✅ Resolved"
+            options.append(
+                {
+                    "id": d["id"],
+                    "label": f"{d['title']} ({d['type'].title()}) - {status_badge}",
+                    "value": d["id"],
+                    "type": d["type"],
+                    "status": d["status"],
+                    "severity": d["severity"],
+                    "created_at": d["created_at"],
+                }
+            )
+
+        return options
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -9,23 +9,73 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 // ─── Helper ─────────────────────────────────────────────
 async function getAccessToken(): Promise<string> {
-    const sb = getSupabaseClient()
-    const { data: { session } } = await sb.auth.getSession()
-    if (!session) throw new Error('Not authenticated')
-    return session.access_token
+    try {
+        const sb = getSupabaseClient()
+        const sessionPromise = sb.auth.getSession()
+        const timeoutPromise = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error('Session lookup timed out')), 8000)
+        })
+        const { data: { session } } = await Promise.race([sessionPromise, timeoutPromise])
+        if (session?.access_token) return session.access_token
+    } catch {
+        // fall back to cookie token below
+    }
+
+    if (typeof document !== 'undefined') {
+        const tokenCookie = document.cookie
+            .split('; ')
+            .find((row) => row.startsWith('sb-token='))
+            ?.split('=')[1]
+        if (tokenCookie) return decodeURIComponent(tokenCookie)
+    }
+
+    throw new Error('Not authenticated')
 }
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
     const token = await getAccessToken()
-    const res = await fetch(`${API_BASE}${path}`, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            ...options.headers,
-        },
-    })
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(options.headers as Record<string, string> ?? {}),
+    }
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 20000)
+
+    let res: Response
+    try {
+        res = await fetch(`${API_BASE}${path}`, {
+            ...options,
+            headers,
+            signal: controller.signal,
+        })
+    } catch (error: any) {
+        if (error?.name === 'AbortError') {
+            throw new Error('Request timed out')
+        }
+        throw error
+    } finally {
+        clearTimeout(timeoutId)
+    }
+
     if (!res.ok) {
+        if (res.status === 401) {
+            try {
+                const sb = getSupabaseClient()
+                const { data } = await sb.auth.refreshSession()
+                if (data.session?.access_token) {
+                    headers.Authorization = `Bearer ${data.session.access_token}`
+                    const retry = await fetch(`${API_BASE}${path}`, { ...options, headers })
+                    if (retry.ok) {
+                        if (retry.status === 204) return {} as T
+                        return retry.json()
+                    }
+                }
+            } catch {
+                // fall through to regular error parsing
+            }
+        }
         const err = await res.json().catch(() => ({ detail: 'Request failed' }))
         throw new Error(err.detail || `HTTP ${res.status}`)
     }
@@ -58,6 +108,27 @@ export interface SLAViolationsResponse {
     violations: SLAViolation[]
     total: number
     settings: SLAConfig
+    total_active_requests: number
+    compliant_active_requests: number
+    at_risk_count: number
+    context_summary?: {
+        tracked_statuses: string[]
+        live_breaches: number
+        requests_at_risk: number
+    }
+}
+
+export interface LiveDataSummary {
+    active_request_count: number
+    urgent_request_count: number
+    victims_impacted: number
+    unique_victims?: number
+    requested_resource_units: number
+    available_resource_units: number
+    availability_pct: number
+    active_disaster_count?: number
+    responders_considered?: number
+    zones_with_live_requests?: number
 }
 
 export interface DeliveryConfirmation {
@@ -84,6 +155,27 @@ export interface WhatIfResult {
     confidence_interval: [number, number]
     explanation: string
     disaster_id?: string
+    summary?: LiveDataSummary
+    derived_from?: string
+}
+
+export interface WhatIfContextResponse {
+    disaster_id?: string
+    observation: Record<string, number | string>
+    summary: LiveDataSummary
+    derived_from: string
+}
+
+export interface TopInterventionsResponse {
+    interventions: Array<{
+        variable: string
+        current_value: number
+        proposed_value: number
+        estimated_reduction?: number
+    }>
+    outcome_variable: string
+    summary?: LiveDataSummary
+    derived_from?: string
 }
 
 export interface NGORecommendation {
@@ -136,6 +228,30 @@ export async function getSLAViolations(): Promise<SLAViolationsResponse> {
     return apiFetch<SLAViolationsResponse>('/api/workflow/sla/violations')
 }
 
+export async function getSLAHistory(days: number = 30): Promise<{
+    chart_data: Array<{
+        date: string
+        violations: number
+        avg_response_time: number
+        total_requests: number
+    }>
+    summary: {
+        total_violations: number
+        avg_violations_per_day: number
+        avg_response_time: number
+        total_requests: number
+        days_analyzed: number
+    }
+    sla_settings: SLAConfig
+    date_range: {
+        start: string
+        end: string
+        days: number
+    }
+}> {
+    return apiFetch(`/api/workflow/sla/history?days=${days}`)
+}
+
 // ─── Delivery Verification ──────────────────────────────
 
 export async function confirmDelivery(requestId: string, data: DeliveryConfirmation) {
@@ -172,10 +288,15 @@ export async function runWhatIfAnalysis(query: WhatIfQuery): Promise<WhatIfResul
     })
 }
 
-export async function getTopInterventions(outcomeVariable?: string, k?: number) {
-    return apiFetch('/api/workflow/what-if/top-interventions', {
+export async function getWhatIfContext(disasterId?: string): Promise<WhatIfContextResponse> {
+    const query = disasterId ? `?disaster_id=${encodeURIComponent(disasterId)}` : ''
+    return apiFetch<WhatIfContextResponse>(`/api/workflow/what-if/context${query}`)
+}
+
+export async function getTopInterventions(outcomeVariable?: string, k?: number, disasterId?: string): Promise<TopInterventionsResponse> {
+    return apiFetch<TopInterventionsResponse>('/api/workflow/what-if/top-interventions', {
         method: 'POST',
-        body: JSON.stringify({ outcome_variable: outcomeVariable || 'casualties', k: k || 5 }),
+        body: JSON.stringify({ outcome_variable: outcomeVariable || 'casualties', k: k || 5, disaster_id: disasterId }),
     })
 }
 
@@ -201,15 +322,17 @@ export async function submitRLReward(data: {
 
 // ─── TFT Forecast ───────────────────────────────────────
 
-export async function getMultiHorizonForecast(features?: Record<string, any>): Promise<{
+export async function getMultiHorizonForecast(features?: Record<string, any>, disasterId?: string): Promise<{
     horizons: ForecastHorizon[]
     current_severity: string
     confidence: number
     model_version: string
+    summary?: LiveDataSummary
+    derived_from?: string
 }> {
     return apiFetch('/api/workflow/forecast/multi-horizon', {
         method: 'POST',
-        body: JSON.stringify({ features: features || {} }),
+        body: JSON.stringify({ features: features || {}, disaster_id: disasterId }),
     })
 }
 

@@ -14,17 +14,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import random
-import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pulp
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -55,7 +51,7 @@ def _random_lat_lon(
     center_lat: float | None = None,
     center_lon: float | None = None,
     spread: float = 0.5,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Return a random (lat, lon) optionally near a centre point."""
     if center_lat is not None and center_lon is not None:
         lat = center_lat + random.uniform(-spread, spread)
@@ -70,7 +66,7 @@ def generate_scenario(
     n_victims: int | None = None,
     n_ngos: int | None = None,
     radius_km: float = 50.0,
-) -> Tuple[List[VictimNode], List[NgoNode]]:
+) -> tuple[list[VictimNode], list[NgoNode]]:
     """
     Generate a single synthetic disaster scenario.
 
@@ -84,7 +80,7 @@ def generate_scenario(
     # Disaster epicentre
     epicentre = _random_lat_lon()
 
-    victims: List[VictimNode] = []
+    victims: list[VictimNode] = []
     for i in range(n_victims):
         lat, lon = _random_lat_lon(epicentre[0], epicentre[1], spread=0.4)
         victims.append(
@@ -99,7 +95,7 @@ def generate_scenario(
             )
         )
 
-    ngos: List[NgoNode] = []
+    ngos: list[NgoNode] = []
     for i in range(n_ngos):
         lat, lon = _random_lat_lon(epicentre[0], epicentre[1], spread=0.6)
         n_types = random.randint(1, 5)
@@ -123,10 +119,10 @@ def generate_scenario(
 
 
 def solve_optimal_assignment(
-    victims: List[VictimNode],
-    ngos: List[NgoNode],
+    victims: list[VictimNode],
+    ngos: list[NgoNode],
     radius_km: float = 50.0,
-) -> List[Tuple[int, int]]:
+) -> list[tuple[int, int]]:
     """
     Compute the optimal one-to-one victim→NGO assignment using an ILP solver.
 
@@ -168,12 +164,7 @@ def solve_optimal_assignment(
             match = 1.0 if v_lower in n_lower else 0.3
 
             # Score: priority × match × capacity / (1 + distance)
-            score = (
-                v.priority_score
-                * match
-                * n.capacity_score
-                / (1.0 + dist)
-            )
+            score = v.priority_score * match * n.capacity_score / (1.0 + dist)
             obj_terms.append(x[vi, ni] * score)
 
     if not obj_terms:
@@ -192,9 +183,9 @@ def solve_optimal_assignment(
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=10)
     prob.solve(solver)
 
-    assignments: List[Tuple[int, int]] = []
+    assignments: list[tuple[int, int]] = []
     if prob.status == pulp.constants.LpStatusOptimal:
-        for (vi, ni) in feasible_pairs:
+        for vi, ni in feasible_pairs:
             val = pulp.value(x[vi, ni])
             if val is not None and val > 0.5:
                 assignments.append((vi, ni))
@@ -206,10 +197,10 @@ def solve_optimal_assignment(
 
 
 def build_training_sample(
-    victims: List[VictimNode],
-    ngos: List[NgoNode],
+    victims: list[VictimNode],
+    ngos: list[NgoNode],
     radius_km: float = 50.0,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Build a single training sample: graph + binary edge labels from ILP.
 
@@ -272,7 +263,7 @@ def train(
     torch.manual_seed(seed)
 
     logger.info("Generating %d synthetic scenarios …", n_scenarios)
-    dataset: List[Dict[str, Any]] = []
+    dataset: list[dict[str, Any]] = []
     for i in range(n_scenarios):
         victims, ngos = generate_scenario()
         sample = build_training_sample(victims, ngos, radius_km=radius_km)
@@ -294,7 +285,9 @@ def train(
 
     # ── Model / optim ────────────────────────────────────────────────
     model = GATAllocator(
-        hidden=hidden, heads=heads, dropout=dropout,
+        hidden=hidden,
+        heads=heads,
+        dropout=dropout,
     )
     optimiser = Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimiser, T_max=epochs, eta_min=lr * 0.01)
@@ -320,7 +313,9 @@ def train(
             n_neg = labels.numel() - n_pos
             pos_weight = torch.tensor([max(n_neg / max(n_pos, 1), 1.0)])
             loss = F.binary_cross_entropy_with_logits(
-                logits, labels, pos_weight=pos_weight,
+                logits,
+                labels,
+                pos_weight=pos_weight,
             )
 
             optimiser.zero_grad()
@@ -347,7 +342,9 @@ def train(
                 n_neg = labels.numel() - n_pos
                 pos_weight = torch.tensor([max(n_neg / max(n_pos, 1), 1.0)])
                 loss = F.binary_cross_entropy_with_logits(
-                    logits, labels, pos_weight=pos_weight,
+                    logits,
+                    labels,
+                    pos_weight=pos_weight,
                 )
                 val_loss_sum += loss.item()
                 val_count += 1
@@ -357,7 +354,10 @@ def train(
         if epoch % 5 == 0 or epoch == 1:
             logger.info(
                 "Epoch %3d/%d  train_loss=%.4f  val_loss=%.4f  lr=%.2e",
-                epoch, epochs, avg_train, avg_val,
+                epoch,
+                epochs,
+                avg_train,
+                avg_val,
                 optimiser.param_groups[0]["lr"],
             )
 

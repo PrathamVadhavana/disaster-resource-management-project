@@ -8,19 +8,22 @@ import { useTheme } from 'next-themes'
 import {
     LayoutDashboard, Users, Map, Brain, Activity, Settings,
     LogOut, ChevronLeft, Menu, Sun, Moon, Shield, BarChart3,
-    Inbox, Package, Scale, Clock, FlaskConical,
+    Inbox, Scale, Clock, FlaskConical, MessageCircle,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '@/lib/api'
+import { getSLAViolations } from '@/lib/api/workflow'
+import { useNotificationCounts } from '@/hooks/useNotificationCounts'
 import { NotificationBell } from '@/components/shared/NotificationBell'
 
 const navItems = [
     { href: '/admin', label: 'Overview', icon: LayoutDashboard },
     { href: '/admin/requests', label: 'Requests', icon: Inbox },
-    { href: '/admin/resources', label: 'Resources', icon: Package },
     { href: '/admin/users', label: 'User Management', icon: Users },
-    { href: '/admin/disasters', label: 'Disasters', icon: Activity },
     { href: '/admin/live-map', label: 'Live Map', icon: Map },
     { href: '/admin/ai-intelligence', label: 'AI Intelligence', icon: Brain },
+    { href: '/admin/disastergpt', label: 'DisasterGPT', icon: MessageCircle },
     { href: '/admin/analytics', label: 'Analytics', icon: BarChart3 },
     { href: '/admin/sla', label: 'SLA Monitor', icon: Clock },
     { href: '/admin/what-if', label: 'What-If Analysis', icon: FlaskConical },
@@ -36,6 +39,14 @@ export function AdminSidebar() {
     const [mounted, setMounted] = useState(false)
 
     useEffect(() => { setMounted(true) }, [])
+
+    // Use the notification counts hook
+    const { slaViolations, activeDisasters, pendingRequests } = useNotificationCounts()
+
+    const badges: Record<string, number> = {
+        '/admin/sla': slaViolations,
+        '/admin/requests': pendingRequests,
+    }
 
     const isActive = (href: string) => {
         if (href === '/admin') return pathname === '/admin'
@@ -126,7 +137,17 @@ export function AdminSidebar() {
                                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/[0.04]'
                                 )}>
                                 <Icon className={cn('w-[18px] h-[18px] shrink-0', active ? 'text-slate-700 dark:text-white' : '')} />
-                                <span>{item.label}</span>
+                                <span className="flex-1">{item.label}</span>
+                                {badges[item.href] > 0 && (
+                                    <span className={cn(
+                                        'min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-bold flex items-center justify-center',
+                                        item.href === '/admin/sla'
+                                            ? 'bg-red-100 dark:bg-red-500/15 text-red-600 dark:text-red-400'
+                                            : 'bg-purple-100 dark:bg-purple-500/15 text-purple-600 dark:text-purple-400'
+                                    )}>
+                                        {badges[item.href]}
+                                    </span>
+                                )}
                             </Link>
                         )
                     })}

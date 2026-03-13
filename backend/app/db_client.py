@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from supabase import create_client, Client
+from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class APIResponse:
     """API response object returned by query execution."""
+
     data: Any = None
     count: int | None = None
 
@@ -33,6 +36,7 @@ class APIResponse:
 # ── Supabase client (lazy singleton) ──────────────────────────────────────────
 
 _supabase_client: Client | None = None
+_db_lock = threading.Lock()
 
 
 def _get_sb() -> Client:
@@ -42,9 +46,7 @@ def _get_sb() -> Client:
         url = os.environ.get("SUPABASE_URL", "")
         key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         if not url or not key:
-            raise RuntimeError(
-                "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set"
-            )
+            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
         _supabase_client = create_client(url, key)
         logger.info("Supabase client initialised")
     return _supabase_client
@@ -56,6 +58,7 @@ def get_supabase_client() -> Client:
 
 
 # ── Serialisation helpers ─────────────────────────────────────────────────────
+
 
 def _serialize_value(value: Any) -> Any:
     """Convert Python values to JSON-compatible types for Supabase/PostgREST."""
@@ -72,15 +75,30 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
+def _extract_missing_column_from_error(error: Exception) -> str | None:
+    """Extract missing column name from PostgREST schema cache errors."""
+    payload = error.args[0] if getattr(error, "args", None) else None
+    if isinstance(payload, dict) and payload.get("code") == "PGRST204":
+        message = payload.get("message") or ""
+    else:
+        message = str(error)
+
+    match = re.search(r"Could not find the '([^']+)' column", message)
+    if not match:
+        return None
+    return match.group(1)
+
+
 # ── Query builder classes ────────────────────────────────────────────────────
+
 
 class _NegationProxy:
     """Handles ``.not_.is_(col, val)`` pattern."""
 
-    def __init__(self, builder: "QueryBuilder"):
+    def __init__(self, builder: QueryBuilder):
         self._builder = builder
 
-    def is_(self, column: str, value: str) -> "QueryBuilder":
+    def is_(self, column: str, value: str) -> QueryBuilder:
         self._builder._negations.append((column, value))
         return self._builder
 
@@ -269,28 +287,30 @@ class QueryBuilder:
 
     def execute(self) -> APIResponse:
         """Execute the built query and return an APIResponse."""
-        try:
-            sb = _get_sb()
-            tbl = sb.table(self._table)
+        with _db_lock:
+            try:
+                sb = _get_sb()
+                tbl = sb.table(self._table)
 
-            if self._operation == "select":
-                return self._exec_select(tbl)
-            if self._operation == "insert":
-                return self._exec_insert(tbl)
-            if self._operation == "update":
-                return self._exec_update(tbl)
-            if self._operation == "upsert":
-                return self._exec_upsert(tbl)
-            if self._operation == "delete":
-                return self._exec_delete(tbl)
-            raise ValueError(f"Unknown operation: {self._operation}")
-        except Exception as e:
-            logger.error("DB query failed [%s on %s]: %s", self._operation, self._table, e)
-            raise
+                if self._operation == "select":
+                    return self._exec_select(tbl)
+                if self._operation == "insert":
+                    return self._exec_insert(tbl)
+                if self._operation == "update":
+                    return self._exec_update(tbl)
+                if self._operation == "upsert":
+                    return self._exec_upsert(tbl)
+                if self._operation == "delete":
+                    return self._exec_delete(tbl)
+                raise ValueError(f"Unknown operation: {self._operation}")
+            except Exception as e:
+                logger.error("DB query failed [%s on %s]: %s", self._operation, self._table, e)
+                raise
 
     async def async_execute(self) -> APIResponse:
         """Execute the query in a thread pool to avoid blocking the event loop."""
         import asyncio
+
         return await asyncio.to_thread(self.execute)
 
     # ── Operation implementations ─────────────────────────────────────────
@@ -325,7 +345,7 @@ class QueryBuilder:
             doc.setdefault("created_at", now)
             prepared.append(doc)
 
-        resp = tbl.insert(prepared).execute()
+        resp = self._execute_mutation_with_schema_retry(tbl=tbl, operation="insert", rows=prepared)
         return APIResponse(data=resp.data)
 
     def _exec_update(self, tbl) -> APIResponse:
@@ -353,8 +373,40 @@ class QueryBuilder:
             doc.setdefault("created_at", now)
             prepared.append(doc)
 
-        resp = tbl.upsert(prepared).execute()
+        resp = self._execute_mutation_with_schema_retry(tbl=tbl, operation="upsert", rows=prepared)
         return APIResponse(data=resp.data)
+
+    def _execute_mutation_with_schema_retry(self, *, tbl, operation: str, rows: list[dict]):
+        """Retry insert/upsert by stripping columns missing from PostgREST schema cache."""
+        payload = rows
+        removed_columns: set[str] = set()
+
+        for _ in range(3):
+            try:
+                if operation == "insert":
+                    return tbl.insert(payload).execute()
+                if operation == "upsert":
+                    return tbl.upsert(payload).execute()
+                raise ValueError(f"Unsupported mutation operation: {operation}")
+            except Exception as error:
+                missing_column = _extract_missing_column_from_error(error)
+                if not missing_column or all(missing_column not in row for row in payload):
+                    raise
+
+                payload = [{k: v for k, v in row.items() if k != missing_column} for row in payload]
+                removed_columns.add(missing_column)
+
+        if removed_columns:
+            logger.warning(
+                "Retried %s on %s after removing missing columns: %s",
+                operation,
+                self._table,
+                ", ".join(sorted(removed_columns)),
+            )
+
+        if operation == "insert":
+            return tbl.insert(payload).execute()
+        return tbl.upsert(payload).execute()
 
     def _exec_delete(self, tbl) -> APIResponse:
         query = tbl.delete()
@@ -364,6 +416,7 @@ class QueryBuilder:
 
 
 # ── RPC builder ──────────────────────────────────────────────────────────────
+
 
 class RPCBuilder:
     """Handles ``.rpc("fn_name", params).execute()`` pattern."""
@@ -383,6 +436,12 @@ class RPCBuilder:
             logger.warning("RPC '%s' not implemented — skipped", self._fn)
             return APIResponse(data=None)
 
+    async def async_execute(self) -> APIResponse:
+        """Execute the RPC in a thread pool."""
+        import asyncio
+
+        return await asyncio.to_thread(self.execute)
+
     def _increment_user_impact(self) -> APIResponse:
         sb = _get_sb()
         user_id = str(self._params.get("user_id", ""))
@@ -390,21 +449,23 @@ class RPCBuilder:
         if not user_id:
             return APIResponse(data=None)
         try:
-            resp = sb.rpc("increment_user_impact", {
-                "p_user_id": user_id,
-                "p_points": points,
-            }).execute()
+            resp = sb.rpc(
+                "increment_user_impact",
+                {
+                    "p_user_id": user_id,
+                    "p_points": points,
+                },
+            ).execute()
             return APIResponse(data=resp.data)
         except Exception:
             user_resp = sb.table("users").select("total_impact_points").eq("id", user_id).maybe_single().execute()
             current = (user_resp.data or {}).get("total_impact_points", 0) or 0
-            sb.table("users").update({
-                "total_impact_points": current + points
-            }).eq("id", user_id).execute()
+            sb.table("users").update({"total_impact_points": current + points}).eq("id", user_id).execute()
             return APIResponse(data={"status": "ok"})
 
 
 # ── Client class (top-level drop-in) ─────────────────────────────────────────
+
 
 class DatabaseClient:
     """Supabase database client with chainable query builder.

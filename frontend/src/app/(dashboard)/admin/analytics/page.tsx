@@ -144,7 +144,7 @@ export default function AdminAnalyticsPage() {
                         Platform Analytics
                     </h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                        Comprehensive insights into disaster response performance
+                        Comprehensive insights into platform response performance
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -184,7 +184,6 @@ export default function AdminAnalyticsPage() {
 
             {/* Key Metrics */}
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-                <MetricCard label="Active Disasters" value={activeDisasters.length} icon={AlertTriangle} gradient="from-red-500 to-orange-600" sub={`${disasterList.length} total`} />
                 <MetricCard label="Total Users" value={userList.length} icon={Users} gradient="from-blue-500 to-cyan-600" />
                 <MetricCard label="Total Resources" value={resourceList.length} icon={Package} gradient="from-purple-500 to-indigo-600" />
                 <MetricCard label="Total Requests" value={totalRequests} icon={Activity} gradient="from-emerald-500 to-teal-600" sub={`${statusCounts.pending || 0} pending`} />
@@ -334,33 +333,6 @@ export default function AdminAnalyticsPage() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Disaster Type Distribution */}
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5">
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-4">Disaster Type Distribution</h3>
-                    {typeDistribution.length > 0 ? (
-                        <div className="h-64 flex items-center">
-                            <ResponsiveContainer width="55%" height="100%">
-                                <PieChart>
-                                    <Pie data={typeDistribution} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={4} dataKey="value">
-                                        {typeDistribution.map((entry) => (<Cell key={entry.name} fill={entry.color} />))}
-                                    </Pie>
-                                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12, border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)' }} />
-                                </PieChart>
-                            </ResponsiveContainer>
-                            <div className="space-y-2">
-                                {typeDistribution.map((dt) => (
-                                    <div key={dt.name} className="flex items-center gap-2">
-                                        <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: dt.color }} />
-                                        <span className="text-xs text-slate-600 dark:text-slate-400">{dt.name}</span>
-                                        <span className="text-xs font-bold text-slate-900 dark:text-white ml-auto">{dt.value}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="h-64 flex items-center justify-center text-slate-400 text-sm">No disaster data</div>
-                    )}
-                </div>
 
                 {/* Resource Status */}
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-5">

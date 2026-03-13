@@ -8,8 +8,7 @@ to warehouses near predicted impact zones before the disaster hits.
 
 import logging
 import math
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from datetime import UTC, datetime
 
 from app.database import db_admin
 
@@ -25,7 +24,7 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-async def generate_prestaging_recommendations() -> List[Dict]:
+async def generate_prestaging_recommendations() -> list[dict]:
     """Analyze predicted/monitoring disasters and generate resource pre-staging recommendations."""
     recommendations = []
 
@@ -33,7 +32,9 @@ async def generate_prestaging_recommendations() -> List[Dict]:
         # Fetch predicted/active disasters
         disaster_resp = (
             await db_admin.table("disasters")
-            .select("id, title, type, severity, status, latitude, longitude, location_id, start_date, affected_population")
+            .select(
+                "id, title, type, severity, status, latitude, longitude, location_id, start_date, affected_population"
+            )
             .in_("status", ["predicted", "active", "monitoring"])
             .order("created_at", desc=True)
             .limit(20)
@@ -57,7 +58,9 @@ async def generate_prestaging_recommendations() -> List[Dict]:
         # Fetch available resources with location
         resources_resp = (
             await db_admin.table("available_resources")
-            .select("resource_id, category, title, total_quantity, claimed_quantity, address_text, latitude, longitude, provider_id")
+            .select(
+                "resource_id, category, title, total_quantity, claimed_quantity, address_text, latitude, longitude, provider_id"
+            )
             .eq("is_active", True)
             .eq("status", "available")
             .async_execute()
@@ -67,6 +70,7 @@ async def generate_prestaging_recommendations() -> List[Dict]:
         # Fetch ingested alerts (predicted events from weather/GDACS)
         try:
             from app.services.ingestion import memory_store
+
             ingested_alerts = memory_store.query_ingested_events(limit=50)
         except Exception:
             ingested_alerts = []
@@ -102,14 +106,16 @@ async def generate_prestaging_recommendations() -> List[Dict]:
                     if dist <= 200:  # within 200km
                         avail = (r.get("total_quantity", 0) or 0) - (r.get("claimed_quantity", 0) or 0)
                         if avail > 0:
-                            nearby_resources.append({
-                                "resource_id": r["resource_id"],
-                                "category": r.get("category"),
-                                "title": r.get("title"),
-                                "available_quantity": avail,
-                                "distance_km": round(dist, 1),
-                                "location": r.get("address_text"),
-                            })
+                            nearby_resources.append(
+                                {
+                                    "resource_id": r["resource_id"],
+                                    "category": r.get("category"),
+                                    "title": r.get("title"),
+                                    "available_quantity": avail,
+                                    "distance_km": round(dist, 1),
+                                    "location": r.get("address_text"),
+                                }
+                            )
 
             nearby_resources.sort(key=lambda x: x["distance_km"])
 
@@ -122,12 +128,14 @@ async def generate_prestaging_recommendations() -> List[Dict]:
                     if r.get("category", "").lower() == need_type.lower()
                 )
                 if available < need_qty:
-                    gaps.append({
-                        "resource_type": need_type,
-                        "needed": need_qty,
-                        "available_nearby": available,
-                        "shortfall": need_qty - available,
-                    })
+                    gaps.append(
+                        {
+                            "resource_type": need_type,
+                            "needed": need_qty,
+                            "available_nearby": available,
+                            "shortfall": need_qty - available,
+                        }
+                    )
 
             # Find related ingested alerts
             related_alerts = []
@@ -137,28 +145,32 @@ async def generate_prestaging_recommendations() -> List[Dict]:
                 if a_lat and a_lon:
                     dist = haversine_km(d_lat, d_lon, a_lat, a_lon)
                     if dist <= 150:
-                        related_alerts.append({
-                            "source": alert.get("source"),
-                            "title": alert.get("title"),
-                            "severity": alert.get("severity"),
-                            "distance_km": round(dist, 1),
-                        })
+                        related_alerts.append(
+                            {
+                                "source": alert.get("source"),
+                                "title": alert.get("title"),
+                                "severity": alert.get("severity"),
+                                "distance_km": round(dist, 1),
+                            }
+                        )
 
-            recommendations.append({
-                "disaster_id": d["id"],
-                "disaster_title": d.get("title", "Unknown"),
-                "disaster_type": d.get("type"),
-                "severity": sev,
-                "status": d.get("status"),
-                "location": {"latitude": d_lat, "longitude": d_lon},
-                "estimated_needs": type_needs,
-                "nearby_resources": nearby_resources[:10],
-                "resource_gaps": gaps,
-                "related_alerts": related_alerts,
-                "recommendation": _generate_recommendation_text(d, gaps, nearby_resources),
-                "urgency": "critical" if sev in ("critical", "high") else "medium",
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            recommendations.append(
+                {
+                    "disaster_id": d["id"],
+                    "disaster_title": d.get("title", "Unknown"),
+                    "disaster_type": d.get("type"),
+                    "severity": sev,
+                    "status": d.get("status"),
+                    "location": {"latitude": d_lat, "longitude": d_lon},
+                    "estimated_needs": type_needs,
+                    "nearby_resources": nearby_resources[:10],
+                    "resource_gaps": gaps,
+                    "related_alerts": related_alerts,
+                    "recommendation": _generate_recommendation_text(d, gaps, nearby_resources),
+                    "urgency": "critical" if sev in ("critical", "high") else "medium",
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+            )
 
     except Exception as e:
         logger.error("Pre-staging recommendation generation failed: %s", e)
@@ -166,7 +178,7 @@ async def generate_prestaging_recommendations() -> List[Dict]:
     return recommendations
 
 
-def _estimate_needs_by_type(disaster_type: str, population: int, multiplier: float) -> Dict[str, int]:
+def _estimate_needs_by_type(disaster_type: str, population: int, multiplier: float) -> dict[str, int]:
     """Estimate resource needs by disaster type and affected population."""
     base_per_1000 = {
         "earthquake": {"Food": 500, "Water": 1000, "Medical": 200, "Shelter": 100},
@@ -181,7 +193,7 @@ def _estimate_needs_by_type(disaster_type: str, population: int, multiplier: flo
     return {k: int(v * scale * multiplier) for k, v in base.items()}
 
 
-def _generate_recommendation_text(disaster: Dict, gaps: List, nearby: List) -> str:
+def _generate_recommendation_text(disaster: dict, gaps: list, nearby: list) -> str:
     """Generate human-readable recommendation text."""
     title = disaster.get("title", "the disaster area")
     if not gaps:

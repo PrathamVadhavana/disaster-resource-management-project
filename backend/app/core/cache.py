@@ -9,7 +9,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +17,14 @@ _redis_client = None
 _redis_available = False
 _redis_checked = False
 
-CACHE_TTL_SHORT = 60          # 1 minute  – volatile data (disasters list)
-CACHE_TTL_MEDIUM = 300        # 5 minutes – predictions, forecasts
-CACHE_TTL_LONG = 900          # 15 minutes – static-ish data
+CACHE_TTL_SHORT = 60  # 1 minute  – volatile data (disasters list)
+CACHE_TTL_MEDIUM = 300  # 5 minutes – predictions, forecasts
+CACHE_TTL_LONG = 900  # 15 minutes – static-ish data
 
 
 class _DateTimeEncoder(json.JSONEncoder):
     """JSON encoder that handles datetime objects."""
+
     def default(self, obj: Any) -> Any:
         if isinstance(obj, datetime):
             return obj.isoformat()
@@ -39,6 +40,7 @@ async def _get_redis():
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     try:
         import redis.asyncio as aioredis
+
         _redis_client = aioredis.from_url(
             redis_url,
             decode_responses=True,
@@ -57,7 +59,7 @@ async def _get_redis():
     return _redis_client
 
 
-async def cache_get(key: str) -> Optional[Any]:
+async def cache_get(key: str) -> Any | None:
     """Return cached value or *None* if miss / Redis down."""
     client = await _get_redis()
     if client is None:

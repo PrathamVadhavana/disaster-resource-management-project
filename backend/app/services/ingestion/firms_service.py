@@ -10,8 +10,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -33,9 +33,9 @@ class FIRMSService:
 
     async def poll(
         self,
-        bbox: Optional[str] = None,
+        bbox: str | None = None,
         days: int = 1,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Fetch FIRMS hotspot data.  *bbox* is ``"west,south,east,north"``
         (e.g. ``"-125,25,-65,50"`` for CONUS).  Defaults to world.
@@ -61,7 +61,7 @@ class FIRMSService:
 
     # ── internals ───────────────────────────────────────────────────
 
-    async def _fetch_csv(self, bbox: Optional[str], days: int) -> str:
+    async def _fetch_csv(self, bbox: str | None, days: int) -> str:
         # FIRMS CSV endpoint:
         # https://firms.modaps.eosdis.nasa.gov/api/area/csv/{API_KEY}/{SOURCE}/{BBOX}/{DAYS}
         parts = [self.base_url, self.api_key, self.source]
@@ -77,9 +77,9 @@ class FIRMSService:
             resp.raise_for_status()
             return resp.text
 
-    def _parse_csv(self, csv_text: str) -> List[Dict[str, Any]]:
+    def _parse_csv(self, csv_text: str) -> list[dict[str, Any]]:
         reader = csv.DictReader(io.StringIO(csv_text))
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
 
         for row in reader:
             try:
@@ -96,38 +96,38 @@ class FIRMSService:
 
                 # Build datetime from acq_date + acq_time
                 try:
-                    acq_dt = datetime.strptime(f"{acq_date} {acq_time}", "%Y-%m-%d %H%M").replace(
-                        tzinfo=timezone.utc
-                    )
+                    acq_dt = datetime.strptime(f"{acq_date} {acq_time}", "%Y-%m-%d %H%M").replace(tzinfo=UTC)
                 except ValueError:
-                    acq_dt = datetime.now(timezone.utc)
+                    acq_dt = datetime.now(UTC)
 
-                results.append({
-                    "id": str(uuid4()),
-                    "source": "firms",
-                    "external_id": f"firms-{lat}-{lon}-{acq_date}-{acq_time}",
-                    "latitude": lat,
-                    "longitude": lon,
-                    "brightness": brightness,
-                    "frp": frp,
-                    "confidence": confidence if confidence in ("low", "nominal", "high") else None,
-                    "satellite": satellite,
-                    "instrument": instrument,
-                    "acq_datetime": acq_dt.isoformat(),
-                    "daynight": daynight,
-                    "raw_payload": dict(row),
-                })
+                results.append(
+                    {
+                        "id": str(uuid4()),
+                        "source": "firms",
+                        "external_id": f"firms-{lat}-{lon}-{acq_date}-{acq_time}",
+                        "latitude": lat,
+                        "longitude": lon,
+                        "brightness": brightness,
+                        "frp": frp,
+                        "confidence": confidence if confidence in ("low", "nominal", "high") else None,
+                        "satellite": satellite,
+                        "instrument": instrument,
+                        "acq_datetime": acq_dt.isoformat(),
+                        "daynight": daynight,
+                        "raw_payload": dict(row),
+                    }
+                )
             except Exception:
                 logger.debug("Skipping unparseable FIRMS row: %s", row)
 
         return results
 
-    async def _store_observations(self, observations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _store_observations(self, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Batch-insert into in-memory satellite store, skipping duplicates."""
         return memory_store.add_satellite_observations(observations)
 
     @staticmethod
-    def _float_or_none(val: Any) -> Optional[float]:
+    def _float_or_none(val: Any) -> float | None:
         if val is None or val == "":
             return None
         try:
@@ -136,9 +136,7 @@ class FIRMSService:
             return None
 
     @staticmethod
-    async def hotspot_summary_for_area(
-        lat: float, lon: float, radius_deg: float = 1.0
-    ) -> Dict[str, Any]:
+    async def hotspot_summary_for_area(lat: float, lon: float, radius_deg: float = 1.0) -> dict[str, Any]:
         """
         Summarise recent satellite observations near a coordinate.
         Useful as spread-predictor input.

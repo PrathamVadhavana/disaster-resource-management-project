@@ -5,13 +5,13 @@ All endpoints require a valid Bearer token. Users can only manage their own
 certifications (RLS enforced at DB level; service-role bypass for admin).
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from typing import Optional
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
-from app.database import db, db_admin
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer
+from pydantic import BaseModel
+
+from app.database import db_admin
 from app.dependencies import get_current_user_id
 
 router = APIRouter()
@@ -21,25 +21,24 @@ security = HTTPBearer()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-
-
 # ── Schemas ───────────────────────────────────────────────────────────────────
+
 
 class CertificationCreate(BaseModel):
     name: str
-    issuer: Optional[str] = "Self-reported"
-    date_obtained: Optional[str] = None
-    expiry_date: Optional[str] = None
+    issuer: str | None = "Self-reported"
+    date_obtained: str | None = None
+    expiry_date: str | None = None
 
 
 class CertificationUpdate(BaseModel):
-    name: Optional[str] = None
-    issuer: Optional[str] = None
-    date_obtained: Optional[str] = None
-    expiry_date: Optional[str] = None
+    name: str | None = None
+    issuer: str | None = None
+    date_obtained: str | None = None
+    expiry_date: str | None = None
 
 
-def _compute_status(expiry_date: Optional[str]) -> str:
+def _compute_status(expiry_date: str | None) -> str:
     if not expiry_date:
         return "active"
     try:
@@ -50,6 +49,7 @@ def _compute_status(expiry_date: Optional[str]) -> str:
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/certifications")
 async def list_certifications(user_id: str = Depends(get_current_user_id)):
@@ -101,7 +101,7 @@ async def update_certification(cert_id: str, body: CertificationUpdate, user_id:
         updates["status"] = _compute_status(body.expiry_date)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updates["updated_at"] = datetime.now(UTC).isoformat()
     resp = (
         await db_admin.table("volunteer_certifications")
         .update(updates)
@@ -117,7 +117,7 @@ async def update_certification(cert_id: str, body: CertificationUpdate, user_id:
 @router.delete("/certifications/{cert_id}")
 async def delete_certification(cert_id: str, user_id: str = Depends(get_current_user_id)):
     """Delete a certification."""
-    resp = (
+    (
         await db_admin.table("volunteer_certifications")
         .delete()
         .eq("id", cert_id)

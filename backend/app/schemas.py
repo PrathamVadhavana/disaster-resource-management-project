@@ -1,10 +1,11 @@
-from pydantic import BaseModel, Field, validator
-from typing import Optional, Dict, Any, List
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator, model_validator, ValidationInfo
 
 
-class DisasterType(str, Enum):
+class DisasterType(StrEnum):
     EARTHQUAKE = "earthquake"
     FLOOD = "flood"
     HURRICANE = "hurricane"
@@ -17,21 +18,21 @@ class DisasterType(str, Enum):
     OTHER = "other"
 
 
-class DisasterSeverity(str, Enum):
+class DisasterSeverity(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
 
 
-class DisasterStatus(str, Enum):
+class DisasterStatus(StrEnum):
     PREDICTED = "predicted"
     ACTIVE = "active"
     MONITORING = "monitoring"
     RESOLVED = "resolved"
 
 
-class ResourceType(str, Enum):
+class ResourceType(StrEnum):
     FOOD = "food"
     WATER = "water"
     MEDICAL = "medical"
@@ -41,14 +42,14 @@ class ResourceType(str, Enum):
     OTHER = "other"
 
 
-class ResourceStatus(str, Enum):
+class ResourceStatus(StrEnum):
     AVAILABLE = "available"
     ALLOCATED = "allocated"
     IN_TRANSIT = "in_transit"
     DEPLOYED = "deployed"
 
 
-class LocationType(str, Enum):
+class LocationType(StrEnum):
     CITY = "city"
     REGION = "region"
     SHELTER = "shelter"
@@ -56,7 +57,7 @@ class LocationType(str, Enum):
     WAREHOUSE = "warehouse"
 
 
-class PredictionType(str, Enum):
+class PredictionType(StrEnum):
     SEVERITY = "severity"
     SPREAD = "spread"
     DURATION = "duration"
@@ -68,13 +69,13 @@ class LocationBase(BaseModel):
     type: LocationType
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
-    address: Optional[str] = None
+    address: str | None = None
     city: str
     state: str
     country: str
-    postal_code: Optional[str] = None
-    population: Optional[int] = None
-    area_sq_km: Optional[float] = None
+    postal_code: str | None = None
+    population: int | None = None
+    area_sq_km: float | None = None
 
 
 class LocationCreate(LocationBase):
@@ -87,21 +88,20 @@ class Location(LocationBase):
 
     class Config:
         from_attributes = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
 class DisasterBase(BaseModel):
     type: DisasterType
     severity: DisasterSeverity
     title: str
-    description: Optional[str] = None
+    description: str | None = None
     location_id: str
-    affected_population: Optional[int] = None
-    casualties: Optional[int] = None
-    estimated_damage: Optional[float] = None
+    affected_population: int | None = None
+    casualties: int | None = None
+    estimated_damage: float | None = None
     start_date: datetime
+    metadata: dict[str, Any] | None = None
 
 
 class DisasterCreate(DisasterBase):
@@ -109,13 +109,13 @@ class DisasterCreate(DisasterBase):
 
 
 class DisasterUpdate(BaseModel):
-    severity: Optional[DisasterSeverity] = None
-    status: Optional[DisasterStatus] = None
-    description: Optional[str] = None
-    affected_population: Optional[int] = None
-    casualties: Optional[int] = None
-    estimated_damage: Optional[float] = None
-    end_date: Optional[datetime] = None
+    severity: DisasterSeverity | None = None
+    status: DisasterStatus | None = None
+    description: str | None = None
+    affected_population: int | None = None
+    casualties: int | None = None
+    estimated_damage: float | None = None
+    end_date: datetime | None = None
 
 
 class Disaster(DisasterBase):
@@ -123,43 +123,41 @@ class Disaster(DisasterBase):
     created_at: datetime
     updated_at: datetime
     status: DisasterStatus
-    end_date: Optional[datetime] = None
+    end_date: datetime | None = None
 
     class Config:
         from_attributes = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
 class PredictionInput(BaseModel):
-    location_id: Optional[str] = "sandbox"
+    location_id: str | None = "sandbox"
     prediction_type: PredictionType
-    features: Dict[str, Any] = Field(
-        ...,
-        description="Feature dict for ML model. Required fields vary by prediction type."
+    features: dict[str, Any] = Field(
+        ..., description="Feature dict for ML model. Required fields vary by prediction type."
     )
 
-    @validator('features')
-    def validate_features(cls, v, values):
-        prediction_type = values.get('prediction_type')
-        
+    @field_validator("features")
+    @classmethod
+    def validate_features(cls, v: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        prediction_type = info.data.get("prediction_type")
+
         if prediction_type == PredictionType.SEVERITY:
-            required = ['temperature', 'humidity', 'wind_speed', 'pressure']
+            required = ["temperature", "humidity", "wind_speed", "pressure"]
         elif prediction_type == PredictionType.SPREAD:
-            required = ['current_area', 'wind_speed']
+            required = ["current_area", "wind_speed"]
         elif prediction_type == PredictionType.IMPACT:
-            required = ['affected_population']
+            required = ["affected_population"]
         else:
             required = []
-        
+
         # Only warn; don't block — the ML service has fallbacks
         missing = [f for f in required if f not in v]
         if missing:
             # Add defaults for missing required features
             for f in missing:
                 v.setdefault(f, 0)
-        
+
         return v
 
 
@@ -168,20 +166,20 @@ class PredictionResponse(BaseModel):
     location_id: str
     prediction_type: PredictionType
     confidence_score: float
-    predicted_severity: Optional[DisasterSeverity] = None
-    predicted_start_date: Optional[datetime] = None
-    predicted_casualties: Optional[int] = None
-    predicted_area_km2: Optional[float] = None
-    ci_lower_km2: Optional[float] = None
-    ci_upper_km2: Optional[float] = None
-    predicted_damage_usd: Optional[float] = None
+    predicted_severity: DisasterSeverity | None = None
+    predicted_start_date: datetime | None = None
+    predicted_casualties: int | None = None
+    predicted_area_km2: float | None = None
+    ci_lower_km2: float | None = None
+    ci_upper_km2: float | None = None
+    predicted_damage_usd: float | None = None
     # ── TFT multi-horizon severity forecasts ──
-    severity_6h: Optional[str] = Field(None, description="Predicted severity at t+6 hours")
-    severity_12h: Optional[str] = Field(None, description="Predicted severity at t+12 hours")
-    severity_24h: Optional[str] = Field(None, description="Predicted severity at t+24 hours")
-    severity_48h: Optional[str] = Field(None, description="Predicted severity at t+48 hours")
-    lower_bound: Optional[Dict[str, Any]] = Field(None, description="10th-percentile bounds per horizon")
-    upper_bound: Optional[Dict[str, Any]] = Field(None, description="90th-percentile bounds per horizon")
+    severity_6h: str | None = Field(None, description="Predicted severity at t+6 hours")
+    severity_12h: str | None = Field(None, description="Predicted severity at t+12 hours")
+    severity_24h: str | None = Field(None, description="Predicted severity at t+24 hours")
+    severity_48h: str | None = Field(None, description="Predicted severity at t+48 hours")
+    lower_bound: dict[str, Any] | None = Field(None, description="10th-percentile bounds per horizon")
+    upper_bound: dict[str, Any] | None = Field(None, description="90th-percentile bounds per horizon")
     model_version: str
     created_at: datetime
 
@@ -190,39 +188,75 @@ class PredictionResponse(BaseModel):
 
 
 class ResourceBase(BaseModel):
-    location_id: str
-    type: ResourceType
-    name: str
-    quantity: float
+    location_id: str | None = None
+    type: ResourceType = Field(None, alias="resource_type")
+    name: str = Field(..., alias="title")
+    description: str | None = None
+    quantity: float = Field(..., alias="total_quantity")
     unit: str
     priority: int = Field(default=5, ge=1, le=10)
+    category: str | None = None
+    status: ResourceStatus = ResourceStatus.AVAILABLE
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_resource_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Map category to type if type is missing
+            if not data.get("type") and not data.get("resource_type"):
+                if data.get("category"):
+                    data["resource_type"] = data["category"]
+            
+            # Smart mapping for values
+            v = data.get("resource_type") or data.get("type")
+            if isinstance(v, str):
+                v_low = v.lower()
+                mapping = {
+                    "volunteers": "personnel",
+                    "clothing": "equipment",
+                    "clothes": "equipment",
+                    "financial aid": "other",
+                }
+                new_v = mapping.get(v_low, v_low)
+                if data.get("resource_type"):
+                    data["resource_type"] = new_v
+                else:
+                    data["type"] = new_v
+        return data
+
+    model_config = {
+        "populate_by_name": True,
+        "from_attributes": True,
+    }
+
+    pass
 
 
 class ResourceCreate(ResourceBase):
-    disaster_id: Optional[str] = None
+    disaster_id: str | None = None
 
 
 class ResourceUpdate(BaseModel):
-    quantity: Optional[float] = None
-    status: Optional[ResourceStatus] = None
-    allocated_to: Optional[str] = None
-    priority: Optional[int] = Field(None, ge=1, le=10)
+    quantity: float | None = None
+    status: ResourceStatus | None = None
+    allocated_to: str | None = None
+    priority: int | None = Field(None, ge=1, le=10)
 
 
 class Resource(ResourceBase):
     id: str
     created_at: datetime
     updated_at: datetime
-    disaster_id: Optional[str]
+    disaster_id: str | None
     status: ResourceStatus
-    allocated_to: Optional[str]
+    allocated_to: str | None
 
-    class Config:
-        from_attributes = True
+    pass
 
 
 class PriorityWeightsSchema(BaseModel):
     """Tunable weights for the allocation objective function."""
+
     urgency_weight: float = Field(1.0, ge=0, description="Weight for urgency score")
     distance_weight: float = Field(0.3, ge=0, description="Penalty weight for delivery distance")
     expiry_weight: float = Field(0.2, ge=0, description="Bonus weight for soon-to-expire resources")
@@ -231,39 +265,38 @@ class PriorityWeightsSchema(BaseModel):
 
 class AllocationRequest(BaseModel):
     disaster_id: str
-    required_resources: List[Dict[str, Any]] = Field(
-        ...,
-        description="List of required resources with type, quantity, and priority"
+    required_resources: list[dict[str, Any]] = Field(
+        ..., description="List of required resources with type, quantity, and priority"
     )
-    priority_weights: Optional[PriorityWeightsSchema] = Field(
-        None,
-        description="Optional objective-function weights (defaults used when omitted)"
+    priority_weights: PriorityWeightsSchema | None = Field(
+        None, description="Optional objective-function weights (defaults used when omitted)"
     )
     max_distance_km: float = Field(
-        500.0, gt=0,
-        description="Maximum delivery distance in km — resources further away are excluded"
+        500.0, gt=0, description="Maximum delivery distance in km — resources further away are excluded"
     )
 
 
 class OptimizationScoreBreakdown(BaseModel):
     """Detailed breakdown of the optimisation result."""
+
     coverage_pct: float = Field(0, description="Percentage of requirements met (0-100)")
-    unmet_needs: List[Dict[str, Any]] = Field(default_factory=list)
+    unmet_needs: list[dict[str, Any]] = Field(default_factory=list)
     estimated_delivery_km: float = Field(0, description="Total delivery distance across all allocations (km)")
     solver_status: str = Field("not_solved", description="LP solver exit status")
 
 
 class AllocationResponse(BaseModel):
     disaster_id: str
-    allocations: List[Dict[str, Any]]
+    allocations: list[dict[str, Any]]
     optimization_score: float
-    unmet_needs: List[Dict[str, Any]]
-    score_breakdown: Optional[OptimizationScoreBreakdown] = None
+    unmet_needs: list[dict[str, Any]]
+    score_breakdown: OptimizationScoreBreakdown | None = None
 
 
 # ============================================================
 # Forecast Schemas
 # ============================================================
+
 
 class ForecastItemSchema(BaseModel):
     resource_type: str
@@ -279,11 +312,10 @@ class ForecastResponse(BaseModel):
     generated_at: datetime
     horizon_hours: int = 72
     method: str = Field("linear", description="Forecasting method used (linear | prophet)")
-    items: List[ForecastItemSchema] = Field(default_factory=list)
+    items: list[ForecastItemSchema] = Field(default_factory=list)
 
 
-
-class UserRole(str, Enum):
+class UserRole(StrEnum):
     VICTIM = "victim"
     NGO = "ngo"
     DONOR = "donor"
@@ -299,7 +331,7 @@ class UserLogin(BaseModel):
 class UserRegister(BaseModel):
     email: str
     password: str = ""
-    full_name: Optional[str] = None
+    full_name: str | None = None
     role: UserRole = UserRole.VICTIM
 
 
@@ -312,6 +344,7 @@ class Token(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: str
+    redirect_to: str | None = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -319,11 +352,18 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+class EmailVerificationResponse(BaseModel):
+    verified: bool
+    message: str
+    verification_status: str | None = None
+
+
 # ============================================================
 # Victim Module Schemas
 # ============================================================
 
-class VictimResourceType(str, Enum):
+
+class VictimResourceType(StrEnum):
     FOOD = "Food"
     WATER = "Water"
     MEDICAL = "Medical"
@@ -336,14 +376,14 @@ class VictimResourceType(str, Enum):
     MULTIPLE = "Multiple"
 
 
-class RequestPriority(str, Enum):
+class RequestPriority(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
-class RequestStatus(str, Enum):
+class RequestStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     AVAILABILITY_SUBMITTED = "availability_submitted"
@@ -359,31 +399,32 @@ class RequestStatus(str, Enum):
 class ResourceItem(BaseModel):
     resource_type: str
     quantity: int = Field(default=1, ge=1)
-    custom_name: Optional[str] = None
+    custom_name: str | None = None
 
 
 class ResourceRequestCreate(BaseModel):
-    resource_type: Optional[VictimResourceType] = None  # primary type (auto-set from items)
+    resource_type: VictimResourceType | None = None  # primary type (auto-set from items)
     quantity: int = Field(default=1, ge=1)
-    items: List[ResourceItem] = Field(default_factory=list)
-    description: Optional[str] = None
+    items: list[ResourceItem] = Field(default_factory=list)
+    description: str | None = None
     priority: RequestPriority = RequestPriority.MEDIUM
-    latitude: Optional[float] = Field(None, ge=-90, le=90)
-    longitude: Optional[float] = Field(None, ge=-180, le=180)
-    address_text: Optional[str] = None
-    attachments: Optional[List[str]] = Field(default_factory=list)
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    address_text: str | None = None
+    attachments: list[str] | None = Field(default_factory=list)
+    disaster_type: str | None = None
 
 
 class ResourceRequestUpdate(BaseModel):
-    resource_type: Optional[VictimResourceType] = None
-    quantity: Optional[int] = Field(None, ge=1)
-    items: Optional[List[ResourceItem]] = None
-    description: Optional[str] = None
-    priority: Optional[RequestPriority] = None
-    latitude: Optional[float] = Field(None, ge=-90, le=90)
-    longitude: Optional[float] = Field(None, ge=-180, le=180)
-    address_text: Optional[str] = None
-    attachments: Optional[List[str]] = None
+    resource_type: VictimResourceType | None = None
+    quantity: int | None = Field(None, ge=1)
+    items: list[ResourceItem] | None = None
+    description: str | None = None
+    priority: RequestPriority | None = None
+    latitude: float | None = Field(None, ge=-90, le=90)
+    longitude: float | None = Field(None, ge=-180, le=180)
+    address_text: str | None = None
+    attachments: list[str] | None = None
 
 
 class ResourceRequestResponse(BaseModel):
@@ -391,64 +432,62 @@ class ResourceRequestResponse(BaseModel):
     victim_id: str
     resource_type: str
     quantity: int
-    items: Optional[List[Dict]] = Field(default_factory=list)
-    description: Optional[str] = None
+    items: list[dict] | None = Field(default_factory=list)
+    description: str | None = None
     priority: str
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    address_text: Optional[str] = None
+    latitude: float | None = None
+    longitude: float | None = None
+    address_text: str | None = None
     status: str
-    assigned_to: Optional[str] = None
-    assigned_role: Optional[str] = None
-    estimated_delivery: Optional[datetime] = None
-    attachments: Optional[List[str]] = Field(default_factory=list)
-    rejection_reason: Optional[str] = None
+    assigned_to: str | None = None
+    assigned_role: str | None = None
+    estimated_delivery: datetime | None = None
+    attachments: list[str] | None = Field(default_factory=list)
+    rejection_reason: str | None = None
     is_verified: bool = False
-    verification_status: Optional[str] = None
-    verified_at: Optional[datetime] = None
-    verified_by: Optional[str] = None
-    adopted_by: Optional[str] = None
-    adoption_status: Optional[str] = None
-    delivery_confirmation_code: Optional[str] = None
-    delivery_confirmed_at: Optional[datetime] = None
+    verification_status: str | None = None
+    verified_at: datetime | None = None
+    verified_by: str | None = None
+    adopted_by: str | None = None
+    adoption_status: str | None = None
+    delivery_confirmation_code: str | None = None
+    delivery_confirmed_at: datetime | None = None
     # NLP priority scoring fields
-    nlp_priority: Optional[str] = None
-    nlp_confidence: Optional[float] = None
-    manual_priority: Optional[str] = None
-    extracted_needs: Optional[List[Dict]] = None
+    nlp_priority: str | None = None
+    nlp_confidence: float | None = None
+    manual_priority: str | None = None
+    extracted_needs: list[dict] | None = None
     # Fulfillment tracking
-    fulfillment_entries: Optional[List[Dict]] = Field(default_factory=list)
+    fulfillment_entries: list[dict] | None = Field(default_factory=list)
     fulfillment_pct: int = 0
     # Admin
-    admin_note: Optional[str] = None
+    admin_note: str | None = None
     # Victim grouping
-    group_id: Optional[str] = None
+    group_id: str | None = None
     head_count: int = 1
     # Disaster linking
-    linked_disaster_id: Optional[str] = None
-    disaster_distance_km: Optional[float] = None
-    disaster_id: Optional[str] = None
+    linked_disaster_id: str | None = None
+    disaster_distance_km: float | None = None
+    disaster_id: str | None = None
     # SLA tracking
-    sla_escalated_at: Optional[datetime] = None
+    sla_escalated_at: datetime | None = None
     sla_admin_alerted: bool = False
     sla_delivery_alerted: bool = False
     # NLP classification
-    nlp_classification: Optional[Dict] = None
-    urgency_signals: Optional[List[Dict]] = Field(default_factory=list)
-    ai_confidence: Optional[float] = None
+    nlp_classification: dict | None = None
+    urgency_signals: list[dict] | None = Field(default_factory=list)
+    ai_confidence: float | None = None
     nlp_overridden: bool = False
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
 class ResourceRequestListResponse(BaseModel):
-    requests: List[ResourceRequestResponse]
+    requests: list[ResourceRequestResponse]
     total: int
     page: int
     page_size: int
@@ -462,42 +501,40 @@ class DashboardStats(BaseModel):
     in_progress: int = 0
     completed: int = 0
     rejected: int = 0
-    by_type: Dict[str, int] = Field(default_factory=dict)
-    by_priority: Dict[str, int] = Field(default_factory=dict)
+    by_type: dict[str, int] = Field(default_factory=dict)
+    by_priority: dict[str, int] = Field(default_factory=dict)
 
 
 class VictimProfileResponse(BaseModel):
     id: str
     email: str
-    full_name: Optional[str] = None
-    phone: Optional[str] = None
+    full_name: str | None = None
+    phone: str | None = None
     role: str
-    current_status: Optional[str] = None
-    needs: Optional[List[str]] = None
-    medical_needs: Optional[str] = None
-    location_lat: Optional[float] = None
-    location_long: Optional[float] = None
+    current_status: str | None = None
+    needs: list[str] | None = None
+    medical_needs: str | None = None
+    location_lat: float | None = None
+    location_long: float | None = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
 class VictimProfileUpdate(BaseModel):
-    full_name: Optional[str] = None
-    phone: Optional[str] = None
-    current_status: Optional[str] = None
-    needs: Optional[List[str]] = None
-    medical_needs: Optional[str] = None
-    location_lat: Optional[float] = Field(None, ge=-90, le=90)
-    location_long: Optional[float] = Field(None, ge=-180, le=180)
+    full_name: str | None = None
+    phone: str | None = None
+    current_status: str | None = None
+    needs: list[str] | None = None
+    medical_needs: str | None = None
+    location_lat: float | None = Field(None, ge=-90, le=90)
+    location_long: float | None = Field(None, ge=-180, le=180)
 
 
-class VerificationStatus(str, Enum):
+class VerificationStatus(StrEnum):
     PENDING = "pending"
     VERIFIED = "verified"
     REJECTED = "rejected"
@@ -505,22 +542,26 @@ class VerificationStatus(str, Enum):
 
 class UserVerificationUpdate(BaseModel):
     verification_status: VerificationStatus
-    verification_notes: Optional[str] = None
+    verification_notes: str | None = None
+
 
 # --- Phase 6: Interactivity Schemas ---
 
-class RequestVerificationStatus(str, Enum):
+
+class RequestVerificationStatus(StrEnum):
     TRUSTED = "trusted"
     DUBIOUS = "dubious"
     FALSE_ALARM = "false_alarm"
 
+
 class RequestVerificationCreate(BaseModel):
     request_id: str
-    field_notes: Optional[str] = None
-    photo_url: Optional[str] = None
+    field_notes: str | None = None
+    photo_url: str | None = None
     verification_status: RequestVerificationStatus
-    latitude_at_verification: Optional[float] = None
-    longitude_at_verification: Optional[float] = None
+    latitude_at_verification: float | None = None
+    longitude_at_verification: float | None = None
+
 
 class RequestVerification(RequestVerificationCreate):
     id: str
@@ -530,23 +571,27 @@ class RequestVerification(RequestVerificationCreate):
     class Config:
         from_attributes = True
 
-class UrgencyLevel(str, Enum):
+
+class UrgencyLevel(StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
 
-class SourcingStatus(str, Enum):
+
+class SourcingStatus(StrEnum):
     OPEN = "open"
     PARTIALLY_FUNDED = "partially_funded"
     FILLED = "filled"
     CLOSED = "closed"
 
+
 class ResourceSourcingCreate(BaseModel):
     resource_type: str
     quantity_needed: int
     urgency: UrgencyLevel = UrgencyLevel.MEDIUM
-    description: Optional[str] = None
+    description: str | None = None
+
 
 class ResourceSourcing(ResourceSourcingCreate):
     id: str
@@ -558,41 +603,47 @@ class ResourceSourcing(ResourceSourcingCreate):
     class Config:
         from_attributes = True
 
-class PledgeStatus(str, Enum):
+
+class PledgeStatus(StrEnum):
     PENDING = "pending"
     SHIPPED = "shipped"
     RECEIVED = "received"
     CANCELLED = "cancelled"
 
+
 class DonorPledgeCreate(BaseModel):
-    sourcing_request_id: Optional[str] = None
+    sourcing_request_id: str | None = None
     quantity_pledged: int = 0
-    disaster_id: Optional[str] = None
+    disaster_id: str | None = None
+
 
 class DonorPledge(BaseModel):
     id: str
     donor_id: str
-    disaster_id: Optional[str] = None
-    sourcing_request_id: Optional[str] = None
+    disaster_id: str | None = None
+    sourcing_request_id: str | None = None
     quantity_pledged: int = 0
     status: PledgeStatus = PledgeStatus.PENDING
-    user_id: Optional[str] = None
+    user_id: str | None = None
     created_at: datetime
 
     class Config:
         from_attributes = True
 
-class MobilizationStatus(str, Enum):
+
+class MobilizationStatus(StrEnum):
     ACTIVE = "active"
     FILLED = "filled"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
+
 class NgoMobilizationCreate(BaseModel):
     title: str
-    description: Optional[str] = None
-    location_id: Optional[str] = None
+    description: str | None = None
+    location_id: str | None = None
     required_volunteers: int = 1
+
 
 class NgoMobilization(NgoMobilizationCreate):
     id: str
@@ -603,11 +654,13 @@ class NgoMobilization(NgoMobilizationCreate):
     class Config:
         from_attributes = True
 
-class AssignmentStatus(str, Enum):
+
+class AssignmentStatus(StrEnum):
     ASSIGNED = "assigned"
     ON_SITE = "on_site"
     COMPLETED = "completed"
     WITHDRAWN = "withdrawn"
+
 
 class VolunteerAssignment(BaseModel):
     id: str
@@ -615,20 +668,22 @@ class VolunteerAssignment(BaseModel):
     volunteer_id: str
     status: AssignmentStatus
     assigned_at: datetime
-    feedback_notes: Optional[str] = None
-    completed_at: Optional[datetime] = None
+    feedback_notes: str | None = None
+    completed_at: datetime | None = None
 
     class Config:
         from_attributes = True
 
+
 class VolunteerProfileUpdate(BaseModel):
-    skills: Optional[List[str]] = None
-    assets: Optional[List[str]] = None
-    availability_status: Optional[str] = None
-    bio: Optional[str] = None
-    experience: Optional[str] = None
-    emergency_contact: Optional[str] = None
-    languages: Optional[List[str]] = None
+    skills: list[str] | None = None
+    assets: list[str] | None = None
+    availability_status: str | None = None
+    bio: str | None = None
+    experience: str | None = None
+    emergency_contact: str | None = None
+    languages: list[str] | None = None
+
 
 class VolunteerProfile(VolunteerProfileUpdate):
     user_id: str
@@ -637,27 +692,30 @@ class VolunteerProfile(VolunteerProfileUpdate):
     class Config:
         from_attributes = True
 
+
 class MissionTaskCreate(BaseModel):
     mobilization_id: str
     task_description: str
 
+
 class MissionTask(MissionTaskCreate):
     id: str
     is_completed: bool
-    completed_by: Optional[str] = None
-    completed_at: Optional[datetime] = None
+    completed_by: str | None = None
+    completed_at: datetime | None = None
     created_at: datetime
 
     class Config:
         from_attributes = True
 
+
 class OperationalPulse(BaseModel):
     id: str
-    actor_id: Optional[str]
-    target_id: Optional[str]
+    actor_id: str | None
+    target_id: str | None
     action_type: str
-    description: Optional[str]
-    metadata: Dict[str, Any]
+    description: str | None
+    metadata: dict[str, Any]
     created_at: datetime
 
     class Config:

@@ -9,7 +9,7 @@ const GlobalDisasterMap = dynamic(() => import('@/components/map/GlobalDisasterM
         <div className="w-full h-[calc(100vh-12rem)] rounded-2xl bg-slate-100 dark:bg-slate-900 flex items-center justify-center">
             <div className="flex flex-col items-center gap-3">
                 <Loader2 className="w-8 h-8 animate-spin text-purple-500" />
-                <p className="text-sm text-slate-500">Loading live disaster map...</p>
+                <p className="text-sm text-slate-500">Loading live response map...</p>
             </div>
         </div>
     ),
@@ -22,7 +22,7 @@ export default function AdminLiveMapPage() {
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
                         <Radio className="w-5 h-5 text-red-500 animate-pulse" />
-                        Global Live Disaster Map
+                        Global Response Map
                     </h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
                         Real-time aggregated data from USGS, NASA EONET, GDACS &amp; ReliefWeb

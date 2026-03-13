@@ -41,7 +41,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -51,6 +51,7 @@ try:
     import torch
     import torch.nn as nn
     import torch.optim as optim
+
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
@@ -63,6 +64,7 @@ PINN_CHECKPOINT = _MODEL_DIR / "pinn_spread.pt"
 # ── Fourier Feature Embedding ────────────────────────────────────────────────
 
 if _HAS_TORCH:
+
     class FourierFeatures(nn.Module):
         """Random Fourier feature embedding for positional encoding.
 
@@ -83,7 +85,6 @@ if _HAS_TORCH:
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             proj = 2 * math.pi * x @ self.B
             return torch.cat([torch.cos(proj), torch.sin(proj)], dim=-1)
-
 
     class PINNNetwork(nn.Module):
         """Physics-Informed Neural Network for disaster spread.
@@ -137,6 +138,7 @@ else:
 
 # ── PDE Residual Computation ─────────────────────────────────────────────────
 
+
 def compute_pde_residual(
     model: Any,
     collocation_points: Any,
@@ -162,7 +164,8 @@ def compute_pde_residual(
 
     # First-order derivatives via autograd
     grad_u = torch.autograd.grad(
-        u, pts,
+        u,
+        pts,
         grad_outputs=torch.ones_like(u),
         create_graph=True,
         retain_graph=True,
@@ -174,14 +177,16 @@ def compute_pde_residual(
 
     # Second-order derivatives
     u_xx = torch.autograd.grad(
-        u_x, pts,
+        u_x,
+        pts,
         grad_outputs=torch.ones_like(u_x),
         create_graph=True,
         retain_graph=True,
     )[0][:, 0:1]
 
     u_yy = torch.autograd.grad(
-        u_y, pts,
+        u_y,
+        pts,
         grad_outputs=torch.ones_like(u_y),
         create_graph=True,
         retain_graph=True,
@@ -198,9 +203,11 @@ def compute_pde_residual(
 
 # ── Training Data Structures ─────────────────────────────────────────────────
 
+
 @dataclass
 class SpreadObservation:
     """A single observation of disaster spread intensity."""
+
     x: float  # longitude or grid x
     y: float  # latitude or grid y
     t: float  # time (hours since event start)
@@ -210,6 +217,7 @@ class SpreadObservation:
 @dataclass
 class TerrainParams:
     """Terrain-dependent parameters for the PDE."""
+
     diffusion_base: float = 0.01  # base diffusion coefficient
     wind_speed_x: float = 0.0  # m/s
     wind_speed_y: float = 0.0  # m/s
@@ -217,6 +225,7 @@ class TerrainParams:
 
 
 # ── PINN Spread Model ────────────────────────────────────────────────────────
+
 
 class PINNSpreadModel:
     """Physics-Informed Neural Network for disaster spread prediction.
@@ -246,7 +255,7 @@ class PINNSpreadModel:
         self._n_fourier = n_fourier
         self._hidden_dim = hidden_dim
         self._n_layers = n_layers
-        self._training_history: List[Dict[str, float]] = []
+        self._training_history: list[dict[str, float]] = []
 
     def _ensure_model(self) -> Any:
         if self._model is not None:
@@ -264,14 +273,14 @@ class PINNSpreadModel:
 
     def train(
         self,
-        observations: List[SpreadObservation],
-        terrain: Optional[TerrainParams] = None,
+        observations: list[SpreadObservation],
+        terrain: TerrainParams | None = None,
         n_collocation: int = 5000,
         n_boundary: int = 500,
         n_initial: int = 500,
         epochs: int = 1000,
         lr: float = 1e-3,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Train the PINN on observed spread data.
 
         Args:
@@ -318,9 +327,12 @@ class PINNSpreadModel:
         obs_data[:, 2] = (obs_data[:, 2] - t_min) / t_range
 
         self._norm_params = {
-            "x_min": float(x_min), "x_range": float(x_range),
-            "y_min": float(y_min), "y_range": float(y_range),
-            "t_min": float(t_min), "t_range": float(t_range),
+            "x_min": float(x_min),
+            "x_range": float(x_range),
+            "y_min": float(y_min),
+            "y_range": float(y_range),
+            "t_min": float(t_min),
+            "t_range": float(t_range),
         }
 
         obs_tensor = torch.tensor(obs_data, dtype=torch.float32, device=device)
@@ -348,11 +360,11 @@ class PINNSpreadModel:
 
             # 2. PDE residual loss (physics constraint)
             residual = compute_pde_residual(model, colloc)
-            loss_pde = torch.mean(residual ** 2)
+            loss_pde = torch.mean(residual**2)
 
             # 3. Boundary condition loss (u → 0 at boundaries)
             u_bc = model(bc_points)
-            loss_bc = torch.mean(u_bc ** 2)
+            loss_bc = torch.mean(u_bc**2)
 
             # 4. Initial condition loss
             u_ic = model(ic_points)
@@ -361,12 +373,7 @@ class PINNSpreadModel:
             loss_ic = torch.mean((u_ic - ic_target) ** 2)
 
             # Total loss
-            total_loss = (
-                loss_data
-                + self.lambda_pde * loss_pde
-                + self.lambda_bc * loss_bc
-                + self.lambda_ic * loss_ic
-            )
+            total_loss = loss_data + self.lambda_pde * loss_pde + self.lambda_bc * loss_bc + self.lambda_ic * loss_ic
 
             self._optimizer.zero_grad()
             total_loss.backward()
@@ -389,8 +396,13 @@ class PINNSpreadModel:
                 self._training_history.append(metrics)
                 logger.info(
                     "PINN epoch %d: total=%.4f data=%.4f pde=%.4f bc=%.4f ic=%.4f D=%.4f",
-                    epoch, total_loss.item(), loss_data.item(), loss_pde.item(),
-                    loss_bc.item(), loss_ic.item(), model.diffusion.item(),
+                    epoch,
+                    total_loss.item(),
+                    loss_data.item(),
+                    loss_pde.item(),
+                    loss_bc.item(),
+                    loss_ic.item(),
+                    model.diffusion.item(),
                 )
 
         self._trained = True
@@ -427,8 +439,8 @@ class PINNSpreadModel:
 
     def predict(
         self,
-        points: List[Tuple[float, float, float]],
-    ) -> List[Dict[str, Any]]:
+        points: list[tuple[float, float, float]],
+    ) -> list[dict[str, Any]]:
         """Predict spread intensity at given (x, y, t) points.
 
         Args:
@@ -459,22 +471,24 @@ class PINNSpreadModel:
         results = []
         for i, (x, y, t) in enumerate(points):
             intensity = float(np.clip(u[i], 0, 1))
-            results.append({
-                "x": x,
-                "y": y,
-                "t": t,
-                "intensity": round(intensity, 4),
-                "confidence": round(1.0 - abs(intensity - 0.5) * 0.4, 2),  # heuristic confidence
-            })
+            results.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "t": t,
+                    "intensity": round(intensity, 4),
+                    "confidence": round(1.0 - abs(intensity - 0.5) * 0.4, 2),  # heuristic confidence
+                }
+            )
         return results
 
     def predict_grid(
         self,
-        x_range: Tuple[float, float],
-        y_range: Tuple[float, float],
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
         t: float,
         resolution: int = 50,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Predict intensity on a 2D grid at a given time.
 
         Returns a grid suitable for heatmap rendering.
@@ -499,19 +513,22 @@ class PINNSpreadModel:
             },
         }
 
-    def save(self, path: Optional[Path] = None) -> Path:
+    def save(self, path: Path | None = None) -> Path:
         path = path or PINN_CHECKPOINT
         path.parent.mkdir(parents=True, exist_ok=True)
         if _HAS_TORCH and self._model is not None:
-            torch.save({
-                "model_state": self._model.state_dict(),
-                "norm_params": getattr(self, "_norm_params", {}),
-                "training_history": self._training_history,
-            }, path)
+            torch.save(
+                {
+                    "model_state": self._model.state_dict(),
+                    "norm_params": getattr(self, "_norm_params", {}),
+                    "training_history": self._training_history,
+                },
+                path,
+            )
         logger.info("PINN checkpoint saved to %s", path)
         return path
 
-    def load(self, path: Optional[Path] = None) -> None:
+    def load(self, path: Path | None = None) -> None:
         path = path or PINN_CHECKPOINT
         if not _HAS_TORCH or not path.exists():
             return
@@ -530,6 +547,7 @@ class PINNSpreadModel:
 
 # ── Synthetic Data Generator (for testing) ────────────────────────────────────
 
+
 def generate_synthetic_spread_data(
     n_observations: int = 500,
     diffusion: float = 0.02,
@@ -539,7 +557,7 @@ def generate_synthetic_spread_data(
     source_y: float = 0.0,
     t_max: float = 24.0,
     seed: int = 42,
-) -> Tuple[List[SpreadObservation], TerrainParams]:
+) -> tuple[list[SpreadObservation], TerrainParams]:
     """Generate synthetic disaster spread data from an analytical solution.
 
     Uses a Gaussian plume model as ground truth:
@@ -563,7 +581,7 @@ def generate_synthetic_spread_data(
         # Gaussian plume solution
         dx = x - source_x - wind_x * t * 0.01
         dy = y - source_y - wind_y * t * 0.01
-        r2 = dx ** 2 + dy ** 2
+        r2 = dx**2 + dy**2
         intensity = (1.0 / (4 * math.pi * diffusion * max(t, 0.1))) * math.exp(-r2 / (4 * diffusion * max(t, 0.1)))
         intensity = min(intensity, 1.0)
         intensity += rng.normal(0, 0.02)  # noise

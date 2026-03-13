@@ -143,6 +143,7 @@ export const authApi = {
         email,
         password,
         options: {
+          emailRedirectTo: typeof window !== 'undefined' ? `${window.location.origin}/auth/callback` : undefined,
           data: { full_name: fullName || '' },
         },
       })

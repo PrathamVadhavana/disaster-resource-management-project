@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import logging
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
 import numpy as np
@@ -85,9 +86,24 @@ def _build_gml_graph() -> str:
     return "\n".join(lines)
 
 
+def _haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate the great circle distance between two points on Earth."""
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    r = 6371  # Radius of earth in kilometers
+    return c * r
+
+
 # ---------------------------------------------------------------------------
 # Synthetic data generator (for bootstrapping when real data is scarce)
 # ---------------------------------------------------------------------------
+
 
 def generate_synthetic_data(n: int = 2000, seed: int = 42) -> pd.DataFrame:
     """Generate observational data consistent with the causal graph.
@@ -98,34 +114,27 @@ def generate_synthetic_data(n: int = 2000, seed: int = 42) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
 
     weather_severity = rng.uniform(1, 10, n)
-    disaster_type = (weather_severity * 0.6 + rng.normal(0, 1, n)).clip(1, 10)
-    ngo_proximity_km = rng.exponential(50, n).clip(1, 500)
+    disaster_type = np.clip(weather_severity * 0.6 + rng.normal(0, 1, n), 1, 10)
+    ngo_proximity_km = np.clip(rng.exponential(50, n), 1, 500)
 
-    response_time_hours = (
-        disaster_type * 1.2
-        + ngo_proximity_km * 0.05
-        + rng.normal(0, 2, n)
-    ).clip(0.5, 120)
+    response_time_hours = np.clip(disaster_type * 1.2 + ngo_proximity_km * 0.05 + rng.normal(0, 2, n), 0.5, 120)
 
-    resource_availability = (
-        5.0
-        - ngo_proximity_km * 0.01
-        + rng.normal(0, 0.5, n)
-    ).clip(0.1, 10)
+    resource_availability = np.clip(5.0 - ngo_proximity_km * 0.01 + rng.normal(0, 0.5, n), 0.1, 10)
 
-    resource_quality_score = (
-        resource_availability * 0.5
-        + rng.normal(3, 1, n)
-    ).clip(1, 10)
+    resource_quality_score = np.clip(resource_availability * 0.5 + rng.normal(3, 1, n), 1, 10)
 
     casualties = (
-        weather_severity * 8
-        + disaster_type * 5
-        + response_time_hours * 3
-        - resource_availability * 6
-        - resource_quality_score * 2
-        + rng.normal(0, 10, n)
-    ).clip(0, None).astype(int)
+        (
+            weather_severity * 8
+            + disaster_type * 5
+            + response_time_hours * 3
+            - resource_availability * 6
+            - resource_quality_score * 2
+            + rng.normal(0, 10, n)
+        )
+        .clip(0, None)
+        .astype(int)
+    )
 
     economic_damage_usd = (
         weather_severity * 500_000
@@ -135,25 +144,29 @@ def generate_synthetic_data(n: int = 2000, seed: int = 42) -> pd.DataFrame:
         + rng.normal(0, 200_000, n)
     ).clip(0, None)
 
-    return pd.DataFrame({
-        "weather_severity": weather_severity,
-        "disaster_type": disaster_type,
-        "response_time_hours": response_time_hours,
-        "resource_availability": resource_availability,
-        "ngo_proximity_km": ngo_proximity_km,
-        "resource_quality_score": resource_quality_score,
-        "casualties": casualties,
-        "economic_damage_usd": economic_damage_usd,
-    })
+    return pd.DataFrame(
+        {
+            "weather_severity": weather_severity,
+            "disaster_type": disaster_type,
+            "response_time_hours": response_time_hours,
+            "resource_availability": resource_availability,
+            "ngo_proximity_km": ngo_proximity_km,
+            "resource_quality_score": resource_quality_score,
+            "casualties": casualties,
+            "economic_damage_usd": economic_damage_usd,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
 # Causal estimation helpers
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CausalEstimateResult:
     """Container for a single causal effect estimate + refutation."""
+
     treatment: str
     outcome: str
     method: str
@@ -164,18 +177,20 @@ class CausalEstimateResult:
     refutation_p_value: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        ate_val = float(self.ate) if self.ate is not None else 0.0
+        p_val = float(self.p_value) if self.p_value is not None else None
+        ci_vals = [float(v) if v is not None else 0.0 for v in self.confidence_interval]
+
         return {
             "treatment": self.treatment,
             "outcome": self.outcome,
             "method": self.method,
-            "ate": round(self.ate, 4),
-            "p_value": round(self.p_value, 4) if self.p_value is not None else None,
-            "confidence_interval": [round(v, 4) for v in self.confidence_interval],
+            "ate": round(ate_val, 4),
+            "p_value": round(p_val, 4) if p_val is not None else None,
+            "confidence_interval": [round(v, 4) for v in ci_vals],
             "refutation_passed": self.refutation_passed,
             "refutation_p_value": (
-                round(self.refutation_p_value, 4)
-                if self.refutation_p_value is not None
-                else None
+                round(float(self.refutation_p_value), 4) if self.refutation_p_value is not None else None
             ),
         }
 
@@ -183,6 +198,7 @@ class CausalEstimateResult:
 @dataclass
 class CounterfactualResult:
     """Container for a counterfactual query result."""
+
     original_value: float
     counterfactual_value: float
     difference: float
@@ -190,11 +206,16 @@ class CounterfactualResult:
     explanation: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        orig_val = float(self.original_value) if self.original_value is not None else 0.0
+        cf_val = float(self.counterfactual_value) if self.counterfactual_value is not None else 0.0
+        diff_val = float(self.difference) if self.difference is not None else 0.0
+        ci_vals = [float(v) if v is not None else 0.0 for v in self.confidence_interval]
+
         return {
-            "original_value": round(self.original_value, 2),
-            "counterfactual_value": round(self.counterfactual_value, 2),
-            "difference": round(self.difference, 2),
-            "confidence_interval": [round(v, 2) for v in self.confidence_interval],
+            "original_value": round(orig_val, 2),
+            "counterfactual_value": round(cf_val, 2),
+            "difference": round(diff_val, 2),
+            "confidence_interval": [round(v, 2) for v in ci_vals],
             "explanation": self.explanation,
         }
 
@@ -203,19 +224,240 @@ class CounterfactualResult:
 # Main service class
 # ---------------------------------------------------------------------------
 
+
 class DisasterCausalModel:
     """Wrapper around a DoWhy CausalModel for disaster-domain inference."""
 
     def __init__(self, data: pd.DataFrame | None = None):
-        import dowhy  # deferred import – heavy dependency
 
         self._data = data if data is not None else generate_synthetic_data()
         self._gml = _build_gml_graph()
         self._model_cache: dict[str, Any] = {}
         self._estimate_cache: dict[str, Any] = {}
-        logger.info(
-            "DisasterCausalModel initialised with %d observations", len(self._data)
-        )
+        logger.info("DisasterCausalModel initialised with %d observations", len(self._data))
+
+    @classmethod
+    async def from_database(cls) -> DisasterCausalModel:
+        """Build a causal model from real disaster data in the database."""
+        from app.database import db
+
+        try:
+            # 1. Fetch data in bulk to avoid N+1 queries
+            logger.info("Fetching disaster data from database for causal model...")
+
+            # Disasters
+            disasters_resp = await db.table("disasters").select("*").limit(2000).async_execute()
+            disasters = disasters_resp.data or []
+
+            if len(disasters) < 20:  # Lowered threshold slightly to be more useful in early stages
+                logger.warning(
+                    "Not enough disaster records (%d) for causal analysis — using synthetic data", len(disasters)
+                )
+                return cls()
+
+            # Locations
+            locations_resp = await db.table("locations").select("id, latitude, longitude").async_execute()
+            locations = {loc["id"]: loc for loc in (locations_resp.data or [])}
+
+            # NGOs
+            ngo_resp = await db.table("users").select("id, metadata").eq("role", "ngo").async_execute()
+            ngos = ngo_resp.data or []
+
+            # Resource Requests
+            requests_resp = await db.table("resource_requests").select("disaster_id, priority, status").async_execute()
+            requests = requests_resp.data or []
+            requests_by_disaster = {}
+            for req in requests:
+                dis_id = req.get("disaster_id")
+                if dis_id:
+                    requests_by_disaster.setdefault(dis_id, []).append(req)
+
+            # Mobilizations (needed for both assignments and NGO locations)
+            mobs_resp = (
+                await db.table("ngo_mobilization").select("id, disaster_id, ngo_id, location_id").async_execute()
+            )
+            mobs = mobs_resp.data or []
+            mob_map = {m["id"]: m for m in mobs}
+
+            # Build NGO -> Location mapping from both user metadata and mobilizations
+            ngo_locations = {}
+            for ngo in ngos:
+                ngo_id = ngo["id"]
+                # Priority 1: User metadata
+                loc_id = ngo.get("metadata", {}).get("location_id")
+                if loc_id:
+                    ngo_locations[ngo_id] = loc_id
+                else:
+                    # Priority 2: Latest mobilization
+                    for m in mobs:
+                        if m["ngo_id"] == ngo_id and m.get("location_id"):
+                            ngo_locations[ngo_id] = m["location_id"]
+                            break
+
+            # Volunteer Assignments
+            assignments_resp = (
+                await db.table("volunteer_assignments").select("mobilization_id, assigned_at").async_execute()
+            )
+            assignments = assignments_resp.data or []
+            assignments_by_disaster = {}
+            for assignment in assignments:
+                mob_id = assignment.get("mobilization_id")
+                if mob_id and mob_id in mob_map:
+                    dis_id = mob_map[mob_id].get("disaster_id")
+                    if dis_id:
+                        assignments_by_disaster.setdefault(dis_id, []).append(assignment)
+
+            # 2. Process rows
+            rows = []
+            for d in disasters:
+                dis_id = d["id"]
+                loc_id = d.get("location_id")
+                location = locations.get(loc_id)
+
+                if not location:
+                    continue
+
+                severity_score = cls._map_severity_to_score(d.get("severity", "medium"))
+                response_time_hours = cls._calculate_response_time(
+                    d["created_at"], assignments_by_disaster.get(dis_id, [])
+                )
+                resource_count = len(requests_by_disaster.get(dis_id, []))
+
+                # Calculate NGO distance using pre-fetched data
+                ngo_distance_km = cls._calculate_nearest_ngo_distance_fast(
+                    float(location["latitude"]), float(location["longitude"]), ngo_locations, locations
+                )
+
+                resource_quality_score = cls._calculate_resource_quality_score(requests_by_disaster.get(dis_id, []))
+
+                rows.append(
+                    {
+                        "weather_severity": severity_score,
+                        "disaster_type": cls._map_disaster_type_to_score(d.get("type", "other")),
+                        "response_time_hours": response_time_hours,
+                        "resource_availability": resource_count,
+                        "ngo_proximity_km": ngo_distance_km,
+                        "resource_quality_score": resource_quality_score,
+                        "casualties": int(d.get("casualties", 0) or 0),
+                        "economic_damage_usd": float(d.get("estimated_damage", 0) or 0),
+                    }
+                )
+
+            if not rows:
+                return cls()
+
+            df = pd.DataFrame(rows)
+            df = df.fillna(df.mean(numeric_only=True))
+
+            return cls(data=df)
+
+        except Exception as e:
+            logger.warning("Failed to query disasters for causal model: %s", e)
+            return cls()
+
+    # ------------------------------------------------------------------
+    # Field mapping methods
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _map_severity_to_score(severity_str: str) -> float:
+        """Map severity string to numeric score (low=1, medium=5, high=7, critical=10)."""
+        severity_mapping = {"low": 1.0, "medium": 5.0, "high": 7.0, "critical": 10.0}
+        return severity_mapping.get(severity_str.lower(), 5.0)  # Default to medium
+
+    @staticmethod
+    def _map_disaster_type_to_score(type_str: str) -> float:
+        """Map disaster type to numeric score for modeling purposes."""
+        type_mapping = {
+            "earthquake": 8.0,
+            "flood": 6.0,
+            "hurricane": 9.0,
+            "tornado": 7.0,
+            "wildfire": 5.0,
+            "tsunami": 10.0,
+            "drought": 3.0,
+            "landslide": 6.0,
+            "volcano": 7.0,
+            "other": 4.0,
+        }
+        return type_mapping.get(type_str.lower(), 4.0)
+
+    @staticmethod
+    def _calculate_response_time(disaster_created_at: str, assignments: list) -> float:
+        """Calculate response time from disaster creation to first assignment in hours."""
+        if not assignments:
+            return 24.0  # Default response time if no assignments
+
+        try:
+            from datetime import datetime
+
+            disaster_time = datetime.fromisoformat(disaster_created_at.replace("Z", "+00:00"))
+
+            # Find earliest assignment
+            earliest_assignment = None
+            for assignment in assignments:
+                assigned_at = assignment.get("assigned_at")
+                if assigned_at:
+                    assignment_time = datetime.fromisoformat(assigned_at.replace("Z", "+00:00"))
+                    if earliest_assignment is None or assignment_time < earliest_assignment:
+                        earliest_assignment = assignment_time
+
+            if earliest_assignment is not None and disaster_time is not None:
+                time_diff = earliest_assignment - disaster_time
+                return max(0.5, float(time_diff.total_seconds() or 0) / 3600)  # Minimum 30 minutes
+
+        except Exception as e:
+            logger.warning("Error calculating response time: %s", e)
+
+        return 24.0  # Default fallback
+
+    @staticmethod
+    def _calculate_nearest_ngo_distance_fast(
+        disaster_lat: float, disaster_lon: float, ngo_locations: dict[str, str], locations: dict[str, dict]
+    ) -> float:
+        """Calculate distance from disaster to nearest NGO using pre-fetched data."""
+        if not ngo_locations:
+            return 100.0
+
+        min_distance = float("inf")
+        for ngo_id, loc_id in ngo_locations.items():
+            if loc_id in locations:
+                loc = locations[loc_id]
+                dist = _haversine_distance(disaster_lat, disaster_lon, float(loc["latitude"]), float(loc["longitude"]))
+                if dist < min_distance:
+                    min_distance = dist
+
+        return min_distance if min_distance != float("inf") else 100.0
+
+    @staticmethod
+    def _calculate_resource_quality_score(requests: list) -> float:
+        """Calculate resource quality score based on request fulfillment and priority."""
+        if not requests:
+            return 3.0  # Default low quality if no requests
+
+        total_score = 0.0
+        count = 0
+
+        for req in requests:
+            # Base score from priority (convert text to numeric)
+            priority_scores = {"high": 8.0, "medium": 5.0, "low": 2.0}
+            priority_score = priority_scores.get(req.get("priority", "medium").lower(), 5.0)
+
+            # Adjust based on status (completed requests get higher score)
+            status = req.get("status", "pending")
+            if status in ["completed", "delivered"]:
+                priority_score += 2.0
+            elif status in ["rejected", "closed"]:
+                priority_score -= 2.0
+
+            # Consider NLP confidence if available
+            nlp_confidence = req.get("nlp_confidence", 0.5)
+            priority_score *= 0.5 + nlp_confidence * 0.5  # Scale by confidence
+
+            total_score += priority_score
+            count += 1
+
+        return (total_score / count) if count > 0 else 3.0
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -315,9 +557,7 @@ class DisasterCausalModel:
                     graph=self._gml,
                 )
                 ident = m.identify_effect(proceed_when_unidentifiable=True)
-                est = m.estimate_effect(
-                    ident, method_name="backdoor.linear_regression"
-                )
+                est = m.estimate_effect(ident, method_name="backdoor.linear_regression")
                 ates.append(float(est.value))
             except Exception:
                 continue
@@ -353,7 +593,8 @@ class DisasterCausalModel:
         model = self._get_model(treatment, outcome)
         identified = model.identify_effect(proceed_when_unidentifiable=True)
         estimate = model.estimate_effect(
-            identified, method_name=method,
+            identified,
+            method_name=method,
         )
 
         try:
@@ -443,11 +684,10 @@ class DisasterCausalModel:
         diff = counterfactual_value - original_value
 
         # Propagate CI
-        ci_lo = original_value + est.confidence_interval[0] * delta_treatment
-        ci_hi = original_value + est.confidence_interval[1] * delta_treatment
+        ci_lo = original_value + float(est.confidence_interval[0] or 0.0) * delta_treatment
+        ci_hi = original_value + float(est.confidence_interval[1] or 0.0) * delta_treatment
         ci = (min(ci_lo, ci_hi), max(ci_lo, ci_hi))
 
-        direction = "increase" if delta_treatment > 0 else "decrease"
         abs_delta = abs(delta_treatment)
         explanation = (
             f"If {intervention_var} had been {'increased' if delta_treatment > 0 else 'decreased'} "
@@ -474,7 +714,10 @@ class DisasterCausalModel:
         Returns a list sorted descending by ``|ATE|``.
         """
         # Find all edges pointing into outcome_var
-        treatments = [src for src, dst in CAUSAL_EDGES if dst == outcome_var]
+        treatments = []
+        for src, dst in CAUSAL_EDGES:
+            if dst == outcome_var:
+                treatments.append(src)
         results: list[CausalEstimateResult] = []
         for t in treatments:
             try:
@@ -503,7 +746,10 @@ class DisasterCausalModel:
         For each upstream cause we test a ±1 standard-deviation shift
         in the direction that reduces the outcome.
         """
-        treatments = [src for src, dst in CAUSAL_EDGES if dst == outcome_var]
+        treatments = []
+        for src, dst in CAUSAL_EDGES:
+            if dst == outcome_var:
+                treatments.append(src)
         candidates: list[dict[str, Any]] = []
 
         for t in treatments:
@@ -523,17 +769,26 @@ class DisasterCausalModel:
             new_val = float(observation.get(t, self._data[t].mean())) + best_delta
 
             cf = self.counterfactual(observation, t, new_val, outcome_var)
-            candidates.append({
-                "variable": t,
-                "current_value": round(float(observation.get(t, self._data[t].mean())), 2),
-                "proposed_value": round(new_val, 2),
-                "estimated_reduction": round(-cf.difference, 2),
-                "confidence_interval": [round(v, 2) for v in cf.confidence_interval],
-                "explanation": cf.explanation,
-            })
+            try:
+                current_val = float(observation.get(t, self._data[t].mean()))
+            except (KeyError, AttributeError):
+                current_val = 0.0
+            cf_diff = float(-cf.difference) if cf.difference is not None else 0.0
+            ci_vals = [float(v) if v is not None else 0.0 for v in cf.confidence_interval]
 
-        candidates.sort(key=lambda c: c["estimated_reduction"], reverse=True)
-        return candidates[:k]
+            candidates.append(
+                {
+                    "variable": t,
+                    "current_value": round(current_val, 2),
+                    "proposed_value": round(float(new_val), 2),
+                    "estimated_reduction": round(cf_diff, 2),
+                    "confidence_interval": [round(v, 2) for v in ci_vals],
+                    "explanation": cf.explanation,
+                }
+            )
+
+        candidates.sort(key=lambda c: float(c.get("estimated_reduction", 0)), reverse=True)
+        return candidates[:k] if len(candidates) >= k else candidates
 
     # ------------------------------------------------------------------
     # Utility

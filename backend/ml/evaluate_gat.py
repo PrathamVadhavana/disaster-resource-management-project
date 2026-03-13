@@ -24,10 +24,8 @@ import json
 import logging
 import random
 import statistics
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -40,7 +38,6 @@ from ml.gat_model import (
     load_checkpoint,
 )
 from ml.graph_builder import (
-    RESOURCE_TYPES,
     NgoNode,
     VictimNode,
     build_graph,
@@ -82,14 +79,14 @@ def _travel_time_min(dist_km: float) -> float:
     return (dist_km * _DETOUR_FACTOR / _FALLBACK_SPEED_KMH) * 60.0
 
 
-def _type_matches(victim_type: str, ngo_types: List[str]) -> bool:
+def _type_matches(victim_type: str, ngo_types: list[str]) -> bool:
     return victim_type.lower() in {t.lower() for t in ngo_types}
 
 
 def _compute_metrics(
-    assignments: List[Tuple[int, int]],
-    victims: List[VictimNode],
-    ngos: List[NgoNode],
+    assignments: list[tuple[int, int]],
+    victims: list[VictimNode],
+    ngos: list[NgoNode],
 ) -> ScenarioMetrics:
     if not assignments:
         return ScenarioMetrics()
@@ -113,16 +110,20 @@ def _compute_metrics(
     )
 
 
-def _aggregate(method: str, all_metrics: List[ScenarioMetrics]) -> AggregateMetrics:
+def _aggregate(method: str, all_metrics: list[ScenarioMetrics]) -> AggregateMetrics:
     if not all_metrics:
         return AggregateMetrics(method=method)
     return AggregateMetrics(
         method=method,
         n_scenarios=len(all_metrics),
         avg_response_time_min=round(statistics.mean(m.avg_response_time_min for m in all_metrics), 2),
-        std_response_time_min=round(statistics.stdev(m.avg_response_time_min for m in all_metrics), 2) if len(all_metrics) > 1 else 0.0,
+        std_response_time_min=round(statistics.stdev(m.avg_response_time_min for m in all_metrics), 2)
+        if len(all_metrics) > 1
+        else 0.0,
         avg_coverage_pct=round(statistics.mean(m.coverage_pct for m in all_metrics), 2),
-        std_coverage_pct=round(statistics.stdev(m.coverage_pct for m in all_metrics), 2) if len(all_metrics) > 1 else 0.0,
+        std_coverage_pct=round(statistics.stdev(m.coverage_pct for m in all_metrics), 2)
+        if len(all_metrics) > 1
+        else 0.0,
         avg_total_distance_km=round(statistics.mean(m.total_distance_km for m in all_metrics), 2),
         avg_type_match_rate=round(statistics.mean(m.type_match_rate for m in all_metrics), 4),
     )
@@ -132,10 +133,10 @@ def _aggregate(method: str, all_metrics: List[ScenarioMetrics]) -> AggregateMetr
 
 
 def _greedy_assignment(
-    victims: List[VictimNode],
-    ngos: List[NgoNode],
+    victims: list[VictimNode],
+    ngos: list[NgoNode],
     radius_km: float = 50.0,
-) -> List[Tuple[int, int]]:
+) -> list[tuple[int, int]]:
     """
     Greedy nearest-eligible-first assignment.
 
@@ -143,7 +144,7 @@ def _greedy_assignment(
     unassigned NGO that has a matching resource type and is within radius.
     """
     assigned_ngos: set = set()
-    assignments: List[Tuple[int, int]] = []
+    assignments: list[tuple[int, int]] = []
 
     # Sort victims by priority (highest first)
     order = sorted(range(len(victims)), key=lambda i: victims[i].priority_score, reverse=True)
@@ -183,10 +184,10 @@ def _greedy_assignment(
 
 def _gat_assignment(
     model: GATAllocator,
-    victims: List[VictimNode],
-    ngos: List[NgoNode],
+    victims: list[VictimNode],
+    ngos: list[NgoNode],
     radius_km: float = 50.0,
-) -> List[Tuple[int, int]]:
+) -> list[tuple[int, int]]:
     """Run the GAT model + Hungarian matching."""
     graph = build_graph(victims, ngos, radius_km=radius_km)
     if graph["victim", "requests", "ngo"].edge_index.size(1) == 0:
@@ -204,7 +205,7 @@ def evaluate(
     radius_km: float = 50.0,
     checkpoint_path: str | None = None,
     seed: int = 123,
-) -> Dict[str, AggregateMetrics]:
+) -> dict[str, AggregateMetrics]:
     """
     Run the three-way comparison on ``n_scenarios`` synthetic scenarios.
 
@@ -216,16 +217,16 @@ def evaluate(
 
     # Load GAT model
     ckpt = Path(checkpoint_path or DEFAULT_CHECKPOINT)
-    gat: Optional[GATAllocator] = None
+    gat: GATAllocator | None = None
     if ckpt.exists():
         gat = load_checkpoint(ckpt)
         logger.info("Loaded GAT from %s", ckpt)
     else:
         logger.warning("GAT checkpoint not found at %s — skipping GAT evaluation", ckpt)
 
-    gat_metrics: List[ScenarioMetrics] = []
-    ilp_metrics: List[ScenarioMetrics] = []
-    greedy_metrics: List[ScenarioMetrics] = []
+    gat_metrics: list[ScenarioMetrics] = []
+    ilp_metrics: list[ScenarioMetrics] = []
+    greedy_metrics: list[ScenarioMetrics] = []
 
     for i in range(n_scenarios):
         victims, ngos = generate_scenario()
@@ -246,7 +247,7 @@ def evaluate(
         if (i + 1) % 20 == 0:
             logger.info("Evaluated %d / %d scenarios", i + 1, n_scenarios)
 
-    results: Dict[str, AggregateMetrics] = {
+    results: dict[str, AggregateMetrics] = {
         "ILP (optimal)": _aggregate("ILP (optimal)", ilp_metrics),
         "Greedy": _aggregate("Greedy", greedy_metrics),
     }
@@ -256,7 +257,7 @@ def evaluate(
     return results
 
 
-def print_results(results: Dict[str, AggregateMetrics]) -> None:
+def print_results(results: dict[str, AggregateMetrics]) -> None:
     """Pretty-print the comparison table."""
     header = f"{'Method':<18} {'Avg RT (min)':>14} {'Coverage %':>12} {'Avg Dist (km)':>15} {'Type Match':>12}"
     sep = "─" * len(header)

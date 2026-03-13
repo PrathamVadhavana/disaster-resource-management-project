@@ -165,6 +165,7 @@ export function AIChatbot() {
             latitude: extractedData.latitude || undefined,
             longitude: extractedData.longitude || undefined,
             address_text: extractedData.address_text || undefined,
+            disaster_type: extractedData.disaster_type || undefined,
         }
 
         submitMutation.mutate(payload)

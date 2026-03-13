@@ -39,23 +39,25 @@ def train_spread_model(
     logger.info("Loading spread dataset …")
     X_train, X_test, y_train, y_test = load_spread_data(random_state=random_state)
 
-    logger.info(
-        f"Spread data — train: {len(X_train)}, test: {len(X_test)}, "
-        f"features: {X_train.shape[1]}"
-    )
+    logger.info(f"Spread data — train: {len(X_train)}, test: {len(X_test)}, features: {X_train.shape[1]}")
 
     # ── Mean predictor ────────────────────────────────────────────────────
-    pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("reg", GradientBoostingRegressor(
-            n_estimators=300,
-            max_depth=6,
-            learning_rate=0.08,
-            subsample=0.8,
-            min_samples_leaf=5,
-            random_state=random_state,
-        )),
-    ])
+    pipeline = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            (
+                "reg",
+                GradientBoostingRegressor(
+                    n_estimators=300,
+                    max_depth=6,
+                    learning_rate=0.08,
+                    subsample=0.8,
+                    min_samples_leaf=5,
+                    random_state=random_state,
+                ),
+            ),
+        ]
+    )
 
     t0 = time.time()
     pipeline.fit(X_train, y_train)
@@ -69,28 +71,38 @@ def train_spread_model(
     logger.info(f"Spread model — MAE: {mae:.2f}, RMSE: {rmse:.2f}, R²: {r2:.4f}")
 
     # ── Quantile regressors for confidence interval ───────────────────────
-    lower_pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("reg", GradientBoostingRegressor(
-            n_estimators=200,
-            max_depth=5,
-            learning_rate=0.08,
-            loss="quantile",
-            alpha=0.1,
-            random_state=random_state,
-        )),
-    ])
-    upper_pipeline = Pipeline([
-        ("scaler", StandardScaler()),
-        ("reg", GradientBoostingRegressor(
-            n_estimators=200,
-            max_depth=5,
-            learning_rate=0.08,
-            loss="quantile",
-            alpha=0.9,
-            random_state=random_state,
-        )),
-    ])
+    lower_pipeline = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            (
+                "reg",
+                GradientBoostingRegressor(
+                    n_estimators=200,
+                    max_depth=5,
+                    learning_rate=0.08,
+                    loss="quantile",
+                    alpha=0.1,
+                    random_state=random_state,
+                ),
+            ),
+        ]
+    )
+    upper_pipeline = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            (
+                "reg",
+                GradientBoostingRegressor(
+                    n_estimators=200,
+                    max_depth=5,
+                    learning_rate=0.08,
+                    loss="quantile",
+                    alpha=0.9,
+                    random_state=random_state,
+                ),
+            ),
+        ]
+    )
 
     lower_pipeline.fit(X_train, y_train)
     upper_pipeline.fit(X_train, y_train)

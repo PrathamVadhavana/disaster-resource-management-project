@@ -1,13 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+
 from app.database import db_admin
-from app.dependencies import security, _verify_supabase_token
+from app.dependencies import _verify_supabase_token, security
 
 router = APIRouter(prefix="/api/disasters/{disaster_id}/chat", tags=["Chat"])
 
+
 class ChatMessageCreate(BaseModel):
     content: str
+
 
 class ChatMessage(BaseModel):
     id: str
@@ -18,7 +20,8 @@ class ChatMessage(BaseModel):
     content: str
     created_at: str
 
-async def get_current_user_metadata(credentials = Depends(security)):
+
+async def get_current_user_metadata(credentials=Depends(security)):
     try:
         decoded = _verify_supabase_token(credentials.credentials)
         uid = decoded["uid"]
@@ -29,11 +32,7 @@ async def get_current_user_metadata(credentials = Depends(security)):
         if role == "unknown" or name == "unknown":
             try:
                 db_resp = (
-                    await db_admin.table("users")
-                    .select("full_name, role")
-                    .eq("id", uid)
-                    .maybe_single()
-                    .async_execute()
+                    await db_admin.table("users").select("full_name, role").eq("id", uid).maybe_single().async_execute()
                 )
                 if db_resp.data:
                     if role == "unknown":
@@ -53,15 +52,19 @@ async def get_current_user_metadata(credentials = Depends(security)):
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-@router.get("", response_model=List[ChatMessage])
+
+@router.get("", response_model=list[ChatMessage])
 async def get_messages(disaster_id: str, limit: int = 50, user: dict = Depends(get_current_user_metadata)):
-    resp = await db_admin.table("disaster_messages") \
-        .select("*") \
-        .eq("disaster_id", disaster_id) \
-        .order("created_at", desc=False) \
-        .limit(limit) \
+    resp = (
+        await db_admin.table("disaster_messages")
+        .select("*")
+        .eq("disaster_id", disaster_id)
+        .order("created_at", desc=False)
+        .limit(limit)
         .async_execute()
+    )
     return resp.data
+
 
 @router.post("", response_model=ChatMessage)
 async def post_message(disaster_id: str, payload: ChatMessageCreate, user: dict = Depends(get_current_user_metadata)):
@@ -70,7 +73,7 @@ async def post_message(disaster_id: str, payload: ChatMessageCreate, user: dict 
         "user_id": user["id"],
         "user_name": user["name"],
         "user_role": user["role"],
-        "content": payload.content
+        "content": payload.content,
     }
     resp = await db_admin.table("disaster_messages").insert(msg_data).async_execute()
     if not resp.data:

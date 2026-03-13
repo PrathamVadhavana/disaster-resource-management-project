@@ -6,7 +6,6 @@ All settings are loaded from environment variables with sensible defaults.
 
 import os
 from dataclasses import dataclass, field
-from typing import List
 
 
 @dataclass(frozen=True)
@@ -33,10 +32,18 @@ class IngestionConfig:
 
     # ── Social Media (optional — requires paid Twitter API) ──────────
     TWITTER_BEARER_TOKEN: str = os.getenv("TWITTER_BEARER_TOKEN", "")
-    SOCIAL_KEYWORDS: List[str] = field(default_factory=lambda: [
-        "SOS", "help needed", "disaster", "earthquake", "flood",
-        "rescue", "emergency relief", "trapped",
-    ])
+    SOCIAL_KEYWORDS: list[str] = field(
+        default_factory=lambda: [
+            "SOS",
+            "help needed",
+            "disaster",
+            "earthquake",
+            "flood",
+            "rescue",
+            "emergency relief",
+            "trapped",
+        ]
+    )
     SOCIAL_POLL_INTERVAL_S: int = int(os.getenv("SOCIAL_POLL_INTERVAL_S", "300"))
 
     # ── Notifications (SendGrid free tier — 100 emails/day) ──────

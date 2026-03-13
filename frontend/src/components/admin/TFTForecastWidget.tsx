@@ -57,6 +57,7 @@ export function TFTForecastWidget() {
 
     const horizons = data?.horizons || []
     const confidence = data?.confidence || 0
+    const summary = data?.summary
 
     return (
         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-6">
@@ -75,6 +76,17 @@ export function TFTForecastWidget() {
                     </span>
                 </div>
             </div>
+
+            {summary && (
+                <div className="mb-4 rounded-lg border border-blue-100 dark:border-blue-900/30 bg-blue-50/60 dark:bg-blue-950/20 p-3 text-xs text-slate-600 dark:text-slate-300">
+                    <p>
+                        Based on {summary.active_request_count} active victim requests, {summary.victims_impacted} impacted victims, and {summary.availability_pct.toFixed(1)}% live resource availability.
+                    </p>
+                    {data?.derived_from && (
+                        <p className="mt-1 text-slate-500 dark:text-slate-400">{data.derived_from}</p>
+                    )}
+                </div>
+            )}
 
             {/* Horizons */}
             <div className="space-y-3">

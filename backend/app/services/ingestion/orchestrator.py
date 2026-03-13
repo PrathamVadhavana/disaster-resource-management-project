@@ -10,19 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from app.core.config import ingestion_config as cfg
 from app.database import db_admin
 from app.services.ingestion import memory_store
-from app.services.ingestion.weather_service import WeatherService
-from app.services.ingestion.gdacs_service import GDACSService
-from app.services.ingestion.usgs_service import USGSService
-from app.services.ingestion.firms_service import FIRMSService
-from app.services.ingestion.social_service import SocialMediaService
 from app.services.ingestion.alert_service import AlertNotificationService
+from app.services.ingestion.firms_service import FIRMSService
+from app.services.ingestion.gdacs_service import GDACSService
+from app.services.ingestion.social_service import SocialMediaService
+from app.services.ingestion.usgs_service import USGSService
+from app.services.ingestion.weather_service import WeatherService
 
 logger = logging.getLogger("ingestion.orchestrator")
 
@@ -41,7 +41,7 @@ class IngestionOrchestrator:
         self.social = SocialMediaService()
         self.alerts = AlertNotificationService()
 
-        self._tasks: List[asyncio.Task] = []
+        self._tasks: list[asyncio.Task] = []
         self._running = False
         self._ml_service = None  # set after startup via set_ml_service()
 
@@ -136,12 +136,12 @@ class IngestionOrchestrator:
 
     # ── event → disaster → predictions pipeline ────────────────────
 
-    async def _process_disaster_event(self, event: Dict[str, Any], source: str) -> None:
+    async def _process_disaster_event(self, event: dict[str, Any], source: str) -> None:
         """
         For GDACS/USGS events:
          1. Evaluate alert thresholds and dispatch notifications
          2. Run predictions if ML service is available
-         
+
         Note: Live disaster data is displayed directly on the map from
         external APIs without persistent storage. Disaster records are
         only created manually by admins/NGOs.
@@ -149,11 +149,11 @@ class IngestionOrchestrator:
         # Evaluate alert threshold for critical events
         await self.alerts.evaluate_and_notify(event)
 
-    async def _auto_create_disaster(self, event: Dict[str, Any], source: str) -> Optional[str]:
+    async def _auto_create_disaster(self, event: dict[str, Any], source: str) -> str | None:
         """Create or find a disaster record for the event."""
         try:
-            lat = event.get("latitude")
-            lon = event.get("longitude")
+            event.get("latitude")
+            event.get("longitude")
 
             # Try to find a matching location
             location_id = await self._find_or_create_location(event)
@@ -163,8 +163,15 @@ class IngestionOrchestrator:
             if disaster_type == "earthquake":
                 pass  # already correct
             elif disaster_type not in (
-                "earthquake", "flood", "hurricane", "tornado", "wildfire",
-                "tsunami", "drought", "landslide", "volcano",
+                "earthquake",
+                "flood",
+                "hurricane",
+                "tornado",
+                "wildfire",
+                "tsunami",
+                "drought",
+                "landslide",
+                "volcano",
             ):
                 disaster_type = "other"
 
@@ -175,10 +182,10 @@ class IngestionOrchestrator:
                 "title": event.get("title", f"Auto-detected {disaster_type}"),
                 "description": event.get("description", ""),
                 "status": "active",
-                "start_date": datetime.now(timezone.utc).isoformat(),
+                "start_date": datetime.now(UTC).isoformat(),
                 "location_id": location_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
             }
 
             resp = await db_admin.table("disasters").insert(disaster_data).async_execute()
@@ -192,7 +199,7 @@ class IngestionOrchestrator:
             logger.exception("Failed to auto-create disaster from %s event", source)
             return None
 
-    async def _find_or_create_location(self, event: Dict[str, Any]) -> str:
+    async def _find_or_create_location(self, event: dict[str, Any]) -> str:
         """Find a nearby location or create a new one."""
         lat = event.get("latitude")
         lon = event.get("longitude")
@@ -211,7 +218,7 @@ class IngestionOrchestrator:
                     .limit(50)
                     .async_execute()
                 )
-                for loc in (resp.data or []):
+                for loc in resp.data or []:
                     loc_lon = loc.get("longitude")
                     if loc_lon is not None and abs(loc_lon - lon) <= 0.5:
                         return loc["id"]
@@ -228,12 +235,12 @@ class IngestionOrchestrator:
             "city": "Unknown",
             "state": "Unknown",
             "country": "Unknown",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         resp = await db_admin.table("locations").insert(loc_data).async_execute()
         return resp.data[0]["id"] if resp.data else loc_data["id"]
 
-    async def _run_batch_predictions(self, event: Dict[str, Any], disaster_id: str) -> List[str]:
+    async def _run_batch_predictions(self, event: dict[str, Any], disaster_id: str) -> list[str]:
         """
         Run severity + spread + impact predictions using the ML service.
         Returns list of prediction UUIDs.
@@ -242,7 +249,7 @@ class IngestionOrchestrator:
             logger.warning("ML service not available – skipping predictions")
             return []
 
-        prediction_ids: List[str] = []
+        prediction_ids: list[str] = []
         raw = event.get("raw_payload", {})
         lat = event.get("latitude")
         lon = event.get("longitude")
@@ -250,7 +257,9 @@ class IngestionOrchestrator:
         # Get location_id from the disaster record
         location_id = None
         try:
-            disaster_resp = await db_admin.table("disasters").select("location_id").eq("id", disaster_id).limit(1).async_execute()
+            disaster_resp = (
+                await db_admin.table("disasters").select("location_id").eq("id", disaster_id).limit(1).async_execute()
+            )
             if disaster_resp.data:
                 location_id = disaster_resp.data[0].get("location_id")
         except Exception:
@@ -264,9 +273,8 @@ class IngestionOrchestrator:
         weather_features = {}
         if lat and lon:
             from app.services.ingestion.weather_service import WeatherService
-            weather_features = await WeatherService.latest_features_for_location(
-                location_id
-            )
+
+            weather_features = await WeatherService.latest_features_for_location(location_id)
 
         # Default features if weather unavailable
         base_features = {
@@ -295,7 +303,7 @@ class IngestionOrchestrator:
                 "confidence_score": min(result.get("confidence_score", 0.5), 1.0),
                 "predicted_severity": result.get("predicted_severity"),
                 "model_version": result.get("model_version", "1.0.0"),
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
             }
             await db_admin.table("predictions").insert(pred_data).async_execute()
             prediction_ids.append(pid)
@@ -320,7 +328,7 @@ class IngestionOrchestrator:
                 "confidence_score": min(result.get("confidence_score", 0.5), 1.0),
                 "affected_area_km": result.get("predicted_area_km2"),
                 "model_version": result.get("model_version", "1.0.0"),
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
             }
             await db_admin.table("predictions").insert(pred_data).async_execute()
             prediction_ids.append(pid)
@@ -329,12 +337,13 @@ class IngestionOrchestrator:
         # 3. Impact prediction
         try:
             severity_score_map = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-            
+
             # Extract number from string like "22 people affected"
             pop_raw = raw.get("gdacs_population", "10000")
             if isinstance(pop_raw, str):
                 import re
-                digits = re.findall(r'\d+', pop_raw)
+
+                digits = re.findall(r"\d+", pop_raw)
                 pop_val = int(digits[0]) if digits else 10000
             else:
                 pop_val = int(pop_raw or 10000)
@@ -354,20 +363,19 @@ class IngestionOrchestrator:
                 "confidence_score": min(result.get("confidence_score", 0.5), 1.0),
                 "predicted_casualties": result.get("predicted_casualties"),
                 "model_version": result.get("model_version", "1.0.0"),
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
             }
             await db_admin.table("predictions").insert(pred_data).async_execute()
             prediction_ids.append(pid)
         except Exception:
             logger.exception("Impact prediction failed for event %s", event.get("id"))
 
-
         logger.info("Batch predictions complete for event %s: %d predictions", event.get("id"), len(prediction_ids))
         return prediction_ids
 
     # ── source status bookkeeping ───────────────────────────────────
 
-    async def _update_source_status(self, source_name_key: str, status: str, error: Optional[str] = None) -> None:
+    async def _update_source_status(self, source_name_key: str, status: str, error: str | None = None) -> None:
         """Update last_polled_at and last_status in in-memory source store."""
         name_map = {
             "weather": "openweathermap",
@@ -381,7 +389,7 @@ class IngestionOrchestrator:
 
     # ── manual trigger (used by API router) ─────────────────────────
 
-    async def poll_source(self, source_name: str) -> List[Dict[str, Any]]:
+    async def poll_source(self, source_name: str) -> list[dict[str, Any]]:
         """Manually trigger a single source poll. Returns new events/observations."""
         dispatch = {
             "weather": self._poll_weather_return,
@@ -395,15 +403,15 @@ class IngestionOrchestrator:
             raise ValueError(f"Unknown source: {source_name}")
         return await fn()
 
-    async def _poll_weather_return(self) -> List[Dict[str, Any]]:
+    async def _poll_weather_return(self) -> list[dict[str, Any]]:
         return await self.weather.poll()
 
-    async def _poll_firms_return(self) -> List[Dict[str, Any]]:
+    async def _poll_firms_return(self) -> list[dict[str, Any]]:
         return await self.firms.poll()
 
     # ── status / health ─────────────────────────────────────────────
 
-    async def get_status(self) -> Dict[str, Any]:
+    async def get_status(self) -> dict[str, Any]:
         """Return the current status of all data sources."""
         sources = memory_store.get_all_sources()
         return {

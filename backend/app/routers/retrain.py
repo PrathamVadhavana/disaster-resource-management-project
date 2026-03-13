@@ -3,14 +3,16 @@
 """
 
 import logging
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional
 
-from app.services.ml_service import MLService
 from app.dependencies import get_ml_service
+from app.services.ml_service import MLService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,6 +22,7 @@ MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 
 # ── Schemas ───────────────────────────────────────────────────────────────
 
+
 class RetrainRequest(BaseModel):
     regenerate_data: bool = False
     random_state: int = 42
@@ -27,10 +30,12 @@ class RetrainRequest(BaseModel):
 
 class RetrainResponse(BaseModel):
     message: str
-    version: Optional[str] = None
-    severity_f1: Optional[float] = None
-    spread_r2: Optional[float] = None
-    impact_metrics: Optional[dict] = None
+    version: str | None = None
+    severity_f1: float | None = None
+    spread_r2: float | None = None
+    impact_metrics: dict | None = None
+    promoted: bool | None = None
+    promotion_reasons: list[str] | None = None
 
 
 class ModelInfoResponse(BaseModel):
@@ -39,12 +44,104 @@ class ModelInfoResponse(BaseModel):
     severity_loaded: bool
     spread_loaded: bool
     impact_loaded: bool
-    metadata: Optional[dict] = None
+    metadata: dict | None = None
 
 
 # ── Background training task ─────────────────────────────────────────────
 
 _training_in_progress = False
+
+
+def _capture_baseline_metrics(ml_service: MLService) -> dict[str, float | None]:
+    severity_meta = ml_service.metadata.get("severity", {})
+    spread_meta = ml_service.metadata.get("spread", {})
+    impact_meta = ml_service.metadata.get("impact", {})
+    return {
+        "severity": severity_meta.get("cv_score_mean"),
+        "spread": spread_meta.get("cv_r2_mean") or spread_meta.get("cv_score_mean"),
+        "impact": impact_meta.get("cv_mae_mean") or impact_meta.get("cv_score_mean"),
+    }
+
+
+def _extract_candidate_metrics(results: dict[str, dict]) -> dict[str, float | None]:
+    return {
+        "severity": results.get("severity", {}).get("cv_score_mean"),
+        "spread": results.get("spread", {}).get("cv_score_mean"),
+        "impact": results.get("impact", {}).get("cv_score_mean"),
+    }
+
+
+def _should_promote_candidate(
+    baseline: dict[str, float | None],
+    candidate: dict[str, float | None],
+) -> tuple[bool, list[str]]:
+    min_acc_drop = float(os.getenv("ML_PROMOTION_MAX_ACCURACY_DROP", "0.03"))
+    max_mae_increase = float(os.getenv("ML_PROMOTION_MAX_MAE_INCREASE", "0.12"))
+
+    reasons: list[str] = []
+    blocked = False
+
+    # Higher is better: severity/spread
+    for key in ("severity", "spread"):
+        b = baseline.get(key)
+        c = candidate.get(key)
+        if b is None or c is None:
+            continue
+        try:
+            delta = float(c) - float(b)
+            if delta < -min_acc_drop:
+                blocked = True
+                reasons.append(
+                    f"Rejected: {key} score dropped by {abs(delta):.4f} (baseline={float(b):.4f}, candidate={float(c):.4f})"
+                )
+        except (TypeError, ValueError):
+            continue
+
+    # Lower is better: impact MAE
+    b_impact = baseline.get("impact")
+    c_impact = candidate.get("impact")
+    if b_impact is not None and c_impact is not None:
+        try:
+            mae_delta = float(c_impact) - float(b_impact)
+            if mae_delta > max_mae_increase:
+                blocked = True
+                reasons.append(
+                    f"Rejected: impact MAE increased by {mae_delta:.4f} (baseline={float(b_impact):.4f}, candidate={float(c_impact):.4f})"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    if not reasons:
+        reasons.append("Accepted: no guardrail violations detected")
+
+    return (not blocked), reasons
+
+
+def _create_models_backup() -> str | None:
+    if not MODEL_DIR.exists():
+        return None
+    backup_root = tempfile.mkdtemp(prefix="ml_models_backup_")
+    backup_path = Path(backup_root) / "models"
+    shutil.copytree(MODEL_DIR, backup_path, dirs_exist_ok=True)
+    return str(backup_path)
+
+
+def _restore_models_backup(backup_path: str | None) -> None:
+    if not backup_path:
+        return
+    src = Path(backup_path)
+    if not src.exists():
+        return
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, MODEL_DIR, dirs_exist_ok=True)
+
+
+def _cleanup_models_backup(backup_path: str | None) -> None:
+    if not backup_path:
+        return
+    root = Path(backup_path).parent
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _run_training(
@@ -57,29 +154,64 @@ def _run_training(
     try:
         _training_in_progress = True
         logger.info("Background model retraining started")
+        backup_path = _create_models_backup()
+        baseline_metrics = _capture_baseline_metrics(ml_service)
+        promotion_reasons: list[str] = ["Accepted: no candidate metrics available for guardrail check"]
+        should_promote = True
 
         if regenerate_data:
             logger.info("Regenerating synthetic training data …")
             from scripts.generate_training_data import main as gen_data
+
             gen_data()
 
-        from app.services.training.train_all import train_all
-        manifest = train_all(model_dir=MODEL_DIR)
+        # Use Supabase-based training (primary method)
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            results = loop.run_until_complete(ml_service.build_training_data_from_supabase())
+            logger.info(f"Supabase-based training results: {results}")
+
+            candidate_metrics = _extract_candidate_metrics(results)
+            should_promote, promotion_reasons = _should_promote_candidate(baseline_metrics, candidate_metrics)
+            logger.info("Retrain guardrail decision: promote=%s reasons=%s", should_promote, promotion_reasons)
+
+            # If all models skipped (insufficient data), fall back to CSV-based training
+            all_skipped = all(r.get("skipped") for r in results.values())
+            if all_skipped:
+                logger.warning("All Supabase models skipped due to insufficient data, falling back to CSV-based training")
+                from app.services.training.train_all import train_all
+
+                manifest = train_all(model_dir=MODEL_DIR)
+                logger.info(f"CSV-based fallback training complete — version {manifest['version']}")
+
+            if not should_promote:
+                logger.warning("Retrain guardrail rejected candidate models; restoring previous model snapshot")
+                _restore_models_backup(backup_path)
+        finally:
+            loop.close()
 
         # Hot-reload models into the running service
-        import asyncio
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(ml_service.load_models())
-        loop.close()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(ml_service.load_models())
+        finally:
+            loop.close()
 
-        logger.info(f"Retraining complete — version {manifest['version']}")
+        logger.info("Retraining complete")
     except Exception:
         logger.exception("Retraining failed")
+        _restore_models_backup(locals().get("backup_path"))
     finally:
+        _cleanup_models_backup(locals().get("backup_path"))
         _training_in_progress = False
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
+
 
 @router.get("/info", response_model=ModelInfoResponse)
 async def model_info(ml_service: MLService = Depends(get_ml_service)):
@@ -92,6 +224,12 @@ async def model_info(ml_service: MLService = Depends(get_ml_service)):
 async def training_status():
     """Check whether a training job is currently running."""
     return {"training_in_progress": _training_in_progress}
+
+
+@router.get("/fallback-governance")
+async def fallback_governance(ml_service: MLService = Depends(get_ml_service)):
+    """Return fallback usage telemetry and alert state for prediction reliability monitoring."""
+    return ml_service.get_fallback_governance_snapshot()
 
 
 @router.post("/retrain", response_model=RetrainResponse)
@@ -126,6 +264,8 @@ async def retrain_models_sync(
 ):
     """
     Trigger model retraining synchronously (blocks until done).
+    Uses Supabase-based training as primary method, falls back to CSV-based
+    training if insufficient Supabase data.
     Useful for CI / scripted pipelines.
     """
     global _training_in_progress
@@ -134,28 +274,63 @@ async def retrain_models_sync(
 
     try:
         _training_in_progress = True
+        backup_path = _create_models_backup()
+        baseline_metrics = _capture_baseline_metrics(ml_service)
+        promotion_reasons: list[str] = ["Accepted: no candidate metrics available for guardrail check"]
+        promoted = True
 
         if body.regenerate_data:
             from scripts.generate_training_data import main as gen_data
+
             gen_data()
 
-        from app.services.training.train_all import train_all
-        manifest = train_all(model_dir=MODEL_DIR)
+        # Use Supabase-based training (primary method)
+        results = await ml_service.build_training_data_from_supabase()
+        candidate_metrics = _extract_candidate_metrics(results)
+        promoted, promotion_reasons = _should_promote_candidate(baseline_metrics, candidate_metrics)
+
+        # If all models skipped (insufficient data), fall back to CSV-based training
+        all_skipped = all(r.get("skipped") for r in results.values())
+        version = None
+        if all_skipped:
+            logger.warning("All Supabase models skipped due to insufficient data, falling back to CSV-based training")
+            from app.services.training.train_all import train_all
+
+            manifest = train_all(model_dir=MODEL_DIR)
+            version = manifest.get("version")
+        else:
+            # Extract version from results
+            for r in results.values():
+                if r.get("version"):
+                    version = r["version"]
+                    break
+
+        if not promoted:
+            _restore_models_backup(backup_path)
 
         # Hot-reload models
         await ml_service.load_models()
 
+        # Build response metrics
+        severity_f1 = results.get("severity", {}).get("cv_score_mean")
+        spread_r2 = results.get("spread", {}).get("cv_score_mean")
+        impact_metrics = results.get("impact", {}).get("cv_score_mean")
+
         return RetrainResponse(
-            message="Retraining complete",
-            version=manifest.get("version"),
-            severity_f1=manifest["models"]["severity"].get("f1_weighted"),
-            spread_r2=manifest["models"]["spread"].get("r2"),
-            impact_metrics=manifest["models"]["impact"].get("metrics"),
+            message="Retraining complete" if promoted else "Retraining rejected by guardrail; previous model snapshot restored",
+            version=version,
+            severity_f1=severity_f1,
+            spread_r2=spread_r2,
+            impact_metrics={"mae": impact_metrics} if impact_metrics else None,
+            promoted=promoted,
+            promotion_reasons=promotion_reasons,
         )
     except Exception as e:
         logger.exception("Sync retraining failed")
+        _restore_models_backup(locals().get("backup_path"))
         raise HTTPException(status_code=500, detail=str(e))
     finally:
+        _cleanup_models_backup(locals().get("backup_path"))
         _training_in_progress = False
 
 
@@ -163,55 +338,99 @@ async def retrain_models_sync(
 
 from app.dependencies import require_admin
 
+
 class QueryRequest(BaseModel):
     query: str
+
 
 @router.get("/sitreps/latest")
 async def get_latest_sitrep(admin: dict = Depends(require_admin)):
     from app.services.sitrep_service import SitrepService
+
     svc = SitrepService()
     return await svc.get_latest_report()
+
 
 @router.get("/sitreps")
 async def get_sitreps(limit: int = 20, offset: int = 0, admin: dict = Depends(require_admin)):
     from app.services.sitrep_service import SitrepService
+
     svc = SitrepService()
     return await svc.list_reports(limit=limit, offset=offset)
+
 
 @router.post("/sitreps/generate")
 async def generate_sitrep(admin: dict = Depends(require_admin)):
     from app.services.sitrep_service import SitrepService
+
     svc = SitrepService()
     report = await svc.generate_report(report_type="manual", generated_by=admin.get("id", "system"))
     return report
 
+
+@router.post("/sitreps/generate-llm")
+async def generate_sitrep_with_llm(admin: dict = Depends(require_admin)):
+    """
+    Generate a structured sitrep using the new LLM-based approach with data snapshot.
+    
+    This endpoint:
+    1. Assembles structured data snapshot from Supabase
+    2. Injects snapshot as system prompt context
+    3. Uses LLM to narrate the data
+    4. Returns structured 7-section sitrep output
+    """
+    from app.services.sitrep_service import SitrepService
+
+    svc = SitrepService()
+    # Generate sitrep using new LLM-based method with data snapshot
+    sitrep = await svc.generate_sitrep_with_llm()
+    return sitrep
+
+
+@router.get("/sitreps/snapshot")
+async def get_data_snapshot(admin: dict = Depends(require_admin)):
+    """
+    Get the current data snapshot without generating a full sitrep.
+    Useful for debugging or checking current data state.
+    """
+    from app.services.sitrep_service import SitrepService
+
+    svc = SitrepService()
+    snapshot = await svc.assemble_data_snapshot()
+    return snapshot
+
+
 @router.post("/query")
 async def ask_coordinator_query(req: QueryRequest, admin: dict = Depends(require_admin)):
     from app.services.nl_query_service import NLQueryService
+
     svc = NLQueryService()
     result = await svc.ask(req.query, user_id=admin.get("id"))
     return result
 
+
 @router.get("/query-history")
 async def get_query_history(admin: dict = Depends(require_admin)):
     from app.services.nl_query_service import NLQueryService
+
     svc = NLQueryService()
     return await svc.get_query_history(user_id=admin.get("id"))
 
 
-
 # ── Anomaly Detection Endpoints ──────────────────────────────────────────────
+
 
 @router.get("/anomalies")
 async def get_anomaly_alerts(
-    status: Optional[str] = None,
-    severity: Optional[str] = None,
+    status: str | None = None,
+    severity: str | None = None,
     limit: int = 30,
     offset: int = 0,
     admin: dict = Depends(require_admin),
 ):
     """Get anomaly alerts with optional filters."""
     from app.services.anomaly_service import AnomalyDetectionService
+
     svc = AnomalyDetectionService()
     alerts = await svc.get_all_alerts(status=status, severity=severity, limit=limit, offset=offset)
     return {"alerts": alerts}
@@ -221,6 +440,7 @@ async def get_anomaly_alerts(
 async def run_anomaly_detection(admin: dict = Depends(require_admin)):
     """Trigger a manual anomaly detection run."""
     from app.services.anomaly_service import AnomalyDetectionService
+
     svc = AnomalyDetectionService()
     results = await svc.run_detection()
     return {"message": "Anomaly detection completed", "results": results}
@@ -230,6 +450,7 @@ async def run_anomaly_detection(admin: dict = Depends(require_admin)):
 async def acknowledge_anomaly(alert_id: str, admin: dict = Depends(require_admin)):
     """Mark an anomaly alert as acknowledged."""
     from app.services.anomaly_service import AnomalyDetectionService
+
     svc = AnomalyDetectionService()
     result = await svc.acknowledge_alert(alert_id, user_id=admin.get("id", "system"))
     return result
@@ -239,6 +460,7 @@ async def acknowledge_anomaly(alert_id: str, admin: dict = Depends(require_admin
 async def resolve_anomaly(alert_id: str, status: str = "resolved", admin: dict = Depends(require_admin)):
     """Resolve or mark an anomaly alert as false positive."""
     from app.services.anomaly_service import AnomalyDetectionService
+
     svc = AnomalyDetectionService()
     result = await svc.resolve_alert(alert_id, status=status)
     return result
@@ -246,24 +468,27 @@ async def resolve_anomaly(alert_id: str, status: str = "resolved", admin: dict =
 
 # ── Outcome Tracking & Accuracy Endpoints ────────────────────────────────────
 
+
 @router.get("/accuracy-summary")
 async def get_accuracy_summary(admin: dict = Depends(require_admin)):
     """Get model accuracy summary across all prediction types."""
     from app.services.outcome_service import OutcomeTrackingService
+
     svc = OutcomeTrackingService()
     return await svc.get_accuracy_summary()
 
 
 @router.get("/outcomes")
 async def get_outcomes(
-    disaster_id: Optional[str] = None,
-    prediction_type: Optional[str] = None,
+    disaster_id: str | None = None,
+    prediction_type: str | None = None,
     limit: int = 50,
     offset: int = 0,
     admin: dict = Depends(require_admin),
 ):
     """Get outcome tracking records."""
     from app.services.outcome_service import OutcomeTrackingService
+
     svc = OutcomeTrackingService()
     return await svc.get_outcomes(
         disaster_id=disaster_id,
@@ -275,12 +500,13 @@ async def get_outcomes(
 
 @router.get("/evaluation-reports")
 async def get_evaluation_reports(
-    model_type: Optional[str] = None,
+    model_type: str | None = None,
     limit: int = 20,
     admin: dict = Depends(require_admin),
 ):
     """Get model evaluation reports."""
     from app.services.outcome_service import OutcomeTrackingService
+
     svc = OutcomeTrackingService()
     return await svc.get_evaluation_reports(model_type=model_type, limit=limit)
 
@@ -289,6 +515,7 @@ async def get_evaluation_reports(
 async def auto_capture_outcomes(admin: dict = Depends(require_admin)):
     """Auto-capture outcomes from resolved disasters."""
     from app.services.outcome_service import OutcomeTrackingService
+
     svc = OutcomeTrackingService()
     results = await svc.auto_capture_outcomes()
     return {"captured": len(results), "outcomes": results}
@@ -298,6 +525,118 @@ async def auto_capture_outcomes(admin: dict = Depends(require_admin)):
 async def generate_evaluation_report_endpoint(admin: dict = Depends(require_admin)):
     """Generate model evaluation reports."""
     from app.services.outcome_service import OutcomeTrackingService
+
     svc = OutcomeTrackingService()
     reports = await svc.generate_evaluation_report()
     return {"reports": reports}
+
+
+@router.post("/auto-retrain")
+async def auto_retrain_trigger(admin: dict = Depends(require_admin)):
+    """
+    Auto-retrain trigger endpoint.
+
+    Checks if last training was > 24h ago and triggers background training
+    for TFT, NLP, and GAT models if needed.
+    """
+    import json
+    from datetime import datetime, timedelta
+
+    # Check if training is already in progress
+    global _training_in_progress
+    if _training_in_progress:
+        return {"message": "Training already in progress", "triggered": False}
+
+    # Check last training time from manifest
+    manifest_path = MODEL_DIR / "manifest.json"
+    last_training_time = None
+
+    if manifest_path.exists():
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+                last_training_time_str = manifest.get("last_trained")
+                if last_training_time_str:
+                    last_training_time = datetime.fromisoformat(last_training_time_str.replace("Z", "+00:00"))
+        except Exception as e:
+            logger.warning(f"Failed to read manifest: {e}")
+
+    # Check if more than 24 hours have passed
+    if last_training_time is None:
+        should_train = True
+        reason = "No previous training found"
+    else:
+        time_since_last = datetime.now(last_training_time.tzinfo) - last_training_time
+        should_train = time_since_last > timedelta(hours=24)
+        reason = f"Last training was {time_since_last.total_seconds() / 3600:.1f} hours ago"
+
+    if should_train:
+        # Trigger background training for all models
+
+        from app.services.ml_service import MLService
+        from app.services.training.train_all import train_all
+
+        # Get ML service for hot-reload
+        ml_service = MLService()
+
+        def _run_auto_training():
+            """Background training function for auto-retrain."""
+            global _training_in_progress
+            backup_path = None
+            try:
+                _training_in_progress = True
+                logger.info("Auto-retrain: Starting background training for TFT, NLP, and GAT models")
+                backup_path = _create_models_backup()
+
+                import asyncio
+
+                # Capture baseline before training
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(ml_service.load_models())
+                baseline_metrics = _capture_baseline_metrics(ml_service)
+                loop.close()
+
+                # Train all models
+                manifest = train_all(model_dir=MODEL_DIR)
+
+                # Hot-reload models
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(ml_service.load_models())
+                loop.close()
+
+                candidate_metrics = _capture_baseline_metrics(ml_service)
+                promoted, reasons = _should_promote_candidate(baseline_metrics, candidate_metrics)
+                if not promoted:
+                    logger.warning("Auto-retrain guardrail rejected candidate: %s", reasons)
+                    _restore_models_backup(backup_path)
+                    loop = asyncio.new_event_loop()
+                    loop.run_until_complete(ml_service.load_models())
+                    loop.close()
+
+                logger.info(f"Auto-retrain complete — version {manifest['version']}")
+            except Exception:
+                logger.exception("Auto-retrain failed")
+                _restore_models_backup(backup_path)
+            finally:
+                _cleanup_models_backup(backup_path)
+                _training_in_progress = False
+
+        # Run in background
+        import threading
+
+        thread = threading.Thread(target=_run_auto_training, daemon=True)
+        thread.start()
+
+        return {
+            "message": "Auto-retrain triggered for TFT, NLP, and GAT models",
+            "triggered": True,
+            "reason": reason,
+            "last_training": last_training_time.isoformat() if last_training_time else None,
+        }
+    else:
+        return {
+            "message": "Auto-retrain skipped - last training was recent",
+            "triggered": False,
+            "reason": reason,
+            "last_training": last_training_time.isoformat() if last_training_time else None,
+        }

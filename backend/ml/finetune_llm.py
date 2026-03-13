@@ -10,14 +10,13 @@ Usage:
     python -m ml.finetune_llm --epochs 5 --no-gguf                # skip GGUF export
     python -m ml.finetune_llm --resume checkpoints/disaster-gpt   # resume from checkpoint
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 from pathlib import Path
-from typing import Any
 
 import torch
 
@@ -68,7 +67,7 @@ INFERENCE_TEMPLATE = """Below is an instruction that describes a disaster manage
 def load_dataset_from_jsonl(path: str | Path) -> list[dict[str, str]]:
     """Load JSONL instruction-tuning file."""
     records: list[dict[str, str]] = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -129,8 +128,7 @@ def run_finetune(
       5. (Optional) Export GGUF for llama.cpp CPU inference
     """
     if target_modules is None:
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                          "gate_proj", "up_proj", "down_proj"]
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
     # ── 1. Load model ────────────────────────────────────────────────────
     logger.info("Loading base model: %s", model_name)
@@ -154,7 +152,9 @@ def run_finetune(
     # ── 2. LoRA adapters ─────────────────────────────────────────────────
     logger.info(
         "Attaching LoRA: r=%d, alpha=%d, targets=%s",
-        lora_r, lora_alpha, target_modules,
+        lora_r,
+        lora_alpha,
+        target_modules,
     )
     model = FastLanguageModel.get_peft_model(
         model,
@@ -179,8 +179,8 @@ def run_finetune(
     logger.info("Dataset: %d examples, columns: %s", len(dataset), dataset.column_names)
 
     # ── 4. Trainer ───────────────────────────────────────────────────────
-    from trl import SFTTrainer
     from transformers import TrainingArguments
+    from trl import SFTTrainer
 
     trainer = SFTTrainer(
         model=model,
@@ -217,13 +217,13 @@ def run_finetune(
             "GPU: %s  |  VRAM: %.1f GB  |  Capability: %d.%d",
             gpu_stats.name,
             gpu_stats.total_mem / 1e9,
-            gpu_stats.major, gpu_stats.minor,
+            gpu_stats.major,
+            gpu_stats.minor,
         )
     else:
         logger.warning("No CUDA GPU detected — training will be very slow on CPU.")
 
-    logger.info("Starting training: %d epochs, effective batch %d ...",
-                epochs, batch_size * grad_accum)
+    logger.info("Starting training: %d epochs, effective batch %d ...", epochs, batch_size * grad_accum)
     trainer_stats = trainer.train(resume_from_checkpoint=bool(resume_from))
     logger.info("Training complete. Loss: %.4f", trainer_stats.training_loss)
 

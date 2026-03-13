@@ -86,49 +86,64 @@ export default function NGOInventoryPage() {
 
             {/* Summary Cards */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                        <div className="w-8 h-8 rounded-lg bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center">
-                            <Boxes className="w-4 h-4 text-blue-500" />
+                <div className="group relative overflow-hidden rounded-2xl border border-slate-200 dark:border-white/10 bg-white/50 dark:bg-white/[0.02] backdrop-blur-md p-4 transition-all hover:shadow-lg hover:-translate-y-1">
+                    <div className="absolute top-0 right-0 p-2 opacity-50 group-hover:opacity-100 transition-opacity">
+                        <div className="w-12 h-12 rounded-full bg-blue-500/10 blur-xl" />
+                    </div>
+                    <div className="flex items-center gap-2 mb-3">
+                        <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-500/10 flex items-center justify-center shadow-inner">
+                            <Boxes className="w-5 h-5 text-blue-500" />
                         </div>
                     </div>
-                    <p className="text-xl font-bold text-slate-900 dark:text-white">{summary.total_quantity || 0}</p>
-                    <p className="text-xs text-slate-500">Total Stock</p>
+                    <p className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">{summary.total_quantity || 0}</p>
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Total Stock</p>
                 </div>
-                <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                        <div className="w-8 h-8 rounded-lg bg-orange-50 dark:bg-orange-500/10 flex items-center justify-center">
-                            <ShoppingBag className="w-4 h-4 text-orange-500" />
+
+                <div className="group relative overflow-hidden rounded-2xl border border-slate-200 dark:border-white/10 bg-white/50 dark:bg-white/[0.02] backdrop-blur-md p-4 transition-all hover:shadow-lg hover:-translate-y-1">
+                    <div className="absolute top-0 right-0 p-2 opacity-50 group-hover:opacity-100 transition-opacity">
+                        <div className="w-12 h-12 rounded-full bg-orange-500/10 blur-xl" />
+                    </div>
+                    <div className="flex items-center gap-2 mb-3">
+                        <div className="w-10 h-10 rounded-xl bg-orange-50 dark:bg-orange-500/10 flex items-center justify-center shadow-inner">
+                            <ShoppingBag className="w-5 h-5 text-orange-500" />
                         </div>
                     </div>
-                    <p className="text-xl font-bold text-slate-900 dark:text-white">{summary.reserved_quantity || 0}</p>
-                    <p className="text-xs text-slate-500">Reserved</p>
+                    <p className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">{summary.reserved_quantity || 0}</p>
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Reserved</p>
                 </div>
-                <div className="rounded-2xl border border-emerald-200 dark:border-emerald-500/20 bg-emerald-50/50 dark:bg-emerald-500/5 p-4">
-                    <div className="flex items-center gap-2 mb-2">
-                        <div className="w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-500/10 flex items-center justify-center">
-                            <Archive className="w-4 h-4 text-emerald-500" />
+
+                <div className="group relative overflow-hidden rounded-2xl border border-emerald-200 dark:border-emerald-500/20 bg-emerald-50/30 dark:bg-emerald-500/5 backdrop-blur-md p-4 transition-all hover:shadow-lg hover:-translate-y-1">
+                    <div className="absolute top-0 right-0 p-2 opacity-50 group-hover:opacity-100 transition-opacity">
+                        <div className="w-12 h-12 rounded-full bg-emerald-500/10 blur-xl" />
+                    </div>
+                    <div className="flex items-center gap-2 mb-3">
+                        <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-500/10 flex items-center justify-center shadow-inner">
+                            <Archive className="w-5 h-5 text-emerald-500" />
                         </div>
                     </div>
-                    <p className="text-xl font-bold text-emerald-600 dark:text-emerald-400">{summary.available_quantity || 0}</p>
-                    <p className="text-xs text-slate-500">Available</p>
+                    <p className="text-2xl font-black text-emerald-600 dark:text-emerald-400 tracking-tight">{summary.available_quantity || 0}</p>
+                    <p className="text-[10px] font-bold text-emerald-600/70 dark:text-emerald-400/50 uppercase tracking-widest mt-1">Available</p>
                 </div>
+
                 <div className={cn(
-                    'rounded-2xl border p-4',
+                    'group relative overflow-hidden rounded-2xl border p-4 transition-all hover:shadow-lg hover:-translate-y-1 backdrop-blur-md',
                     (summary.low_stock_count || 0) > 0
-                        ? 'border-red-200 dark:border-red-500/20 bg-red-50/50 dark:bg-red-500/5'
-                        : 'border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02]'
+                        ? 'border-red-200 dark:border-red-500/20 bg-red-50/30 dark:bg-red-500/5'
+                        : 'border-slate-200 dark:border-white/10 bg-white/50 dark:bg-white/[0.02]'
                 )}>
-                    <div className="flex items-center gap-2 mb-2">
-                        <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center',
+                    <div className="absolute top-0 right-0 p-2 opacity-50 group-hover:opacity-100 transition-opacity">
+                        <div className="w-12 h-12 rounded-full bg-red-500/10 blur-xl" />
+                    </div>
+                    <div className="flex items-center gap-2 mb-3">
+                        <div className={cn('w-10 h-10 rounded-xl flex items-center justify-center shadow-inner',
                             (summary.low_stock_count || 0) > 0 ? 'bg-red-100 dark:bg-red-500/10' : 'bg-slate-100 dark:bg-white/5')}>
-                            <TrendingDown className={cn('w-4 h-4', (summary.low_stock_count || 0) > 0 ? 'text-red-500' : 'text-slate-400')} />
+                            <TrendingDown className={cn('w-5 h-5', (summary.low_stock_count || 0) > 0 ? 'text-red-500' : 'text-slate-400')} />
                         </div>
                     </div>
-                    <p className={cn('text-xl font-bold', (summary.low_stock_count || 0) > 0 ? 'text-red-600' : 'text-slate-900 dark:text-white')}>
+                    <p className={cn('text-2xl font-black tracking-tight', (summary.low_stock_count || 0) > 0 ? 'text-red-600' : 'text-slate-900 dark:text-white')}>
                         {summary.low_stock_count || 0}
                     </p>
-                    <p className="text-xs text-slate-500">Low Stock Alerts</p>
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Low Stock Alerts</p>
                 </div>
             </div>
 
@@ -183,41 +198,73 @@ export default function NGOInventoryPage() {
                                     const total = item.total_quantity || 0
                                     const pct = total > 0 ? (available / total) * 100 : 0
                                     const isLow = item.is_low_stock
+                                    const isWarning = !isLow && pct < 40
+
                                     return (
-                                        <tr key={item.resource_id || item.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
-                                            <td className="px-5 py-3">
+                                        <tr key={item.resource_id || item.id} className="group hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors">
+                                            <td className="px-5 py-4">
                                                 <div className="flex items-center gap-3">
-                                                    {isLow && <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 animate-pulse" />}
-                                                    <div>
-                                                        <p className="text-sm font-medium text-slate-900 dark:text-white">{item.title || item.resource_type}</p>
-                                                        {item.description && <p className="text-[10px] text-slate-400 line-clamp-1">{item.description}</p>}
+                                                    <div className={cn(
+                                                        "w-2 h-10 rounded-full shrink-0 transition-all group-hover:h-12",
+                                                        isLow ? "bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.4)]" : 
+                                                        isWarning ? "bg-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.4)]" : 
+                                                        "bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.4)]"
+                                                    )} />
+                                                    <div className="min-w-0">
+                                                        <p className="text-sm font-bold text-slate-900 dark:text-white truncate">{item.title || item.resource_type}</p>
+                                                        <div className="flex items-center gap-2 mt-0.5">
+                                                            {item.sku && <span className="text-[9px] font-mono text-slate-400 bg-slate-100 dark:bg-white/5 px-1.5 py-0.5 rounded truncate">SKU: {item.sku}</span>}
+                                                            <span className="text-[9px] text-slate-400 bg-slate-100 dark:bg-white/5 px-1.5 py-0.5 rounded uppercase">Cond: {item.item_condition || 'new'}</span>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </td>
-                                            <td className="px-5 py-3">
-                                                <span className="text-xs font-medium text-slate-600 dark:text-slate-400 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">
+                                            <td className="px-5 py-4">
+                                                <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400 px-2 py-1 rounded-md bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/5">
                                                     {item.category}
                                                 </span>
                                             </td>
-                                            <td className="px-5 py-3 text-right">
-                                                <span className="text-sm font-semibold text-slate-900 dark:text-white">{total}</span>
-                                                <span className="text-[10px] text-slate-400 ml-0.5">{item.unit}</span>
+                                            <td className="px-5 py-4 text-right">
+                                                <div className="flex flex-col items-end">
+                                                    <span className="text-sm font-black text-slate-900 dark:text-white">{total}</span>
+                                                    <span className="text-[10px] font-medium text-slate-400 uppercase tracking-tighter">{item.unit}</span>
+                                                </div>
                                             </td>
-                                            <td className="px-5 py-3 text-right">
-                                                <span className="text-sm font-medium text-orange-600">{item.claimed_quantity || 0}</span>
+                                            <td className="px-5 py-4 text-right">
+                                                <span className="text-sm font-bold text-orange-500/80 bg-orange-500/5 px-2 py-1 rounded-lg">
+                                                    {item.claimed_quantity || 0}
+                                                </span>
                                             </td>
-                                            <td className="px-5 py-3 text-right">
-                                                <span className={cn('text-sm font-bold', isLow ? 'text-red-600' : 'text-emerald-600')}>{available}</span>
+                                            <td className="px-5 py-4 text-right">
+                                                <span className={cn(
+                                                    'text-base font-black px-2 py-1 rounded-lg',
+                                                    isLow ? 'text-red-600 bg-red-500/5' : 
+                                                    isWarning ? 'text-amber-600 bg-amber-500/5' :
+                                                    'text-emerald-600 bg-emerald-500/5'
+                                                )}>
+                                                    {available}
+                                                </span>
                                             </td>
-                                            <td className="px-5 py-3">
-                                                <div className="flex items-center gap-2">
-                                                    <div className="w-16 h-1.5 bg-slate-100 dark:bg-white/5 rounded-full overflow-hidden">
-                                                        <div className={cn('h-full rounded-full transition-all', isLow ? 'bg-red-500' : 'bg-emerald-500')}
+                                            <td className="px-5 py-4">
+                                                <div className="flex flex-col gap-1.5 min-w-[120px]">
+                                                    <div className="flex items-center justify-between">
+                                                        <span className={cn(
+                                                            'text-[10px] font-black tracking-widest uppercase',
+                                                            isLow ? 'text-red-500' : isWarning ? 'text-amber-500' : 'text-emerald-500'
+                                                        )}>
+                                                            {isLow ? 'Critical' : isWarning ? 'Low Stock' : 'Optimal'}
+                                                        </span>
+                                                        <span className="text-[10px] font-mono text-slate-400">{Math.round(pct)}%</span>
+                                                    </div>
+                                                    <div className="w-full h-2 bg-slate-100 dark:bg-white/5 rounded-full overflow-hidden shadow-inner p-[1px]">
+                                                        <div className={cn(
+                                                            'h-full rounded-full transition-all duration-1000 ease-out shadow-[0_0_8px_rgba(0,0,0,0.1)]',
+                                                            isLow ? 'bg-gradient-to-r from-red-600 to-red-400' : 
+                                                            isWarning ? 'bg-gradient-to-r from-amber-600 to-amber-400' : 
+                                                            'bg-gradient-to-r from-emerald-600 to-teal-400'
+                                                        )}
                                                             style={{ width: `${pct}%` }} />
                                                     </div>
-                                                    <span className={cn('text-[10px] font-bold', isLow ? 'text-red-500' : 'text-emerald-500')}>
-                                                        {isLow ? 'LOW' : 'OK'}
-                                                    </span>
                                                 </div>
                                             </td>
                                         </tr>

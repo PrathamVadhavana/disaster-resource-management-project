@@ -8,17 +8,15 @@ Auth layer: Supabase Auth (JWT verification via python-jose).
 Database  : Supabase PostgREST via db_client.
 """
 
-import os
 import logging
+import os
 
-from fastapi import HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Optional, List
-
-from jose import jwk, jwt, JWTError, ExpiredSignatureError
 import httpx
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import ExpiredSignatureError, JWTError, jwk, jwt
 
-from app.database import db, db_admin
+from app.database import db_admin
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +30,7 @@ _jwks_key = None
 
 
 # ── Supabase JWT verification ─────────────────────────────────────────────────
+
 
 def _get_jwt_secret() -> str:
     """Return Supabase JWT secret from environment."""
@@ -50,9 +49,7 @@ def _get_jwks_key():
     if not supabase_url:
         return None
     try:
-        resp = httpx.get(
-            f"{supabase_url}/auth/v1/.well-known/jwks.json", timeout=10
-        )
+        resp = httpx.get(f"{supabase_url}/auth/v1/.well-known/jwks.json", timeout=10)
         resp.raise_for_status()
         keys = resp.json().get("keys", [])
         if keys:
@@ -155,26 +152,23 @@ async def get_current_user(
     app_meta = decoded.get("app_metadata", {})
     user_meta = decoded.get("user_metadata", {})
     role = app_meta.get("role") or user_meta.get("role")
-    additional_roles = app_meta.get("additional_roles", [])
+    app_meta.get("additional_roles", [])
 
-    # Fallback: if the custom claim is absent, look it up from the DB
-    if not role:
-        try:
-            db_resp = (
-                await db_admin.table("users")
-                .select("role, additional_roles, email")
-                .eq("id", uid)
-                .maybe_single()
-                .async_execute()
-            )
-            if db_resp.data:
-                role = db_resp.data.get("role")
-                email = email or db_resp.data.get("email")
-                db_additional = db_resp.data.get("additional_roles") or []
-                if isinstance(db_additional, list):
-                    additional_roles = db_additional
-        except Exception as db_err:
-            print(f"DB role lookup fallback error: {db_err}")
+    # Source of truth: always prefer DB role so admin-approved role changes
+    # apply immediately even if JWT claim is stale.
+    try:
+        db_resp = (
+            await db_admin.table("users")
+            .select("role, additional_roles, email")
+            .eq("id", uid)
+            .maybe_single()
+            .async_execute()
+        )
+        if db_resp.data:
+            role = db_resp.data.get("role") or role
+            email = email or db_resp.data.get("email")
+    except Exception as db_err:
+        print(f"DB role lookup error: {db_err}")
 
     return {
         "id": uid,
@@ -205,27 +199,25 @@ def require_role(*allowed_roles: str):
         role = app_meta.get("role") or user_meta.get("role")
         additional_roles = app_meta.get("additional_roles", [])
 
-        # Fallback: if JWT has no role, look it up from the users table
-        if not role:
-            try:
-                db_resp = (
-                    await db_admin.table("users")
-                    .select("role, additional_roles")
-                    .eq("id", uid)
-                    .maybe_single()
-                    .async_execute()
-                )
-                if db_resp.data:
-                    role = db_resp.data.get("role")
-                    db_additional = db_resp.data.get("additional_roles") or []
-                    if isinstance(db_additional, list):
-                        additional_roles = db_additional
-            except Exception as db_err:
-                print(f"DB role lookup fallback error: {db_err}")
+        # Source of truth: always prefer DB role and additional roles so
+        # role updates made by admin are effective immediately.
+        try:
+            db_resp = (
+                await db_admin.table("users")
+                .select("role, additional_roles")
+                .eq("id", uid)
+                .maybe_single()
+                .async_execute()
+            )
+            if db_resp.data:
+                role = db_resp.data.get("role") or role
+                db_additional = db_resp.data.get("additional_roles") or []
+                if isinstance(db_additional, list):
+                    additional_roles = db_additional
+        except Exception as db_err:
+            print(f"DB role lookup error: {db_err}")
 
-        user_roles = [role] + (
-            additional_roles if isinstance(additional_roles, list) else []
-        )
+        user_roles = [role] + (additional_roles if isinstance(additional_roles, list) else [])
 
         if not any(r in allowed_roles for r in user_roles):
             raise HTTPException(

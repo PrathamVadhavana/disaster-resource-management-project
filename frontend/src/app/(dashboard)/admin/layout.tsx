@@ -1,5 +1,6 @@
 import { AdminSidebar } from '@/components/admin/Sidebar'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { ChatWidget } from '@/components/coordinator/DisasterGPT'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
     return (
@@ -10,6 +11,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                     <ErrorBoundary>{children}</ErrorBoundary>
                 </div>
             </main>
+            <ChatWidget />
         </div>
     )
 }

@@ -8,8 +8,8 @@ and stores observations in the weather_observations table.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -31,7 +31,7 @@ class WeatherService:
 
     # ── public ──────────────────────────────────────────────────────
 
-    async def poll(self, locations: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    async def poll(self, locations: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """
         Fetch current weather for each tracked location.
 
@@ -55,7 +55,7 @@ class WeatherService:
         if locations is None:
             locations = await self._get_tracked_locations()
 
-        results: List[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=15) as client:
             for loc in locations:
                 try:
@@ -71,7 +71,7 @@ class WeatherService:
         logger.info("Weather poll complete – %d observations stored", len(results))
         return results
 
-    async def fetch_for_coordinates(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    async def fetch_for_coordinates(self, lat: float, lon: float) -> dict[str, Any] | None:
         """One-off fetch for a specific coordinate pair."""
         if not self.api_key:
             # Return mock data for the coordinate
@@ -82,7 +82,7 @@ class WeatherService:
 
     # ── internals ───────────────────────────────────────────────────
 
-    async def _get_tracked_locations(self) -> List[Dict[str, Any]]:
+    async def _get_tracked_locations(self) -> list[dict[str, Any]]:
         try:
             resp = await db_admin.table("locations").select("id, name, latitude, longitude").async_execute()
             return resp.data or []
@@ -90,7 +90,7 @@ class WeatherService:
             logger.warning("Failed to fetch tracked locations: %s", e)
             return []
 
-    async def _fetch_current(self, client: httpx.AsyncClient, loc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _fetch_current(self, client: httpx.AsyncClient, loc: dict[str, Any]) -> dict[str, Any] | None:
         lat = loc.get("latitude")
         lon = loc.get("longitude")
         if lat is None or lon is None:
@@ -100,7 +100,7 @@ class WeatherService:
         params = {"lat": lat, "lon": lon, "appid": self.api_key, "units": "metric"}
         resp = await client.get(url, params=params)
         resp.raise_for_status()
-        data: Dict[str, Any] = resp.json()
+        data: dict[str, Any] = resp.json()
 
         main = data.get("main", {})
         wind = data.get("wind", {})
@@ -120,18 +120,18 @@ class WeatherService:
             "visibility_m": data.get("visibility"),
             "weather_main": weather_list[0].get("main") if weather_list else None,
             "weather_desc": weather_list[0].get("description") if weather_list else None,
-            "observed_at": datetime.fromtimestamp(data.get("dt", 0), tz=timezone.utc).isoformat(),
+            "observed_at": datetime.fromtimestamp(data.get("dt", 0), tz=UTC).isoformat(),
             "source": "openweathermap",
             "raw_payload": data,
         }
 
-    async def _store_observations(self, observations: List[Dict[str, Any]]) -> None:
+    async def _store_observations(self, observations: list[dict[str, Any]]) -> None:
         memory_store.add_weather_observations(observations)
 
     # ── Utility: build prediction features from latest weather ──────
 
     @staticmethod
-    async def latest_features_for_location(location_id: str) -> Dict[str, Any]:
+    async def latest_features_for_location(location_id: str) -> dict[str, Any]:
         """
         Return the latest weather observation for a location as a dict
         formatted for PredictionInput.features.

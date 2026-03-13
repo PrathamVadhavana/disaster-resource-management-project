@@ -12,8 +12,8 @@ Events are buffered in-memory and flushed in batches to reduce database writes.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import Optional, Dict, List, Any
+from datetime import UTC, datetime
+from typing import Any
 
 from app.database import db_admin
 
@@ -21,9 +21,9 @@ logger = logging.getLogger("event_sourcing")
 
 # ── Event buffer for batch writes ─────────────────────────────────────────────
 
-_event_buffer: List[Dict[str, Any]] = []
-_buffer_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
-_BUFFER_MAX_SIZE = 20       # Flush after this many events
+_event_buffer: list[dict[str, Any]] = []
+_buffer_lock = asyncio.Lock() if hasattr(asyncio, "Lock") else None
+_BUFFER_MAX_SIZE = 20  # Flush after this many events
 _BUFFER_FLUSH_INTERVAL = 30  # Flush every 30 seconds regardless
 
 
@@ -65,12 +65,12 @@ async def emit_event(
     entity_type: str,
     entity_id: str,
     event_type: str,
-    actor_id: Optional[str] = None,
+    actor_id: str | None = None,
     actor_role: str = "system",
-    data: Optional[Dict[str, Any]] = None,
-    old_state: Optional[Dict[str, Any]] = None,
-    new_state: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict]:
+    data: dict[str, Any] | None = None,
+    old_state: dict[str, Any] | None = None,
+    new_state: dict[str, Any] | None = None,
+) -> dict | None:
     """Emit an immutable event to the event store.
 
     Parameters
@@ -102,7 +102,7 @@ async def emit_event(
             "data": data or {},
             "old_state": old_state or {},
             "new_state": new_state or {},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "version": 1,
         }
         # Buffer the event instead of writing immediately
@@ -118,9 +118,9 @@ async def emit_event(
 async def get_entity_events(
     entity_type: str,
     entity_id: str,
-    event_type: Optional[str] = None,
+    event_type: str | None = None,
     limit: int = 100,
-) -> List[Dict]:
+) -> list[dict]:
     """Retrieve events for an entity."""
     try:
         query = (
@@ -141,10 +141,10 @@ async def get_entity_events(
 
 async def get_events_since(
     since: str,
-    entity_type: Optional[str] = None,
-    event_type: Optional[str] = None,
+    entity_type: str | None = None,
+    event_type: str | None = None,
     limit: int = 500,
-) -> List[Dict]:
+) -> list[dict]:
     """Retrieve events since a timestamp (for replay/anomaly detection)."""
     try:
         query = (
@@ -167,7 +167,7 @@ async def get_events_since(
 # ── Convenience emitters for common events ────────────────────────────────
 
 
-async def emit_request_created(request_id: str, actor_id: str, data: Dict):
+async def emit_request_created(request_id: str, actor_id: str, data: dict):
     return await emit_event(
         entity_type="request",
         entity_id=request_id,
@@ -180,11 +180,11 @@ async def emit_request_created(request_id: str, actor_id: str, data: Dict):
 
 async def emit_request_status_changed(
     request_id: str,
-    actor_id: Optional[str],
+    actor_id: str | None,
     actor_role: str,
     old_status: str,
     new_status: str,
-    details: Optional[Dict] = None,
+    details: dict | None = None,
 ):
     return await emit_event(
         entity_type="request",
@@ -219,7 +219,7 @@ async def emit_fulfillment_contributed(
     request_id: str,
     provider_id: str,
     provider_role: str,
-    contribution: Dict,
+    contribution: dict,
 ):
     return await emit_event(
         entity_type="request",
@@ -234,7 +234,7 @@ async def emit_fulfillment_contributed(
 async def emit_delivery_confirmed(
     request_id: str,
     victim_id: str,
-    confirmation_data: Dict,
+    confirmation_data: dict,
 ):
     return await emit_event(
         entity_type="request",

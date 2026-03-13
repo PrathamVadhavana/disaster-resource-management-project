@@ -11,8 +11,8 @@ Logs every notification attempt in the alert_notifications table.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -31,10 +31,10 @@ class AlertNotificationService:
 
     async def evaluate_and_notify(
         self,
-        event: Dict[str, Any],
-        disaster_id: Optional[str] = None,
-        prediction_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        event: dict[str, Any],
+        disaster_id: str | None = None,
+        prediction_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         If the event or prediction is critical, send notifications
         to all NGO/admin contacts and log them.
@@ -48,7 +48,7 @@ class AlertNotificationService:
             logger.warning("No NGO/admin recipients configured for alerts")
             return []
 
-        notifications: List[Dict[str, Any]] = []
+        notifications: list[dict[str, Any]] = []
         for recip in recipients:
             notif = await self._send(
                 event=event,
@@ -62,7 +62,7 @@ class AlertNotificationService:
 
     # ── private ─────────────────────────────────────────────────────
 
-    async def _get_ngo_recipients(self) -> List[Dict[str, Any]]:
+    async def _get_ngo_recipients(self) -> list[dict[str, Any]]:
         """Query users with role ngo or admin who have email/phone."""
         resp = (
             await db_admin.table("users")
@@ -74,11 +74,11 @@ class AlertNotificationService:
 
     async def _send(
         self,
-        event: Dict[str, Any],
-        disaster_id: Optional[str],
-        prediction_id: Optional[str],
-        recipient: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        event: dict[str, Any],
+        disaster_id: str | None,
+        prediction_id: str | None,
+        recipient: dict[str, Any],
+    ) -> dict[str, Any]:
         """Attempt email dispatch for one recipient, with log fallback."""
         notif_id = str(uuid4())
         subject = f"🚨 CRITICAL ALERT: {event.get('title', 'Disaster Event')}"
@@ -95,7 +95,7 @@ class AlertNotificationService:
             "body": body,
             "severity": event.get("severity", "critical"),
             "status": "pending",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
 
         # Try email via SendGrid (free tier: 100 emails/day)
@@ -107,7 +107,7 @@ class AlertNotificationService:
             notif_base["status"] = result.get("status", "failed")
             notif_base["error_message"] = result.get("error")
             if result.get("status") == "sent":
-                notif_base["sent_at"] = datetime.now(timezone.utc).isoformat()
+                notif_base["sent_at"] = datetime.now(UTC).isoformat()
         else:
             # Log-based fallback — alert is persisted in DB for dashboard visibility
             notif_base["channel"] = "log"
@@ -115,7 +115,8 @@ class AlertNotificationService:
             notif_base["error_message"] = None
             logger.warning(
                 "CRITICAL ALERT (log-only, no SendGrid key): %s — recipient: %s",
-                subject, email or "(no email)",
+                subject,
+                email or "(no email)",
             )
 
         # Persist notification log (in-memory)
@@ -124,7 +125,7 @@ class AlertNotificationService:
 
     # ── Email via SendGrid ──────────────────────────────────────────
 
-    async def _send_email(self, to_email: str, subject: str, body: str) -> Dict[str, Any]:
+    async def _send_email(self, to_email: str, subject: str, body: str) -> dict[str, Any]:
         url = "https://api.sendgrid.com/v3/mail/send"
         headers = {
             "Authorization": f"Bearer {cfg.SENDGRID_API_KEY}",
@@ -157,10 +158,10 @@ class AlertNotificationService:
 
     # ── Body formatting ─────────────────────────────────────────────
 
-    def _build_body(self, event: Dict[str, Any]) -> str:
+    def _build_body(self, event: dict[str, Any]) -> str:
         lines = [
-            f"CRITICAL DISASTER ALERT",
-            f"",
+            "CRITICAL DISASTER ALERT",
+            "",
             f"Event: {event.get('title', 'Unknown')}",
             f"Severity: {event.get('severity', 'N/A').upper()}",
             f"Type: {event.get('event_type', 'N/A')}",
@@ -170,7 +171,7 @@ class AlertNotificationService:
         if event.get("location_name"):
             lines.append(f"Place: {event.get('location_name')}")
         if event.get("description"):
-            lines.append(f"")
+            lines.append("")
             lines.append(event["description"][:500])
         lines.append("")
         lines.append("Please log in to the Disaster Management Platform for full details.")

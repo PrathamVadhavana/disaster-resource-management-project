@@ -15,25 +15,9 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-import numpy as np
-
-from ml.fairness_metrics import (
-    FairnessReport,
-    HistoricalRecord,
-    ZoneAllocation,
-    ZoneDemographics,
-    compute_fairness_report,
-    equity_score,
-    gini_coefficient,
-    gini_per_capita,
-    vulnerability_index,
-    vulnerability_scores,
-    historical_underservice_scores,
-)
 from app.services.allocation_engine import (
     AllocationResult,
     AvailableResource,
@@ -41,19 +25,29 @@ from app.services.allocation_engine import (
     ResourceNeed,
     solve_allocation,
 )
-from app.services.distance import haversine
+from ml.fairness_metrics import (
+    HistoricalRecord,
+    ZoneAllocation,
+    ZoneDemographics,
+    compute_fairness_report,
+    equity_score,
+    gini_per_capita,
+    historical_underservice_scores,
+    vulnerability_index,
+    vulnerability_scores,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ── Configuration constants ───────────────────────────────────────────────────
 
-RURAL_NGO_THRESHOLD = 5          # < 5 NGOs within 20 km → "under-served rural"
-RURAL_MULTIPLIER = 1.3           # 30 % resource uplift for rural zones
+RURAL_NGO_THRESHOLD = 5  # < 5 NGOs within 20 km → "under-served rural"
+RURAL_MULTIPLIER = 1.3  # 30 % resource uplift for rural zones
 VULNERABILITY_PRIORITY_CUTOFF = 0.7  # bump priority when vuln index > this
-UNDERSERVICE_THRESHOLD = 2       # compensatory boost when score > 2
-UNDERSERVICE_BONUS = 0.20        # +20 % resources
-PARETO_POINTS = 10               # number of frontier points
+UNDERSERVICE_THRESHOLD = 2  # compensatory boost when score > 2
+UNDERSERVICE_BONUS = 0.20  # +20 % resources
+PARETO_POINTS = 10  # number of frontier points
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -64,36 +58,36 @@ class FairAllocationPlan:
     """A single allocation plan with associated scores."""
 
     plan_index: int = 0
-    equity_weight: float = 0.0    # 0 = pure efficiency, 1 = pure equity
-    allocations: List[Dict[str, Any]] = field(default_factory=list)
-    efficiency_score: float = 0.0   # coverage-based
-    equity_score: float = 0.0       # fairness-based
+    equity_weight: float = 0.0  # 0 = pure efficiency, 1 = pure equity
+    allocations: list[dict[str, Any]] = field(default_factory=list)
+    efficiency_score: float = 0.0  # coverage-based
+    equity_score: float = 0.0  # fairness-based
     gini: float = 0.0
-    zone_allocations: Dict[str, float] = field(default_factory=dict)
-    adjustments_applied: List[str] = field(default_factory=list)
+    zone_allocations: dict[str, float] = field(default_factory=dict)
+    adjustments_applied: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ParetoFrontier:
     """Collection of allocation plans on the Pareto frontier."""
 
-    plans: List[FairAllocationPlan] = field(default_factory=list)
-    disaster_id: Optional[str] = None
+    plans: list[FairAllocationPlan] = field(default_factory=list)
+    disaster_id: str | None = None
 
 
 # ── Fairness Adjustments ──────────────────────────────────────────────────────
 
 
 def apply_rural_multiplier(
-    allocations: List[Dict[str, Any]],
-    zone_demographics: Dict[str, ZoneDemographics],
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+    allocations: list[dict[str, Any]],
+    zone_demographics: dict[str, ZoneDemographics],
+) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Multiply resource quantities by 1.3× for zones flagged as rural
     with fewer than 5 NGOs within 20 km.
     """
     adjusted = []
-    notes: List[str] = []
+    notes: list[str] = []
 
     for alloc in allocations:
         a = copy.deepcopy(alloc)
@@ -105,24 +99,22 @@ def apply_rural_multiplier(
             boosted = round(original_qty * RURAL_MULTIPLIER, 2)
             a["quantity"] = boosted
             a["rural_boost_applied"] = True
-            notes.append(
-                f"Zone {zone_id}: rural boost {original_qty} → {boosted}"
-            )
+            notes.append(f"Zone {zone_id}: rural boost {original_qty} → {boosted}")
         adjusted.append(a)
 
     return adjusted, notes
 
 
 def apply_vulnerability_priority(
-    allocations: List[Dict[str, Any]],
-    zone_demographics: Dict[str, ZoneDemographics],
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+    allocations: list[dict[str, Any]],
+    zone_demographics: dict[str, ZoneDemographics],
+) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Bump the priority of allocations going to zones whose vulnerability
     index exceeds the cutoff (0.7).  The bump moves priority to the
     maximum (10) so that dispatching systems handle them first.
     """
-    notes: List[str] = []
+    notes: list[str] = []
     vuln_map = vulnerability_scores(list(zone_demographics.values()))
 
     for alloc in allocations:
@@ -133,21 +125,20 @@ def apply_vulnerability_priority(
             alloc["priority"] = 10
             alloc["vulnerability_bump"] = True
             notes.append(
-                f"Zone {zone_id}: vuln {vuln:.2f} > {VULNERABILITY_PRIORITY_CUTOFF} "
-                f"→ priority {old_prio} → 10"
+                f"Zone {zone_id}: vuln {vuln:.2f} > {VULNERABILITY_PRIORITY_CUTOFF} → priority {old_prio} → 10"
             )
 
     return allocations, notes
 
 
 def apply_underservice_compensation(
-    allocations: List[Dict[str, Any]],
-    underservice_map: Dict[str, int],
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+    allocations: list[dict[str, Any]],
+    underservice_map: dict[str, int],
+) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Add +20 % resources to zones historically underserved (score > 2).
     """
-    notes: List[str] = []
+    notes: list[str] = []
 
     for alloc in allocations:
         zone_id = alloc.get("zone_id") or alloc.get("location", "")
@@ -159,7 +150,7 @@ def apply_underservice_compensation(
             alloc["underservice_bonus_applied"] = True
             notes.append(
                 f"Zone {zone_id}: underservice score {score} > {UNDERSERVICE_THRESHOLD} "
-                f"→ +{bonus} ({UNDERSERVICE_BONUS*100:.0f}%)"
+                f"→ +{bonus} ({UNDERSERVICE_BONUS * 100:.0f}%)"
             )
 
     return allocations, notes
@@ -170,15 +161,39 @@ def apply_underservice_compensation(
 
 def _efficiency_score(result: AllocationResult) -> float:
     """Fraction of needs met (coverage percentage normalised to 0-1)."""
-    return min(result.coverage_pct / 100.0, 1.0)
+    # Handle edge cases where coverage_pct might be None, 0, or undefined
+    coverage_pct = getattr(result, "coverage_pct", 0.0) or 0.0
+
+    # If no needs exist, efficiency is 1.0 (perfect since nothing to allocate)
+    if not hasattr(result, "allocations") or not result.allocations:
+        # Check if there are any needs at all
+        needs_count = getattr(result, "unmet_needs", []) or []
+        if not needs_count and not hasattr(result, "unmet_needs"):
+            return 1.0
+
+    # Normalize to 0-1 range, ensuring we don't divide by zero
+    efficiency = max(0.0, min(1.0, coverage_pct / 100.0))
+
+    # Additional safety: if we have allocations but 0% coverage, calculate manually
+    if efficiency == 0.0 and hasattr(result, "allocations") and result.allocations:
+        # Calculate efficiency based on actual allocations vs needs
+        total_allocated = sum(a.get("quantity", 0) for a in result.allocations)
+        total_needs = sum(u.get("quantity", 0) for u in getattr(result, "unmet_needs", []))
+
+        if total_needs > 0:
+            efficiency = min(1.0, total_allocated / total_needs)
+        else:
+            efficiency = 1.0
+
+    return efficiency
 
 
 def _equity_from_allocations(
-    allocations: List[Dict[str, Any]],
-    zones: List[ZoneDemographics],
+    allocations: list[dict[str, Any]],
+    zones: list[ZoneDemographics],
 ) -> float:
     """Compute equity score from a list of allocation dicts."""
-    zone_alloc: Dict[str, float] = {}
+    zone_alloc: dict[str, float] = {}
     for a in allocations:
         zid = a.get("zone_id") or a.get("location", "")
         zone_alloc[zid] = zone_alloc.get(zid, 0.0) + a.get("quantity", 0.0)
@@ -194,11 +209,11 @@ def _equity_from_allocations(
 
 
 def fair_allocate(
-    resources: List[AvailableResource],
-    needs: List[ResourceNeed],
-    zones: List[ZoneDemographics],
-    historical_records: List[HistoricalRecord],
-    weights: Optional[PriorityWeights] = None,
+    resources: list[AvailableResource],
+    needs: list[ResourceNeed],
+    zones: list[ZoneDemographics],
+    historical_records: list[HistoricalRecord],
+    weights: PriorityWeights | None = None,
     max_distance_km: float = 500.0,
     equity_weight: float = 0.5,
 ) -> FairAllocationPlan:
@@ -219,11 +234,9 @@ def fair_allocate(
         if "zone_id" not in a:
             a["zone_id"] = a.get("location", "")
 
-    all_notes: List[str] = []
+    all_notes: list[str] = []
     zone_demo_map = {z.zone_id: z for z in zones}
-    underservice_map = historical_underservice_scores(
-        [z.zone_id for z in zones], historical_records
-    )
+    underservice_map = historical_underservice_scores([z.zone_id for z in zones], historical_records)
 
     # 3. Apply fairness constraints (scaled by equity_weight)
     if equity_weight > 0:
@@ -234,16 +247,12 @@ def fair_allocate(
 
         # Vulnerability priority bump
         if equity_weight >= 0.2:
-            allocations, notes = apply_vulnerability_priority(
-                allocations, zone_demo_map
-            )
+            allocations, notes = apply_vulnerability_priority(allocations, zone_demo_map)
             all_notes.extend(notes)
 
         # Historical underservice compensation
         if equity_weight >= 0.5:
-            allocations, notes = apply_underservice_compensation(
-                allocations, underservice_map
-            )
+            allocations, notes = apply_underservice_compensation(allocations, underservice_map)
             all_notes.extend(notes)
 
     # 4. Compute scores
@@ -253,7 +262,7 @@ def fair_allocate(
     # at equity_weight=1 we use the fully-adjusted equity.
     eq = _equity_from_allocations(allocations, zones) if zones else 0.0
 
-    zone_alloc_map: Dict[str, float] = {}
+    zone_alloc_map: dict[str, float] = {}
     for a in allocations:
         zid = a.get("zone_id", "")
         zone_alloc_map[zid] = zone_alloc_map.get(zid, 0.0) + a.get("quantity", 0.0)
@@ -277,14 +286,14 @@ def fair_allocate(
 
 
 def compute_pareto_frontier(
-    resources: List[AvailableResource],
-    needs: List[ResourceNeed],
-    zones: List[ZoneDemographics],
-    historical_records: List[HistoricalRecord],
-    weights: Optional[PriorityWeights] = None,
+    resources: list[AvailableResource],
+    needs: list[ResourceNeed],
+    zones: list[ZoneDemographics],
+    historical_records: list[HistoricalRecord],
+    weights: PriorityWeights | None = None,
     max_distance_km: float = 500.0,
     n_points: int = PARETO_POINTS,
-    disaster_id: Optional[str] = None,
+    disaster_id: str | None = None,
 ) -> ParetoFrontier:
     """
     Compute *n_points* allocation plans along the efficiency–equity
@@ -316,11 +325,11 @@ def compute_pareto_frontier(
 
 
 def generate_fairness_audit(
-    zones: List[ZoneDemographics],
-    allocations: List[ZoneAllocation],
-    historical_records: List[HistoricalRecord],
-    disaster_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    zones: list[ZoneDemographics],
+    allocations: list[ZoneAllocation],
+    historical_records: list[HistoricalRecord],
+    disaster_id: str | None = None,
+) -> dict[str, Any]:
     """
     Generate a post-allocation fairness audit report.
 
@@ -339,18 +348,11 @@ def generate_fairness_audit(
         "summary": {
             "total_zones": len(zones),
             "high_vulnerability_zones": sum(
-                1
-                for z in zones
-                if vulnerability_index(z) >= VULNERABILITY_PRIORITY_CUTOFF
+                1 for z in zones if vulnerability_index(z) >= VULNERABILITY_PRIORITY_CUTOFF
             ),
-            "underserved_zones": sum(
-                1 for s in report.underservice_scores.values()
-                if s > UNDERSERVICE_THRESHOLD
-            ),
+            "underserved_zones": sum(1 for s in report.underservice_scores.values() if s > UNDERSERVICE_THRESHOLD),
             "rural_access_constrained": sum(
-                1
-                for z in zones
-                if z.is_rural and z.ngo_count_within_20km < RURAL_NGO_THRESHOLD
+                1 for z in zones if z.is_rural and z.ngo_count_within_20km < RURAL_NGO_THRESHOLD
             ),
         },
     }

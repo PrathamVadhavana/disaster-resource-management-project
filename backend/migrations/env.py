@@ -1,12 +1,9 @@
 import os
-import sys
 from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
 
 from alembic import context
 from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
 
 load_dotenv()
 
@@ -50,7 +47,7 @@ def run_migrations_offline() -> None:
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
         config.set_main_option("sqlalchemy.url", url)
-    
+
     context.configure(
         url=url or config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
@@ -82,9 +79,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

@@ -2,12 +2,14 @@
 Victim Profile Router
 Profile management endpoints for victim users
 """
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import JSONResponse
+
 import traceback
 
-from app.database import db, db_admin
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from app.database import db_admin
 from app.dependencies import _verify_supabase_token
 from app.schemas import VictimProfileUpdate
 
@@ -50,13 +52,7 @@ async def get_victim_profile(
     victim_id = _get_victim_id(credentials)
 
     try:
-        user_resp = (
-            await db_admin.table("users")
-            .select("*")
-            .eq("id", victim_id)
-            .single()
-            .async_execute()
-        )
+        user_resp = await db_admin.table("users").select("*").eq("id", victim_id).single().async_execute()
 
         if not user_resp.data:
             raise HTTPException(status_code=404, detail="User profile not found")
@@ -67,11 +63,7 @@ async def get_victim_profile(
         victim_data = {}
         try:
             details_resp = (
-                await db_admin.table("victim_details")
-                .select("*")
-                .eq("id", victim_id)
-                .single()
-                .async_execute()
+                await db_admin.table("victim_details").select("*").eq("id", victim_id).single().async_execute()
             )
             if details_resp.data:
                 victim_data = details_resp.data
@@ -119,11 +111,7 @@ async def update_victim_profile(
             existing = None
             try:
                 existing_resp = (
-                    await db_admin.table("victim_details")
-                    .select("id")
-                    .eq("id", victim_id)
-                    .single()
-                    .async_execute()
+                    await db_admin.table("victim_details").select("id").eq("id", victim_id).single().async_execute()
                 )
                 existing = existing_resp.data
             except Exception:
@@ -164,11 +152,7 @@ async def update_victim_location(
         existing = None
         try:
             existing_resp = (
-                await db_admin.table("victim_details")
-                .select("id")
-                .eq("id", victim_id)
-                .single()
-                .async_execute()
+                await db_admin.table("victim_details").select("id").eq("id", victim_id).single().async_execute()
             )
             existing = existing_resp.data
         except Exception:

@@ -24,15 +24,13 @@ Usage from the API layer::
 
 from __future__ import annotations
 
-import copy
 import logging
 import math
-import os
 import random
 from collections import deque, namedtuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -43,6 +41,7 @@ try:
     import torch.nn as nn
     import torch.nn.functional as F
     import torch.optim as optim
+
     _HAS_TORCH = True
 except ImportError:
     _HAS_TORCH = False
@@ -57,16 +56,211 @@ Transition = namedtuple("Transition", ["state", "action", "reward", "next_state"
 
 # Resource type encoding (shared with GAT)
 RESOURCE_TYPES = [
-    "food", "water", "medical", "shelter", "clothing",
-    "sanitation", "communication", "transport",
+    "food",
+    "water",
+    "medical",
+    "shelter",
+    "clothing",
+    "sanitation",
+    "communication",
+    "transport",
 ]
-_TYPE_TO_IDX: Dict[str, int] = {t: i for i, t in enumerate(RESOURCE_TYPES)}
+_TYPE_TO_IDX: dict[str, int] = {t: i for i, t in enumerate(RESOURCE_TYPES)}
 
 STATE_DIM = 10  # see _build_state
 ACTION_DIM_DEFAULT = 64  # max resources we consider per step
 
 
+# ── Historical Data Loader for RL Warm-start ──────────────────────────────────
+
+
+async def build_rl_environment_from_supabase(db_client) -> list[Transition]:
+    """Load historical allocation data from Supabase to warm-start the RL agent.
+
+    Queries:
+    - resource_requests with status in ('completed', 'delivered', 'satisfied') → successful
+    - resource_requests with status in ('cancelled', 'rejected') → failed/unmet
+    - available_resources for current inventory state
+
+    Builds state vectors:
+        [resource_type_demand_vector (5 dims), disaster_severity_nearby,
+         distance_to_nearest_resource, time_since_request_hours]
+
+    Reward signal:
+        +10 for fulfilled requests
+        -5 for rejected/cancelled
+        -1 per hour delay
+        +3 bonus if priority was 'critical' and fulfilled within 2 hours
+
+    Returns:
+        List of Transition tuples (state, action, reward, next_state, done)
+    """
+    from datetime import datetime, timezone
+
+    transitions = []
+
+    try:
+        # Query successful allocations (completed, delivered, satisfied)
+        success_resp = await db_client.table("resource_requests").select(
+            "*"
+        ).in_("status", ["completed", "delivered", "satisfied"]).execute()
+        successful_requests = success_resp.data or []
+
+        # Query failed/unmet needs (cancelled, rejected)
+        failure_resp = await db_client.table("resource_requests").select(
+            "*"
+        ).in_("status", ["cancelled", "rejected"]).execute()
+        failed_requests = failure_resp.data or []
+
+        # Query available resources for inventory state
+        resources_resp = await db_client.table("available_resources").select(
+            "*"
+        ).eq("is_active", True).execute()
+        available_resources = resources_resp.data or []
+
+        # Build resource type demand vector (5 dims for common types)
+        demand_counts = {"food": 0, "water": 0, "medical": 0, "shelter": 0, "clothing": 0}
+        for req in successful_requests + failed_requests:
+            rtype = (req.get("resource_type") or "other").lower()
+            if rtype in demand_counts:
+                demand_counts[rtype] += 1
+
+        demand_vector = np.array(
+            [demand_counts[k] / max(len(successful_requests) + len(failed_requests), 1)
+             for k in ["food", "water", "medical", "shelter", "clothing"]],
+            dtype=np.float32
+        )
+
+        # Get disaster severity (use priority as proxy)
+        def get_severity(req: dict) -> float:
+            priority = req.get("priority", 5)
+            # Map priority 1-10 to severity 0-1 (higher priority = higher severity)
+            return min(priority / 10.0, 1.0)
+
+        # Process successful requests
+        now = datetime.now(timezone.utc)
+        for req in successful_requests:
+            created_at = req.get("created_at")
+            if isinstance(created_at, str):
+                try:
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                except:
+                    created_at = now
+            elif created_at is None:
+                created_at = now
+
+            time_since_request = (now - created_at).total_seconds() / 3600.0  # hours
+
+            # Get quantity (default to 1 if not specified)
+            quantity = float(req.get("quantity", 1))
+
+            # Build state vector (8 dimensions as specified)
+            # [resource_type_demand_vector (5 dims), disaster_severity, distance, time_hours]
+            # Use request's priority as disaster severity proxy
+            severity = get_severity(req)
+
+            # Distance to nearest resource - estimate from lat/lon if available
+            req_lat = req.get("latitude", 0.0) or 0.0
+            req_lon = req.get("longitude", 0.0) or 0.0
+
+            # Find nearest available resource
+            min_distance = 100.0  # default 100km if no resources
+            for res in available_resources:
+                res_lat = res.get("latitude", 0.0) or 0.0
+                res_lon = res.get("longitude", 0.0) or 0.0
+                if res_lat != 0 and res_lon != 0:
+                    dist = _haversine(req_lat, req_lon, res_lat, res_lon)
+                    if dist < min_distance:
+                        min_distance = dist
+
+            # Normalize distance (log scale)
+            distance_norm = math.log1p(min_distance) / 10.0
+
+            # Time normalization (log scale)
+            time_norm = math.log1p(time_since_request) / 5.0
+
+            state = np.concatenate([
+                demand_vector,
+                np.array([severity, distance_norm, time_norm], dtype=np.float32)
+            ])
+
+            # Action: resource type index (for successful, it's the allocated type)
+            rtype = (req.get("resource_type") or "other").lower()
+            action = _TYPE_TO_IDX.get(rtype, len(RESOURCE_TYPES))
+
+            # Reward calculation
+            reward = 10.0  # Base reward for fulfilled
+            reward -= min(time_since_request, 48.0)  # Delay penalty (capped at 48 hours)
+
+            # Critical priority bonus: +3 if priority <= 2 (critical) and fulfilled within 2 hours
+            priority_val = req.get("priority", 5)
+            if priority_val <= 2 and time_since_request <= 2.0:
+                reward += 3.0
+
+            # Next state (simulated - same as current for simplicity)
+            next_state = state.copy()
+
+            transitions.append(Transition(state, action, float(reward), next_state, True))
+
+        # Process failed requests
+        for req in failed_requests:
+            created_at = req.get("created_at")
+            if isinstance(created_at, str):
+                try:
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                except:
+                    created_at = now
+            elif created_at is None:
+                created_at = now
+
+            time_since_request = (now - created_at).total_seconds() / 3600.0
+
+            severity = get_severity(req)
+
+            req_lat = req.get("latitude", 0.0) or 0.0
+            req_lon = req.get("longitude", 0.0) or 0.0
+
+            # Distance to nearest resource
+            min_distance = 100.0
+            for res in available_resources:
+                res_lat = res.get("latitude", 0.0) or 0.0
+                res_lon = res.get("longitude", 0.0) or 0.0
+                if res_lat != 0 and res_lon != 0:
+                    dist = _haversine(req_lat, req_lon, res_lat, res_lon)
+                    if dist < min_distance:
+                        min_distance = dist
+
+            distance_norm = math.log1p(min_distance) / 10.0
+            time_norm = math.log1p(time_since_request) / 5.0
+
+            state = np.concatenate([
+                demand_vector,
+                np.array([severity, distance_norm, time_norm], dtype=np.float32)
+            ])
+
+            rtype = (req.get("resource_type") or "other").lower()
+            action = _TYPE_TO_IDX.get(rtype, len(RESOURCE_TYPES))
+
+            # Reward: -5 for rejected/cancelled
+            reward = -5.0
+
+            next_state = state.copy()
+
+            transitions.append(Transition(state, action, float(reward), next_state, True))
+
+        logger.info(
+            "Loaded %d historical transitions (%d successful, %d failed) from Supabase",
+            len(transitions), len(successful_requests), len(failed_requests)
+        )
+
+    except Exception as e:
+        logger.error("Failed to load historical RL data from Supabase: %s", e)
+
+    return transitions
+
+
 # ── Replay Buffer ─────────────────────────────────────────────────────────────
+
 
 class ReplayBuffer:
     """Fixed-size ring buffer for experience replay."""
@@ -77,7 +271,7 @@ class ReplayBuffer:
     def push(self, *args: Any) -> None:
         self.buffer.append(Transition(*args))
 
-    def sample(self, batch_size: int) -> List[Transition]:
+    def sample(self, batch_size: int) -> list[Transition]:
         return random.sample(self.buffer, min(batch_size, len(self.buffer)))
 
     def __len__(self) -> int:
@@ -87,6 +281,7 @@ class ReplayBuffer:
 # ── Dueling Q-Network ────────────────────────────────────────────────────────
 
 if _HAS_TORCH:
+
     class QNetwork(nn.Module):
         """Dueling DQN architecture.
 
@@ -129,6 +324,7 @@ else:
 
 # ── Reward Function ──────────────────────────────────────────────────────────
 
+
 def compute_reward(
     coverage_before: float,
     coverage_after: float,
@@ -156,9 +352,11 @@ def compute_reward(
 
 # ── Gym-like Allocation Environment ──────────────────────────────────────────
 
+
 @dataclass
 class ResourceState:
     """Representation of a single resource for the RL environment."""
+
     id: str
     resource_type: str
     quantity: float
@@ -171,6 +369,7 @@ class ResourceState:
 @dataclass
 class RequestState:
     """Representation of a single request/need."""
+
     id: str
     resource_type: str
     quantity_needed: float
@@ -216,18 +415,21 @@ def _build_state(
     req_type_idx = _TYPE_TO_IDX.get(request.resource_type.lower(), len(RESOURCE_TYPES)) / max(len(RESOURCE_TYPES), 1)
     avail_ratio = n_available / max(n_available + n_pending, 1)
 
-    return np.array([
-        min(resource.quantity / 1000.0, 1.0),
-        resource.priority / 10.0,
-        res_type_idx,
-        request.urgency / 10.0,
-        min(request.quantity_needed / 1000.0, 1.0),
-        math.log1p(dist) / 10.0,
-        type_match,
-        math.log1p(request.hours_waiting) / 5.0,
-        avail_ratio,
-        req_type_idx,
-    ], dtype=np.float32)
+    return np.array(
+        [
+            min(resource.quantity / 1000.0, 1.0),
+            resource.priority / 10.0,
+            res_type_idx,
+            request.urgency / 10.0,
+            min(request.quantity_needed / 1000.0, 1.0),
+            math.log1p(dist) / 10.0,
+            type_match,
+            math.log1p(request.hours_waiting) / 5.0,
+            avail_ratio,
+            req_type_idx,
+        ],
+        dtype=np.float32,
+    )
 
 
 class RLAllocationEnv:
@@ -236,8 +438,8 @@ class RLAllocationEnv:
 
     def __init__(
         self,
-        resources: List[ResourceState],
-        requests: List[RequestState],
+        resources: list[ResourceState],
+        requests: list[RequestState],
         max_candidates: int = ACTION_DIM_DEFAULT,
     ):
         self.all_resources = resources
@@ -245,7 +447,7 @@ class RLAllocationEnv:
         self.max_candidates = max_candidates
         self.reset()
 
-    def reset(self) -> Tuple[np.ndarray, dict]:
+    def reset(self) -> tuple[np.ndarray, dict]:
         """Reset the environment to the initial state."""
         for r in self.all_resources:
             r.allocated = False
@@ -253,27 +455,27 @@ class RLAllocationEnv:
             req.fulfilled = False
         self._request_idx = 0
         self._total_reward = 0.0
-        self._coverage_history: List[float] = [0.0]
+        self._coverage_history: list[float] = [0.0]
         return self._get_obs(), {}
 
     @property
-    def current_request(self) -> Optional[RequestState]:
+    def current_request(self) -> RequestState | None:
         pending = [r for r in self.all_requests if not r.fulfilled]
         if not pending:
             return None
         return pending[0]
 
-    def _available_resources(self) -> List[ResourceState]:
+    def _available_resources(self) -> list[ResourceState]:
         return [r for r in self.all_resources if not r.allocated]
 
-    def _get_candidates(self) -> List[ResourceState]:
+    def _get_candidates(self) -> list[ResourceState]:
         """Return up to max_candidates available resources, sorted by distance to current request."""
         req = self.current_request
         if req is None:
             return []
         avail = self._available_resources()
         avail.sort(key=lambda r: _haversine(r.lat, r.lon, req.lat, req.lon))
-        return avail[:self.max_candidates]
+        return avail[: self.max_candidates]
 
     def _coverage(self) -> float:
         fulfilled = sum(1 for r in self.all_requests if r.fulfilled)
@@ -290,7 +492,7 @@ class RLAllocationEnv:
             return np.zeros(STATE_DIM, dtype=np.float32)
         return _build_state(candidates[0], req, n_avail, n_pending)
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         """Execute an allocation action.
 
         Args:
@@ -350,6 +552,7 @@ class RLAllocationEnv:
 
 # ── Double-DQN Agent ─────────────────────────────────────────────────────────
 
+
 class DQNAgent:
     """Double-DQN agent with ε-greedy exploration and target network.
 
@@ -398,14 +601,15 @@ class DQNAgent:
         self.replay_buffer = ReplayBuffer(buffer_size)
 
         # Training metrics
-        self.training_losses: List[float] = []
-        self.episode_rewards: List[float] = []
+        self.training_losses: list[float] = []
+        self.episode_rewards: list[float] = []
 
     @property
     def epsilon(self) -> float:
         """Current ε for ε-greedy exploration (exponential decay)."""
-        return self.epsilon_end + (self.epsilon_start - self.epsilon_end) * \
-            math.exp(-self.steps_done / self.epsilon_decay)
+        return self.epsilon_end + (self.epsilon_start - self.epsilon_end) * math.exp(
+            -self.steps_done / self.epsilon_decay
+        )
 
     def select_action(self, state: np.ndarray, n_valid_actions: int) -> int:
         """Select action using ε-greedy policy.
@@ -436,7 +640,7 @@ class DQNAgent:
     ) -> None:
         self.replay_buffer.push(state, action, reward, next_state, done)
 
-    def train_step(self) -> Optional[float]:
+    def train_step(self) -> float | None:
         """Perform one gradient step on a batch from the replay buffer.
 
         Returns the loss value, or None if the buffer is too small.
@@ -477,22 +681,25 @@ class DQNAgent:
         self.training_losses.append(loss_val)
         return loss_val
 
-    def save(self, path: Optional[Path] = None) -> Path:
+    def save(self, path: Path | None = None) -> Path:
         """Save model checkpoint."""
         path = path or DEFAULT_RL_CHECKPOINT
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({
-            "policy_net": self.policy_net.state_dict(),
-            "target_net": self.target_net.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "steps_done": self.steps_done,
-            "state_dim": self.state_dim,
-            "action_dim": self.action_dim,
-        }, path)
+        torch.save(
+            {
+                "policy_net": self.policy_net.state_dict(),
+                "target_net": self.target_net.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "steps_done": self.steps_done,
+                "state_dim": self.state_dim,
+                "action_dim": self.action_dim,
+            },
+            path,
+        )
         logger.info("RL checkpoint saved to %s", path)
         return path
 
-    def load(self, path: Optional[Path] = None) -> None:
+    def load(self, path: Path | None = None) -> None:
         """Load model checkpoint."""
         path = path or DEFAULT_RL_CHECKPOINT
         if not path.exists():
@@ -507,6 +714,7 @@ class DQNAgent:
 
 # ── High-Level Allocator ─────────────────────────────────────────────────────
 
+
 class RLAllocator:
     """Production-ready RL-based resource allocator.
 
@@ -514,12 +722,12 @@ class RLAllocator:
     that accepts raw resource + request dicts from the database.
     """
 
-    def __init__(self, checkpoint: Optional[Path] = None):
-        self._agent: Optional[DQNAgent] = None
+    def __init__(self, checkpoint: Path | None = None):
+        self._agent: DQNAgent | None = None
         self._checkpoint = checkpoint or DEFAULT_RL_CHECKPOINT
         self._loaded = False
 
-    def _ensure_loaded(self) -> Optional[DQNAgent]:
+    def _ensure_loaded(self) -> DQNAgent | None:
         """Lazy-load the trained agent (returns None if no checkpoint)."""
         if self._loaded:
             return self._agent
@@ -542,13 +750,13 @@ class RLAllocator:
 
     def allocate(
         self,
-        resources: List[Dict[str, Any]],
-        requests: List[Dict[str, Any]],
+        resources: list[dict[str, Any]],
+        requests: list[dict[str, Any]],
         disaster_id: str,
-        location_cache: Optional[Dict[str, Tuple[float, float]]] = None,
+        location_cache: dict[str, tuple[float, float]] | None = None,
         zone_lat: float = 0.0,
         zone_lon: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run RL-based allocation.
 
         Args:
@@ -567,26 +775,30 @@ class RLAllocator:
         res_states = []
         for r in resources:
             lat, lon = location_cache.get(r.get("location_id", ""), (0.0, 0.0))
-            res_states.append(ResourceState(
-                id=r.get("id", ""),
-                resource_type=r.get("type", "other"),
-                quantity=float(r.get("quantity", 0)),
-                lat=lat,
-                lon=lon,
-                priority=int(r.get("priority", 5)),
-            ))
+            res_states.append(
+                ResourceState(
+                    id=r.get("id", ""),
+                    resource_type=r.get("type", "other"),
+                    quantity=float(r.get("quantity", 0)),
+                    lat=lat,
+                    lon=lon,
+                    priority=int(r.get("priority", 5)),
+                )
+            )
 
         req_states = []
         for i, req in enumerate(requests):
-            req_states.append(RequestState(
-                id=f"req_{i}",
-                resource_type=req.get("type", "other"),
-                quantity_needed=float(req.get("quantity", 1)),
-                urgency=int(req.get("priority", 5)),
-                lat=zone_lat,
-                lon=zone_lon,
-                hours_waiting=float(req.get("hours_waiting", 0)),
-            ))
+            req_states.append(
+                RequestState(
+                    id=f"req_{i}",
+                    resource_type=req.get("type", "other"),
+                    quantity_needed=float(req.get("quantity", 1)),
+                    urgency=int(req.get("priority", 5)),
+                    lat=zone_lat,
+                    lon=zone_lon,
+                    hours_waiting=float(req.get("hours_waiting", 0)),
+                )
+            )
 
         agent = self._ensure_loaded()
 
@@ -598,10 +810,10 @@ class RLAllocator:
     def _allocate_with_agent(
         self,
         agent: DQNAgent,
-        resources: List[ResourceState],
-        requests: List[RequestState],
+        resources: list[ResourceState],
+        requests: list[RequestState],
         disaster_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Use the trained DQN agent to allocate resources."""
         env = RLAllocationEnv(resources, requests)
         obs, _ = env.reset()
@@ -618,14 +830,16 @@ class RLAllocator:
             obs, reward, done, _, info = env.step(action)
             total_reward += reward
 
-            allocations.append({
-                "resource_id": info["resource_id"],
-                "request_id": info["request_id"],
-                "type": env.all_requests[0].resource_type if env.all_requests else "unknown",
-                "distance_km": round(info["distance_km"], 2),
-                "type_match": info["type_match"],
-                "coverage": round(info["coverage"], 4),
-            })
+            allocations.append(
+                {
+                    "resource_id": info["resource_id"],
+                    "request_id": info["request_id"],
+                    "type": env.all_requests[0].resource_type if env.all_requests else "unknown",
+                    "distance_km": round(info["distance_km"], 2),
+                    "type_match": info["type_match"],
+                    "coverage": round(info["coverage"], 4),
+                }
+            )
 
             if done:
                 break
@@ -642,10 +856,10 @@ class RLAllocator:
 
     def _allocate_heuristic(
         self,
-        resources: List[ResourceState],
-        requests: List[RequestState],
+        resources: list[ResourceState],
+        requests: list[RequestState],
         disaster_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Greedy heuristic fallback: match by type + closest distance."""
         allocations = []
         used = set()
@@ -674,13 +888,15 @@ class RLAllocator:
             if best_r is not None:
                 used.add(best_r.id)
                 req.fulfilled = True
-                allocations.append({
-                    "resource_id": best_r.id,
-                    "request_id": req.id,
-                    "type": req.resource_type,
-                    "distance_km": round(best_dist, 2),
-                    "type_match": best_r.resource_type.lower() == req.resource_type.lower(),
-                })
+                allocations.append(
+                    {
+                        "resource_id": best_r.id,
+                        "request_id": req.id,
+                        "type": req.resource_type,
+                        "distance_km": round(best_dist, 2),
+                        "type_match": best_r.resource_type.lower() == req.resource_type.lower(),
+                    }
+                )
 
         coverage = sum(1 for r in requests if r.fulfilled) / max(len(requests), 1)
         return {
@@ -696,38 +912,155 @@ class RLAllocator:
     def is_trained(self) -> bool:
         return self._ensure_loaded() is not None
 
+    async def train(
+        self,
+        db_client,
+        n_episodes: int = 1000,
+        max_steps_per_episode: int = 50,
+        checkpoint_every: int = 100,
+    ) -> "DQNAgent":
+        """Train the RL agent with historical data warm-start + simulation episodes.
+
+        This method:
+        1. Loads historical transitions from Supabase (via build_rl_environment_from_supabase)
+        2. Populates the replay buffer with historical data
+        3. Runs simulation episodes for online learning
+
+        Args:
+            db_client: Supabase database client
+            n_episodes: Number of simulation episodes to run
+            max_steps_per_episode: Max allocation steps per episode
+            checkpoint_every: Save checkpoint every N episodes
+
+        Returns:
+            Trained DQNAgent
+        """
+        if not _HAS_TORCH:
+            raise RuntimeError("PyTorch is required for RL training")
+
+        # Create agent
+        agent = DQNAgent(
+            state_dim=STATE_DIM,
+            action_dim=ACTION_DIM_DEFAULT,
+            lr=3e-4,
+            gamma=0.99,
+            epsilon_start=1.0,
+            epsilon_end=0.05,
+            epsilon_decay=max(n_episodes * 3, 5000),
+            buffer_size=100_000,
+            batch_size=64,
+            tau=0.005,
+        )
+
+        # Step 1: Load historical transitions from Supabase
+        logger.info("Loading historical data from Supabase for RL warm-start...")
+        historical_transitions = await build_rl_environment_from_supabase(db_client)
+
+        # Add historical transitions to replay buffer
+        for transition in historical_transitions:
+            agent.replay_buffer.push(transition)
+
+        logger.info(
+            "Loaded %d historical transitions into replay buffer",
+            len(historical_transitions)
+        )
+
+        # Step 2: Run simulation episodes
+        logger.info("Starting RL training for %d episodes", n_episodes)
+        best_reward = -float("inf")
+
+        for episode in range(1, n_episodes + 1):
+            resources, requests = _generate_synthetic_episode(
+                n_resources=random.randint(10, 40),
+                n_requests=random.randint(3, 15),
+            )
+            env = RLAllocationEnv(resources, requests)
+            obs, _ = env.reset()
+            episode_reward = 0.0
+
+            for step in range(max_steps_per_episode):
+                candidates = env._get_candidates()
+                if env.current_request is None or not candidates:
+                    break
+
+                n_valid = len(candidates)
+                action = agent.select_action(obs, n_valid)
+                next_obs, reward, done, _, info = env.step(action)
+
+                agent.store_transition(obs, action, reward, next_obs, done)
+                agent.train_step()
+
+                obs = next_obs
+                episode_reward += reward
+
+                if done:
+                    break
+
+            agent.episode_rewards.append(episode_reward)
+
+            if episode_reward > best_reward:
+                best_reward = episode_reward
+
+            if episode % checkpoint_every == 0:
+                agent.save(self._checkpoint)
+                avg_reward = np.mean(agent.episode_rewards[-checkpoint_every:])
+                logger.info(
+                    "Episode %d/%d | avg_reward=%.2f | best=%.2f | ε=%.3f | buffer=%d",
+                    episode,
+                    n_episodes,
+                    avg_reward,
+                    best_reward,
+                    agent.epsilon,
+                    len(agent.replay_buffer),
+                )
+
+        # Save final checkpoint
+        agent.save(self._checkpoint)
+        logger.info("RL training complete. Final checkpoint: %s", self._checkpoint)
+
+        # Update the lazy-loaded agent
+        self._agent = agent
+        self._loaded = True
+
+        return agent
+
 
 # ── Training Script ──────────────────────────────────────────────────────────
+
 
 def _generate_synthetic_episode(
     n_resources: int = 20,
     n_requests: int = 8,
-) -> Tuple[List[ResourceState], List[RequestState]]:
+) -> tuple[list[ResourceState], list[RequestState]]:
     """Generate a synthetic allocation scenario for training."""
     resources = []
     for i in range(n_resources):
         rtype = random.choice(RESOURCE_TYPES)
-        resources.append(ResourceState(
-            id=f"res_{i}",
-            resource_type=rtype,
-            quantity=float(random.randint(10, 500)),
-            lat=random.uniform(-10, 10),
-            lon=random.uniform(-10, 10),
-            priority=random.randint(1, 10),
-        ))
+        resources.append(
+            ResourceState(
+                id=f"res_{i}",
+                resource_type=rtype,
+                quantity=float(random.randint(10, 500)),
+                lat=random.uniform(-10, 10),
+                lon=random.uniform(-10, 10),
+                priority=random.randint(1, 10),
+            )
+        )
 
     requests = []
     for i in range(n_requests):
         rtype = random.choice(RESOURCE_TYPES)
-        requests.append(RequestState(
-            id=f"req_{i}",
-            resource_type=rtype,
-            quantity_needed=float(random.randint(5, 200)),
-            urgency=random.randint(1, 10),
-            lat=random.uniform(-5, 5),
-            lon=random.uniform(-5, 5),
-            hours_waiting=random.uniform(0, 48),
-        ))
+        requests.append(
+            RequestState(
+                id=f"req_{i}",
+                resource_type=rtype,
+                quantity_needed=float(random.randint(5, 200)),
+                urgency=random.randint(1, 10),
+                lat=random.uniform(-5, 5),
+                lon=random.uniform(-5, 5),
+                hours_waiting=random.uniform(0, 48),
+            )
+        )
 
     return resources, requests
 
@@ -736,7 +1069,7 @@ def train_rl(
     n_episodes: int = 2000,
     max_steps_per_episode: int = 50,
     checkpoint_every: int = 200,
-    save_path: Optional[Path] = None,
+    save_path: Path | None = None,
 ) -> DQNAgent:
     """Train the DQN agent on synthetic allocation episodes.
 
@@ -788,7 +1121,7 @@ def train_rl(
             next_obs, reward, done, _, info = env.step(action)
 
             agent.store_transition(obs, action, reward, next_obs, done)
-            loss = agent.train_step()
+            agent.train_step()
 
             obs = next_obs
             episode_reward += reward
@@ -806,8 +1139,12 @@ def train_rl(
             avg_reward = np.mean(agent.episode_rewards[-checkpoint_every:])
             logger.info(
                 "Episode %d/%d | avg_reward=%.2f | best=%.2f | ε=%.3f | buffer=%d",
-                episode, n_episodes, avg_reward, best_reward,
-                agent.epsilon, len(agent.replay_buffer),
+                episode,
+                n_episodes,
+                avg_reward,
+                best_reward,
+                agent.epsilon,
+                len(agent.replay_buffer),
             )
 
     agent.save(save_path)

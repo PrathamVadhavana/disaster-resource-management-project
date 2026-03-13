@@ -3,10 +3,10 @@ Shared helper utilities for routers.
 """
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
 
-def serialize_datetime_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+def serialize_datetime_fields(data: dict[str, Any]) -> dict[str, Any]:
     """Convert any datetime values in a dict to ISO-format strings."""
     for key, value in data.items():
         if isinstance(value, datetime):
@@ -14,7 +14,7 @@ def serialize_datetime_fields(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
-def serialize_disaster(disaster: Dict[str, Any]) -> Dict[str, Any]:
+def serialize_disaster(disaster: dict[str, Any]) -> dict[str, Any]:
     """Normalize a disaster row: serialize datetimes & flatten joined location."""
     for field in ("created_at", "updated_at", "start_date", "end_date"):
         val = disaster.get(field)

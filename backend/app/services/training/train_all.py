@@ -6,11 +6,10 @@ Usage:
     python -m app.services.training.train_all
 """
 
-import logging
 import json
-import sys
+import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -35,6 +34,7 @@ def train_all(model_dir: Path | None = None) -> dict:
     logger.info("TRAINING: Severity Predictor (RandomForest + SMOTE)")
     logger.info("=" * 60)
     from app.services.training.train_severity import train_severity_model
+
     results["severity"] = train_severity_model(model_dir=model_dir)
 
     # 2. Spread
@@ -42,6 +42,7 @@ def train_all(model_dir: Path | None = None) -> dict:
     logger.info("TRAINING: Spread Predictor (GradientBoosting)")
     logger.info("=" * 60)
     from app.services.training.train_spread import train_spread_model
+
     results["spread"] = train_spread_model(model_dir=model_dir)
 
     # 3. Impact
@@ -49,15 +50,16 @@ def train_all(model_dir: Path | None = None) -> dict:
     logger.info("TRAINING: Impact Predictor (XGBoost multi-output)")
     logger.info("=" * 60)
     from app.services.training.train_impact import train_impact_model
+
     results["impact"] = train_impact_model(model_dir=model_dir)
 
     total_time = round(time.time() - t_total, 2)
 
     # Write combined manifest
-    version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    version = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     manifest = {
         "version": version,
-        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "trained_at": datetime.now(UTC).isoformat(),
         "total_train_time_sec": total_time,
         "models": {
             "severity": {

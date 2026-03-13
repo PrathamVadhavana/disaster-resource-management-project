@@ -8,8 +8,7 @@ showing demand vs. supply in real-time.
 
 import logging
 import math
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, List
+from datetime import UTC, datetime
 
 from app.database import db_admin
 
@@ -30,14 +29,14 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _parse_dt(val) -> Optional[datetime]:
+def _parse_dt(val) -> datetime | None:
     if val is None:
         return None
     if isinstance(val, datetime):
-        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+        return val if val.tzinfo else val.replace(tzinfo=UTC)
     try:
         dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except Exception:
         return None
 
@@ -48,7 +47,7 @@ async def find_matching_disaster(
     req_created_at: str,
     max_distance_km: float = MAX_DISTANCE_KM,
     time_window_hours: float = TIME_WINDOW_HOURS,
-) -> Optional[Dict]:
+) -> dict | None:
     """Find the closest active disaster to a request location within constraints.
 
     Returns the best-matching disaster dict or None.
@@ -78,7 +77,7 @@ async def find_matching_disaster(
 
         req_time = _parse_dt(req_created_at)
         if not req_time:
-            req_time = datetime.now(timezone.utc)
+            req_time = datetime.now(UTC)
 
         best_match = None
         best_distance = float("inf")
@@ -121,16 +120,23 @@ async def find_matching_disaster(
 async def link_request_to_disaster(request_id: str, disaster_id: str, distance_km: float):
     """Store the disaster link on the request document."""
     try:
-        await db_admin.table("resource_requests").update({
-            "linked_disaster_id": disaster_id,
-            "disaster_distance_km": distance_km,
-        }).eq("id", request_id).async_execute()
+        await (
+            db_admin.table("resource_requests")
+            .update(
+                {
+                    "linked_disaster_id": disaster_id,
+                    "disaster_distance_km": distance_km,
+                }
+            )
+            .eq("id", request_id)
+            .async_execute()
+        )
         logger.info("Linked request %s to disaster %s (%.1f km)", request_id[:8], disaster_id[:8], distance_km)
     except Exception as e:
         logger.error("Failed to link request %s to disaster: %s", request_id[:8], e)
 
 
-async def auto_link_request(request_id: str, lat: float, lon: float, created_at: str) -> Optional[Dict]:
+async def auto_link_request(request_id: str, lat: float, lon: float, created_at: str) -> dict | None:
     """Auto-link a request to the nearest matching disaster. Called on request creation."""
     match = await find_matching_disaster(lat, lon, created_at)
     if match:
@@ -138,7 +144,7 @@ async def auto_link_request(request_id: str, lat: float, lon: float, created_at:
     return match
 
 
-async def get_disaster_demand_supply(disaster_id: str) -> Dict:
+async def get_disaster_demand_supply(disaster_id: str) -> dict:
     """Get demand vs supply summary for a specific disaster."""
     try:
         # Demand: all linked requests

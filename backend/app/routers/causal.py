@@ -12,7 +12,6 @@ POST /api/causal/audit/{disaster_id} – Generate a Causal Audit Report PDF
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -28,6 +27,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Request / Response schemas
 # ---------------------------------------------------------------------------
+
 
 class InterventionInput(BaseModel):
     variable: str = Field(..., description="Causal variable to intervene on")
@@ -57,10 +57,10 @@ class CausalEffectResponse(BaseModel):
     outcome: str
     method: str
     ate: float
-    p_value: Optional[float]
+    p_value: float | None
     confidence_interval: list[float]
-    refutation_passed: Optional[bool]
-    refutation_p_value: Optional[float]
+    refutation_passed: bool | None
+    refutation_p_value: float | None
 
 
 # ---------------------------------------------------------------------------
@@ -73,69 +73,25 @@ _causal_model = None
 async def _get_causal_model():
     """Lazily initialise a shared DisasterCausalModel instance.
 
-    Uses well-calibrated synthetic data by default. Real DB disaster records
-    typically lack the causal-specific columns (response_time_hours,
-    resource_availability, ngo_proximity_km, resource_quality_score), which
-    would create zero-variance data and break the regression models.
-
-    When the DB *does* have records with real causal fields, we blend them
-    with synthetic data to ensure sufficient variance for estimation.
+    Tries to load real data from the database first, falling back to
+    synthetic data if insufficient records exist.
     """
     global _causal_model
     if _causal_model is None:
-        from ml.causal_model import DisasterCausalModel, generate_synthetic_data
-        import pandas as pd
+        from ml.causal_model import DisasterCausalModel
 
-        CAUSAL_FIELDS = [
-            "response_time_hours", "resource_availability",
-            "ngo_proximity_km", "resource_quality_score",
-        ]
-
-        blended_data = None
         try:
-            from app.database import db_admin
-            disasters = (await db_admin.table("disasters").select("*").async_execute()).data or []
-            if disasters:
-                rows = []
-                for d in disasters:
-                    # Only include records that have at least one real causal field
-                    has_real_field = any(d.get(f) is not None for f in CAUSAL_FIELDS)
-                    if not has_real_field:
-                        continue
-                    rows.append({
-                        "weather_severity": float(d.get("severity_score") or 5.0),
-                        "disaster_type": float(hash(d.get("type", "")) % 10 + 1),
-                        "response_time_hours": float(d["response_time_hours"]) if d.get("response_time_hours") is not None else None,
-                        "resource_availability": float(d["resource_availability"]) if d.get("resource_availability") is not None else None,
-                        "ngo_proximity_km": float(d["ngo_proximity_km"]) if d.get("ngo_proximity_km") is not None else None,
-                        "resource_quality_score": float(d["resource_quality_score"]) if d.get("resource_quality_score") is not None else None,
-                        "casualties": float(d.get("casualties") or 0),
-                        "economic_damage_usd": float(d.get("economic_damage_usd") or 0),
-                    })
-
-                if rows:
-                    real_df = pd.DataFrame(rows)
-                    # Fill any remaining NaN values from synthetic distribution
-                    synthetic = generate_synthetic_data(n=2000)
-                    for col in real_df.columns:
-                        if real_df[col].isna().any():
-                            real_df[col] = real_df[col].fillna(synthetic[col].sample(len(real_df), replace=True).values)
-                    # Blend: real data + synthetic to ensure enough variance
-                    blended_data = pd.concat([synthetic, real_df], ignore_index=True)
-                    logger.info(
-                        "Causal model blending %d real + %d synthetic observations",
-                        len(real_df), len(synthetic),
-                    )
+            _causal_model = await DisasterCausalModel.from_database()
         except Exception as e:
-            logger.warning("Could not load real data for causal model: %s", e)
-
-        _causal_model = DisasterCausalModel(data=blended_data)
+            logger.warning("Could not initialise causal model from database: %s", e)
+            _causal_model = DisasterCausalModel()
     return _causal_model
 
 
 # ---------------------------------------------------------------------------
 # Helper – extract causal observation from a disaster record
 # ---------------------------------------------------------------------------
+
 
 def _disaster_to_observation(disaster: dict) -> dict[str, float]:
     """Map a disaster document to the causal model's variables.
@@ -158,6 +114,7 @@ def _disaster_to_observation(disaster: dict) -> dict[str, float]:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @router.post(
     "/counterfactual",
     response_model=CounterfactualResponse,
@@ -175,13 +132,7 @@ async def counterfactual_analysis(
     """
     # 1. Fetch disaster record
     try:
-        result = (
-            await db.table("disasters")
-            .select("*")
-            .eq("id", body.disaster_id)
-            .maybe_single()
-            .async_execute()
-        )
+        result = await db.table("disasters").select("*").eq("id", body.disaster_id).maybe_single().async_execute()
         disaster = result.data
     except Exception as exc:
         logger.error("DB error fetching disaster %s: %s", body.disaster_id, exc)
@@ -253,7 +204,7 @@ async def get_causal_graph(
     user: dict = Depends(get_current_user),
 ):
     """Return nodes and directed edges of the causal DAG for visualisation."""
-    from ml.causal_model import CAUSAL_NODES, CAUSAL_EDGES
+    from ml.causal_model import CAUSAL_EDGES, CAUSAL_NODES
 
     return {
         "nodes": CAUSAL_NODES,
@@ -275,13 +226,7 @@ async def generate_audit_report(
     """
     # 1. Fetch disaster
     try:
-        result = (
-            await db.table("disasters")
-            .select("*")
-            .eq("id", disaster_id)
-            .maybe_single()
-            .async_execute()
-        )
+        result = await db.table("disasters").select("*").eq("id", disaster_id).maybe_single().async_execute()
         disaster = result.data
     except Exception as exc:
         logger.error("DB error: %s", exc)

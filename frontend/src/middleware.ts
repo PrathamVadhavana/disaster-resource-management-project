@@ -24,6 +24,7 @@ export async function middleware(request: NextRequest) {
     const role  = request.cookies.get('sb-role')?.value
     const profileCompleted = request.cookies.get('profile-completed')?.value
     const path  = request.nextUrl.pathname
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
     // Helper: get the correct dashboard path for a role
     function dashboardFor(r?: string): string {
@@ -62,6 +63,37 @@ export async function middleware(request: NextRequest) {
     // 1. Authenticated Check — no token means not logged in
     if (!token) {
         return NextResponse.redirect(new URL('/login', request.url))
+    }
+
+    // Reconcile stale role cookies with backend role before route checks.
+    // This prevents random victim/volunteer flips when JWT claims lag behind DB updates.
+    const protectedPath = path.startsWith('/admin') || path.startsWith('/victim') || path.startsWith('/ngo') || path.startsWith('/donor') || path.startsWith('/volunteer')
+    if (protectedPath) {
+        try {
+            const meRes = await fetch(`${API_BASE}/api/auth/me`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                },
+                cache: 'no-store',
+            })
+
+            if (meRes.ok) {
+                const me = await meRes.json()
+                const dbRole = me?.role as string | undefined
+                if (dbRole && dbRole !== role) {
+                    const redirect = NextResponse.redirect(new URL(dashboardFor(dbRole), request.url))
+                    redirect.cookies.set('sb-role', dbRole, { path: '/', maxAge: 3600, sameSite: 'lax' })
+                    if (typeof me?.is_profile_completed === 'boolean') {
+                        redirect.cookies.set('profile-completed', me.is_profile_completed ? 'true' : 'false', { path: '/', maxAge: 86400, sameSite: 'lax' })
+                    }
+                    return redirect
+                }
+            }
+        } catch {
+            // If reconciliation fails, continue with existing cookie-based routing.
+        }
     }
 
     // 2. Role Check & Routing

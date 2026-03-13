@@ -5,6 +5,7 @@ import { AuthProvider } from '@/lib/auth-provider'
 import { QueryProvider } from '@/lib/query-provider'
 import { ThemeProvider } from '@/components/theme-provider'
 import 'react-phone-number-input/style.css' // Global import for Phone Input
+import { Toaster } from 'react-hot-toast'
 
 const spaceGrotesk = Space_Grotesk({
   subsets: ['latin'],
@@ -50,6 +51,7 @@ export default function RootLayout({
           <QueryProvider>
             <AuthProvider>
               {children}
+              <Toaster position="top-right" />
             </AuthProvider>
           </QueryProvider>
         </ThemeProvider>

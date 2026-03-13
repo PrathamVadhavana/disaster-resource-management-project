@@ -42,6 +42,15 @@ interface FrontierResponse {
     total_resources: number
     total_needs: number
     total_zones: number
+    summary?: {
+        active_request_count: number
+        victims_impacted: number
+        urgent_request_count: number
+        zones_with_live_requests: number
+        requested_resource_units: number
+        available_resource_units: number
+    }
+    derived_from?: string
     plans: FairnessPlan[]
 }
 
@@ -159,6 +168,17 @@ export function FairnessSlider({ disasterId }: { disasterId?: string }) {
                 <StatCard icon={<TrendingUp className="w-4 h-4" />} label="Zones" value={frontier.total_zones} />
                 <StatCard icon={<Shield className="w-4 h-4" />} label="Plans" value={frontier.plans.length} />
             </div>
+
+            {frontier.summary && (
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/5 p-4 text-sm text-slate-600 dark:text-slate-300">
+                    <p>
+                        Built from {frontier.summary.active_request_count} live victim requests across {frontier.summary.zones_with_live_requests} affected zones, covering {frontier.summary.victims_impacted} people.
+                    </p>
+                    {frontier.derived_from && (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{frontier.derived_from}</p>
+                    )}
+                </div>
+            )}
 
             {/* Slider */}
             <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/5 p-6">

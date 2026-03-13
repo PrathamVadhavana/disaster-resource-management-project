@@ -66,9 +66,6 @@ export default function AuthCallbackPage() {
 
             // Set auth cookies immediately
             document.cookie = `sb-token=${token}; path=/; max-age=3600; SameSite=Lax`
-            if (metaRole) {
-                document.cookie = `sb-role=${metaRole}; path=/; max-age=3600; SameSite=Lax`
-            }
 
             const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
             const headers = {
@@ -97,7 +94,6 @@ export default function AuthCallbackPage() {
                             id: session.user.id,
                             email: session.user.email,
                             full_name: userMeta.full_name || userMeta.name || '',
-                            role: metaRole || 'victim',
                             updated_at: new Date().toISOString(),
                         }),
                     })
@@ -135,7 +131,21 @@ export default function AuthCallbackPage() {
                 document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`
             }
 
-            // 5. Redirect based on role and profile completion
+            // 5. Verify email status and update in database
+            try {
+                const verifyRes = await fetch(`${API_BASE}/api/auth/verify-email`, {
+                    method: 'POST',
+                    headers,
+                })
+                if (verifyRes.ok) {
+                    const verifyData = await verifyRes.json()
+                    console.log('Email verification status:', verifyData)
+                }
+            } catch (e) {
+                console.warn('Email verification check failed:', e)
+            }
+
+            // 6. Redirect based on role and profile completion
             if (finalRole && profile?.is_profile_completed) {
                 router.replace(getRoleDashboard(finalRole))
             } else {

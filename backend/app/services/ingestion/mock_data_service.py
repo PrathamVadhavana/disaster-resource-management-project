@@ -11,11 +11,10 @@ so the orchestrator processes them identically.
 
 from __future__ import annotations
 
-import math
-import random
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+import random
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 logger = logging.getLogger("ingestion.mock")
@@ -25,7 +24,7 @@ logger = logging.getLogger("ingestion.mock")
 # ────────────────────────────────────────────────────────────────
 
 # (name, lat, lon, country, likely disaster types)
-DISASTER_REGIONS: List[Tuple[str, float, float, str, List[str]]] = [
+DISASTER_REGIONS: list[tuple[str, float, float, str, list[str]]] = [
     # Earthquake zones
     ("Tokyo, Japan", 35.6762, 139.6503, "Japan", ["earthquake", "tsunami"]),
     ("San Francisco, USA", 37.7749, -122.4194, "USA", ["earthquake", "wildfire"]),
@@ -85,7 +84,7 @@ _WEATHER_CONDITIONS = [
 ]
 
 
-def generate_mock_weather(locations: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+def generate_mock_weather(locations: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """
     Generate realistic weather observations.
     Returns data in the same format as WeatherService._fetch_current().
@@ -94,13 +93,10 @@ def generate_mock_weather(locations: Optional[List[Dict[str, Any]]] = None) -> L
         # Pick 3-6 random disaster regions as locations
         count = random.randint(3, 6)
         sample = random.sample(DISASTER_REGIONS, min(count, len(DISASTER_REGIONS)))
-        locations = [
-            {"id": str(uuid4()), "name": r[0], "latitude": r[1], "longitude": r[2]}
-            for r in sample
-        ]
+        locations = [{"id": str(uuid4()), "name": r[0], "latitude": r[1], "longitude": r[2]} for r in sample]
 
     observations = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for loc in locations:
         lat = loc.get("latitude", 0)
@@ -149,7 +145,8 @@ def generate_mock_weather(locations: Optional[List[Dict[str, Any]]] = None) -> L
 # 3. EARTHQUAKE (USGS) MOCK GENERATOR
 # ────────────────────────────────────────────────────────────────
 
-def generate_mock_earthquakes(count: Optional[int] = None) -> List[Dict[str, Any]]:
+
+def generate_mock_earthquakes(count: int | None = None) -> list[dict[str, Any]]:
     """
     Generate realistic earthquake events in the same format
     as USGSService._parse_features() output.
@@ -167,7 +164,7 @@ def generate_mock_earthquakes(count: Optional[int] = None) -> List[Dict[str, Any
     # Filter to earthquake-prone regions
     eq_regions = [r for r in DISASTER_REGIONS if "earthquake" in r[4]]
     events = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for _ in range(count):
         region = random.choice(eq_regions)
@@ -182,34 +179,36 @@ def generate_mock_earthquakes(count: Optional[int] = None) -> List[Dict[str, Any
         depth_km = round(random.uniform(5, 300), 1)
 
         severity = _magnitude_to_severity(magnitude)
-        place = f"{random.randint(5, 200)}km {'NSEW'[random.randint(0,3)]} of {region[0]}"
+        place = f"{random.randint(5, 200)}km {'NSEW'[random.randint(0, 3)]} of {region[0]}"
         usgs_id = f"mock{uuid4().hex[:10]}"
 
-        events.append({
-            "external_id": f"usgs-{usgs_id}",
-            "event_type": "earthquake",
-            "title": f"M{magnitude} - {place}",
-            "description": f"M{magnitude} earthquake at {place}. Depth: {depth_km} km.",
-            "severity": severity,
-            "latitude": round(lat, 4),
-            "longitude": round(lon, 4),
-            "location_name": place,
-            "raw_payload": {
-                "usgs_id": usgs_id,
-                "magnitude": magnitude,
-                "mag_type": "mww",
-                "depth_km": depth_km,
-                "place": place,
-                "time": int(now.timestamp() * 1000),
-                "url": f"https://earthquake.usgs.gov/earthquakes/eventpage/{usgs_id}",
-                "tsunami": 1 if magnitude >= 7.0 else 0,
-                "felt": random.randint(0, 500) if magnitude >= 5.0 else 0,
-                "alert": severity if magnitude >= 5.5 else None,
-                "status": "reviewed",
-                "type": "earthquake",
-                "mock": True,
-            },
-        })
+        events.append(
+            {
+                "external_id": f"usgs-{usgs_id}",
+                "event_type": "earthquake",
+                "title": f"M{magnitude} - {place}",
+                "description": f"M{magnitude} earthquake at {place}. Depth: {depth_km} km.",
+                "severity": severity,
+                "latitude": round(lat, 4),
+                "longitude": round(lon, 4),
+                "location_name": place,
+                "raw_payload": {
+                    "usgs_id": usgs_id,
+                    "magnitude": magnitude,
+                    "mag_type": "mww",
+                    "depth_km": depth_km,
+                    "place": place,
+                    "time": int(now.timestamp() * 1000),
+                    "url": f"https://earthquake.usgs.gov/earthquakes/eventpage/{usgs_id}",
+                    "tsunami": 1 if magnitude >= 7.0 else 0,
+                    "felt": random.randint(0, 500) if magnitude >= 5.0 else 0,
+                    "alert": severity if magnitude >= 5.5 else None,
+                    "status": "reviewed",
+                    "type": "earthquake",
+                    "mock": True,
+                },
+            }
+        )
 
     logger.info("Mock earthquakes generated: %d events", len(events))
     return events
@@ -235,12 +234,24 @@ _GDACS_DISASTER_TEMPLATES = [
         "gdacs_type": "TC",
         "title_tpl": "Tropical Cyclone {name} - Category {cat}",
         "desc_tpl": "Tropical Cyclone {name} with sustained winds of {wind}km/h affecting {region}. "
-                    "Category {cat} storm. Population exposed: ~{pop:,}.",
+        "Category {cat} storm. Population exposed: ~{pop:,}.",
         "params": lambda: {
-            "name": random.choice([
-                "Maria", "Irma", "Katrina", "Harvey", "Dorian", "Haiyan",
-                "Amphan", "Nargis", "Sandy", "Michael", "Idai", "Winston",
-            ]),
+            "name": random.choice(
+                [
+                    "Maria",
+                    "Irma",
+                    "Katrina",
+                    "Harvey",
+                    "Dorian",
+                    "Haiyan",
+                    "Amphan",
+                    "Nargis",
+                    "Sandy",
+                    "Michael",
+                    "Idai",
+                    "Winston",
+                ]
+            ),
             "cat": random.randint(1, 5),
             "wind": random.randint(120, 300),
             "pop": random.randint(50000, 5000000),
@@ -251,7 +262,7 @@ _GDACS_DISASTER_TEMPLATES = [
         "gdacs_type": "FL",
         "title_tpl": "Flood Alert - {region}",
         "desc_tpl": "Severe flooding reported in {region}. Water level {level}m above normal. "
-                    "Affected area: {area}km². Population exposed: ~{pop:,}.",
+        "Affected area: {area}km². Population exposed: ~{pop:,}.",
         "params": lambda: {
             "level": round(random.uniform(0.5, 8.0), 1),
             "area": random.randint(50, 5000),
@@ -263,7 +274,7 @@ _GDACS_DISASTER_TEMPLATES = [
         "gdacs_type": "WF",
         "title_tpl": "Wildfire - {region}",
         "desc_tpl": "Active wildfire detected near {region}. Burning area: {area}ha. "
-                    "Fire spread rate: {rate}ha/hr. Wind speed: {wind}km/h.",
+        "Fire spread rate: {rate}ha/hr. Wind speed: {wind}km/h.",
         "params": lambda: {
             "area": random.randint(100, 50000),
             "rate": random.randint(5, 200),
@@ -275,7 +286,7 @@ _GDACS_DISASTER_TEMPLATES = [
         "gdacs_type": "VO",
         "title_tpl": "Volcanic Activity - {region}",
         "desc_tpl": "Increased volcanic activity detected at {region}. "
-                    "Alert level: {alert}. Ash plume height: {ash}km.",
+        "Alert level: {alert}. Ash plume height: {ash}km.",
         "params": lambda: {
             "alert": random.choice(["Warning", "Watch", "Advisory"]),
             "ash": round(random.uniform(1, 15), 1),
@@ -286,7 +297,7 @@ _GDACS_DISASTER_TEMPLATES = [
         "gdacs_type": "DR",
         "title_tpl": "Drought Alert - {region}",
         "desc_tpl": "Severe drought conditions in {region}. "
-                    "Rainfall deficit: {deficit}% below average. Duration: {months} months.",
+        "Rainfall deficit: {deficit}% below average. Duration: {months} months.",
         "params": lambda: {
             "deficit": random.randint(40, 90),
             "months": random.randint(2, 18),
@@ -299,7 +310,7 @@ _ALERT_WEIGHTS = [0.35, 0.40, 0.25]
 _SEVERITY_MAP = {"Red": "critical", "Orange": "high", "Green": "medium"}
 
 
-def generate_mock_gdacs_events(count: Optional[int] = None) -> List[Dict[str, Any]]:
+def generate_mock_gdacs_events(count: int | None = None) -> list[dict[str, Any]]:
     """
     Generate realistic GDACS-style disaster alerts in the same
     format as GDACSService._parse_item() output.
@@ -314,7 +325,7 @@ def generate_mock_gdacs_events(count: Optional[int] = None) -> List[Dict[str, An
         return []
 
     events = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for _ in range(count):
         template = random.choice(_GDACS_DISASTER_TEMPLATES)
@@ -339,27 +350,29 @@ def generate_mock_gdacs_events(count: Optional[int] = None) -> List[Dict[str, An
         title = template["title_tpl"].format(**params)
         description = template["desc_tpl"].format(**params)
 
-        events.append({
-            "external_id": f"gdacs-{template['gdacs_type']}-{event_id}",
-            "event_type": "gdacs_alert",
-            "title": title,
-            "description": description,
-            "severity": severity,
-            "latitude": round(lat, 4),
-            "longitude": round(lon, 4),
-            "location_name": region[0],
-            "raw_payload": {
-                "link": f"https://www.gdacs.org/report.aspx?eventid={event_id}",
-                "pub_date": now.strftime("%a, %d %b %Y %H:%M:%S GMT"),
-                "gdacs_event_type": template["gdacs_type"],
-                "gdacs_alert_level": alert_level,
-                "gdacs_event_id": event_id,
-                "gdacs_severity": str(params.get("cat", params.get("level", "N/A"))),
-                "gdacs_population": str(params.get("pop", 0)),
-                "disaster_type_mapped": dtype,
-                "mock": True,
-            },
-        })
+        events.append(
+            {
+                "external_id": f"gdacs-{template['gdacs_type']}-{event_id}",
+                "event_type": "gdacs_alert",
+                "title": title,
+                "description": description,
+                "severity": severity,
+                "latitude": round(lat, 4),
+                "longitude": round(lon, 4),
+                "location_name": region[0],
+                "raw_payload": {
+                    "link": f"https://www.gdacs.org/report.aspx?eventid={event_id}",
+                    "pub_date": now.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+                    "gdacs_event_type": template["gdacs_type"],
+                    "gdacs_alert_level": alert_level,
+                    "gdacs_event_id": event_id,
+                    "gdacs_severity": str(params.get("cat", params.get("level", "N/A"))),
+                    "gdacs_population": str(params.get("pop", 0)),
+                    "disaster_type_mapped": dtype,
+                    "mock": True,
+                },
+            }
+        )
 
     logger.info("Mock GDACS events generated: %d events", len(events))
     return events
@@ -369,7 +382,8 @@ def generate_mock_gdacs_events(count: Optional[int] = None) -> List[Dict[str, An
 # 5. FIRMS FIRE HOTSPOT MOCK GENERATOR
 # ────────────────────────────────────────────────────────────────
 
-def generate_mock_fire_hotspots(count: Optional[int] = None) -> List[Dict[str, Any]]:
+
+def generate_mock_fire_hotspots(count: int | None = None) -> list[dict[str, Any]]:
     """
     Generate realistic satellite fire hotspot observations in the
     same format as FIRMSService._parse_csv() output.
@@ -385,7 +399,7 @@ def generate_mock_fire_hotspots(count: Optional[int] = None) -> List[Dict[str, A
 
     fire_regions = [r for r in DISASTER_REGIONS if "wildfire" in r[4]]
     observations = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for _ in range(count):
         region = random.choice(fire_regions)
@@ -400,26 +414,28 @@ def generate_mock_fire_hotspots(count: Optional[int] = None) -> List[Dict[str, A
         acq_date = now.strftime("%Y-%m-%d")
         acq_time = f"{now.hour:02d}{now.minute:02d}"
 
-        observations.append({
-            "id": str(uuid4()),
-            "source": "mock_firms",
-            "external_id": f"firms-{lat:.4f}-{lon:.4f}-{acq_date}-{acq_time}-{uuid4().hex[:6]}",
-            "latitude": round(lat, 4),
-            "longitude": round(lon, 4),
-            "brightness": brightness,
-            "frp": frp,
-            "confidence": confidence,
-            "satellite": satellite,
-            "instrument": "VIIRS",
-            "acq_datetime": now.isoformat(),
-            "daynight": random.choice(["D", "N"]),
-            "raw_payload": {
-                "mock": True,
+        observations.append(
+            {
+                "id": str(uuid4()),
+                "source": "mock_firms",
+                "external_id": f"firms-{lat:.4f}-{lon:.4f}-{acq_date}-{acq_time}-{uuid4().hex[:6]}",
+                "latitude": round(lat, 4),
+                "longitude": round(lon, 4),
                 "brightness": brightness,
                 "frp": frp,
-                "region": region[0],
-            },
-        })
+                "confidence": confidence,
+                "satellite": satellite,
+                "instrument": "VIIRS",
+                "acq_datetime": now.isoformat(),
+                "daynight": random.choice(["D", "N"]),
+                "raw_payload": {
+                    "mock": True,
+                    "brightness": brightness,
+                    "frp": frp,
+                    "region": region[0],
+                },
+            }
+        )
 
     logger.info("Mock fire hotspots generated: %d observations", len(observations))
     return observations
@@ -443,7 +459,7 @@ _SOCIAL_SOS_TEMPLATES = [
 ]
 
 
-def generate_mock_social_signals(count: Optional[int] = None) -> List[Dict[str, Any]]:
+def generate_mock_social_signals(count: int | None = None) -> list[dict[str, Any]]:
     """
     Generate realistic social media SOS signals in the same
     format as SocialMediaService._tweets_to_events() output.
@@ -458,7 +474,7 @@ def generate_mock_social_signals(count: Optional[int] = None) -> List[Dict[str, 
         return []
 
     events = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for _ in range(count):
         region = random.choice(DISASTER_REGIONS)
@@ -479,28 +495,30 @@ def generate_mock_social_signals(count: Optional[int] = None) -> List[Dict[str, 
 
         severity = _estimate_social_severity(text)
 
-        events.append({
-            "external_id": f"twitter-{tweet_id}",
-            "event_type": "social_sos",
-            "title": f"Social SOS: {text[:80]}{'...' if len(text) > 80 else ''}",
-            "description": text,
-            "severity": severity,
-            "latitude": round(lat, 4),
-            "longitude": round(lon, 4),
-            "location_name": region[0],
-            "raw_payload": {
-                "tweet_id": tweet_id,
-                "author_id": str(random.randint(10**8, 10**9)),
-                "created_at": now.isoformat(),
-                "text": text,
-                "public_metrics": {
-                    "retweet_count": random.randint(0, 5000),
-                    "reply_count": random.randint(0, 500),
-                    "like_count": random.randint(0, 10000),
+        events.append(
+            {
+                "external_id": f"twitter-{tweet_id}",
+                "event_type": "social_sos",
+                "title": f"Social SOS: {text[:80]}{'...' if len(text) > 80 else ''}",
+                "description": text,
+                "severity": severity,
+                "latitude": round(lat, 4),
+                "longitude": round(lon, 4),
+                "location_name": region[0],
+                "raw_payload": {
+                    "tweet_id": tweet_id,
+                    "author_id": str(random.randint(10**8, 10**9)),
+                    "created_at": now.isoformat(),
+                    "text": text,
+                    "public_metrics": {
+                        "retweet_count": random.randint(0, 5000),
+                        "reply_count": random.randint(0, 500),
+                        "like_count": random.randint(0, 10000),
+                    },
+                    "mock": True,
                 },
-                "mock": True,
-            },
-        })
+            }
+        )
 
     logger.info("Mock social signals generated: %d events", len(events))
     return events

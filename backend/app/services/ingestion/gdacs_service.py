@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import httpx
 
 from app.core.config import ingestion_config as cfg
-from app.services.ingestion.mock_data_service import generate_mock_gdacs_events
 from app.services.ingestion import memory_store
+from app.services.ingestion.mock_data_service import generate_mock_gdacs_events
 
 logger = logging.getLogger("ingestion.gdacs")
 
@@ -29,7 +29,7 @@ GDACS_NS = {
 }
 
 # GDACS event type → our DisasterType mapping
-_TYPE_MAP: Dict[str, str] = {
+_TYPE_MAP: dict[str, str] = {
     "EQ": "earthquake",
     "TC": "hurricane",
     "FL": "flood",
@@ -40,7 +40,7 @@ _TYPE_MAP: Dict[str, str] = {
 }
 
 # GDACS alert level → our severity
-_SEVERITY_MAP: Dict[str, str] = {
+_SEVERITY_MAP: dict[str, str] = {
     "Red": "critical",
     "Orange": "high",
     "Green": "medium",
@@ -53,7 +53,7 @@ class GDACSService:
     def __init__(self) -> None:
         self.feed_url = cfg.GDACS_RSS_URL
 
-    async def poll(self) -> List[Dict[str, Any]]:
+    async def poll(self) -> list[dict[str, Any]]:
         """
         Fetch the GDACS RSS feed, parse new alerts, and store as ingested_events.
         Falls back to mock data if the feed is unreachable.
@@ -83,9 +83,9 @@ class GDACSService:
             resp.raise_for_status()
             return resp.text
 
-    def _parse_feed(self, xml_text: str) -> List[Dict[str, Any]]:
+    def _parse_feed(self, xml_text: str) -> list[dict[str, Any]]:
         root = ET.fromstring(xml_text)
-        items: List[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
 
         for item in root.findall(".//item"):
             try:
@@ -97,7 +97,7 @@ class GDACSService:
 
         return items
 
-    def _parse_item(self, item: ET.Element) -> Optional[Dict[str, Any]]:
+    def _parse_item(self, item: ET.Element) -> dict[str, Any] | None:
         title = self._text(item, "title")
         description = self._text(item, "description")
         link = self._text(item, "link")
@@ -142,7 +142,7 @@ class GDACSService:
             },
         }
 
-    async def _deduplicate_and_store(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _deduplicate_and_store(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Insert only events whose external_id is not already present (in-memory)."""
         if not items:
             return []
@@ -154,17 +154,19 @@ class GDACSService:
             ext_id = item.get("external_id")
             if ext_id and memory_store.event_exists(ext_id):
                 continue
-            rows.append({
-                "id": str(uuid4()),
-                "source_id": source_id,
-                **item,
-                "ingested_at": datetime.now(timezone.utc).isoformat(),
-            })
+            rows.append(
+                {
+                    "id": str(uuid4()),
+                    "source_id": source_id,
+                    **item,
+                    "ingested_at": datetime.now(UTC).isoformat(),
+                }
+            )
 
         return memory_store.add_ingested_events(rows)
 
     @staticmethod
-    def auto_create_disaster_payload(event: Dict[str, Any]) -> Dict[str, Any]:
+    def auto_create_disaster_payload(event: dict[str, Any]) -> dict[str, Any]:
         """
         Build a disaster-create payload from an ingested GDACS event.
         To be used by the orchestrator when auto-creating disaster records.
@@ -176,7 +178,7 @@ class GDACSService:
             "title": event.get("title", "GDACS Alert"),
             "description": event.get("description", ""),
             "status": "active",
-            "start_date": datetime.now(timezone.utc).isoformat(),
+            "start_date": datetime.now(UTC).isoformat(),
             "latitude": event.get("latitude"),
             "longitude": event.get("longitude"),
         }
@@ -184,6 +186,6 @@ class GDACSService:
     # ── helpers ─────────────────────────────────────────────────────
 
     @staticmethod
-    def _text(el: ET.Element, tag: str, ns: Optional[Dict[str, str]] = None) -> Optional[str]:
+    def _text(el: ET.Element, tag: str, ns: dict[str, str] | None = None) -> str | None:
         child = el.find(tag, ns) if ns else el.find(tag)
         return child.text.strip() if child is not None and child.text else None

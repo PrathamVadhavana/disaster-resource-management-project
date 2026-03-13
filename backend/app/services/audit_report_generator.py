@@ -18,8 +18,7 @@ from __future__ import annotations
 import io
 import logging
 import os
-import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger("audit_report_generator")
@@ -58,7 +57,9 @@ class CausalAuditReportGenerator:
 
         # --- 4. Top counterfactual interventions ---
         top_interventions = cm.top_counterfactual_interventions(
-            observation, outcome_var="casualties", k=3,
+            observation,
+            outcome_var="casualties",
+            k=3,
         )
 
         # --- 5. Render PDF ---
@@ -112,7 +113,7 @@ class CausalAuditReportGenerator:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import cm, mm
+        from reportlab.lib.units import cm
         from reportlab.platypus import (
             Paragraph,
             SimpleDocTemplate,
@@ -161,12 +162,14 @@ class CausalAuditReportGenerator:
         disaster_id = disaster.get("id", "N/A")
         disaster_name = disaster.get("name", disaster.get("title", "Unknown Disaster"))
         story.append(Paragraph("Causal Audit Report", title_style))
-        story.append(Paragraph(
-            f"<b>Disaster:</b> {disaster_name} &nbsp;|&nbsp; "
-            f"<b>ID:</b> {disaster_id} &nbsp;|&nbsp; "
-            f"<b>Generated:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-            body_style,
-        ))
+        story.append(
+            Paragraph(
+                f"<b>Disaster:</b> {disaster_name} &nbsp;|&nbsp; "
+                f"<b>ID:</b> {disaster_id} &nbsp;|&nbsp; "
+                f"<b>Generated:</b> {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
+                body_style,
+            )
+        )
         story.append(Spacer(1, 12))
 
         # --- Section 1: Disaster Summary ---
@@ -183,58 +186,68 @@ class CausalAuditReportGenerator:
             ["Economic Damage (USD)", f"${observation['economic_damage_usd']:,.0f}"],
         ]
         t = Table(summary_data, colWidths=[200, 200])
-        t.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 10),
-            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-            ("FONTSIZE", (0, 1), (-1, -1), 9),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]))
+        t.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 10),
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+                    ("FONTSIZE", (0, 1), (-1, -1), 9),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
         story.append(t)
         story.append(Spacer(1, 16))
 
         # --- Section 2: Root Causes (Casualties) ---
         story.append(Paragraph("2. Root Causes — Casualties (ranked by effect size)", heading_style))
-        story.append(Paragraph(
-            "Each row shows the Average Treatment Effect (ATE) of a causal factor on casualties. "
-            "A positive ATE means increasing that factor increases casualties.",
-            body_style,
-        ))
+        story.append(
+            Paragraph(
+                "Each row shows the Average Treatment Effect (ATE) of a causal factor on casualties. "
+                "A positive ATE means increasing that factor increases casualties.",
+                body_style,
+            )
+        )
         story.append(Spacer(1, 6))
 
         rc_data = [["Rank", "Causal Factor", "ATE", "95% CI", "Refutation"]]
         for i, rc in enumerate(root_causes_casualties, 1):
             ci_str = f"[{rc.confidence_interval[0]:.2f}, {rc.confidence_interval[1]:.2f}]"
-            ref_str = "✓ Passed" if rc.refutation_passed else (
-                "✗ Failed" if rc.refutation_passed is False else "—"
+            ref_str = "✓ Passed" if rc.refutation_passed else ("✗ Failed" if rc.refutation_passed is False else "—")
+            rc_data.append(
+                [
+                    str(i),
+                    rc.treatment.replace("_", " ").title(),
+                    f"{rc.ate:.4f}",
+                    ci_str,
+                    ref_str,
+                ]
             )
-            rc_data.append([
-                str(i),
-                rc.treatment.replace("_", " ").title(),
-                f"{rc.ate:.4f}",
-                ci_str,
-                ref_str,
-            ])
 
         t2 = Table(rc_data, colWidths=[40, 160, 80, 120, 80])
-        t2.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#283593")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 9),
-            ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ("ALIGN", (2, 0), (4, -1), "CENTER"),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-            ("FONTSIZE", (0, 1), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
+        t2.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#283593")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 9),
+                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                    ("ALIGN", (2, 0), (4, -1), "CENTER"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+                    ("FONTSIZE", (0, 1), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
         story.append(t2)
         story.append(Spacer(1, 16))
 
@@ -244,46 +257,59 @@ class CausalAuditReportGenerator:
         rc_dmg_data = [["Rank", "Causal Factor", "ATE (USD)", "95% CI"]]
         for i, rc in enumerate(root_causes_damage, 1):
             ci_str = f"[${rc.confidence_interval[0]:,.0f}, ${rc.confidence_interval[1]:,.0f}]"
-            rc_dmg_data.append([
-                str(i),
-                rc.treatment.replace("_", " ").title(),
-                f"${rc.ate:,.2f}",
-                ci_str,
-            ])
+            rc_dmg_data.append(
+                [
+                    str(i),
+                    rc.treatment.replace("_", " ").title(),
+                    f"${rc.ate:,.2f}",
+                    ci_str,
+                ]
+            )
 
         t3 = Table(rc_dmg_data, colWidths=[40, 160, 120, 160])
-        t3.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#283593")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 9),
-            ("ALIGN", (0, 0), (0, -1), "CENTER"),
-            ("ALIGN", (2, 0), (3, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-            ("FONTSIZE", (0, 1), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ]))
+        t3.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#283593")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 9),
+                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                    ("ALIGN", (2, 0), (3, -1), "RIGHT"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+                    ("FONTSIZE", (0, 1), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
         story.append(t3)
         story.append(Spacer(1, 16))
 
         # --- Section 4: Top 3 Counterfactual Interventions ---
-        story.append(Paragraph(
-            "4. Top Counterfactual Interventions (Casualty Reduction)", heading_style,
-        ))
-        story.append(Paragraph(
-            "These are the single-variable interventions that would have reduced "
-            "casualties the most, based on causal effect estimation.",
-            body_style,
-        ))
+        story.append(
+            Paragraph(
+                "4. Top Counterfactual Interventions (Casualty Reduction)",
+                heading_style,
+            )
+        )
+        story.append(
+            Paragraph(
+                "These are the single-variable interventions that would have reduced "
+                "casualties the most, based on causal effect estimation.",
+                body_style,
+            )
+        )
         story.append(Spacer(1, 6))
 
         for i, intv in enumerate(top_interventions, 1):
-            story.append(Paragraph(
-                f"<b>#{i}: {intv['variable'].replace('_', ' ').title()}</b>",
-                body_style,
-            ))
+            story.append(
+                Paragraph(
+                    f"<b>#{i}: {intv['variable'].replace('_', ' ').title()}</b>",
+                    body_style,
+                )
+            )
             intv_data = [
                 ["Current Value", "Proposed Value", "Est. Casualties Reduced"],
                 [
@@ -293,32 +319,40 @@ class CausalAuditReportGenerator:
                 ],
             ]
             ti = Table(intv_data, colWidths=[140, 140, 160])
-            ti.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4caf50")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 9),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("FONTSIZE", (0, 1), (-1, -1), 9),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]))
+            ti.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4caf50")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                        ("FONTSIZE", (0, 0), (-1, 0), 9),
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                        ("FONTSIZE", (0, 1), (-1, -1), 9),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
             story.append(ti)
-            story.append(Paragraph(
-                f"<i>{intv['explanation']}</i>",
-                ParagraphStyle("Explanation", parent=body_style, fontSize=8, textColor=colors.HexColor("#555555")),
-            ))
+            story.append(
+                Paragraph(
+                    f"<i>{intv['explanation']}</i>",
+                    ParagraphStyle("Explanation", parent=body_style, fontSize=8, textColor=colors.HexColor("#555555")),
+                )
+            )
             story.append(Spacer(1, 8))
 
         # --- Footer ---
         story.append(Spacer(1, 24))
-        story.append(Paragraph(
-            "This report was auto-generated by the Causal AI Audit Module using DoWhy "
-            "backdoor adjustment. Estimates are based on observational data and domain-encoded "
-            "causal assumptions. Confidence intervals are bootstrap-derived (200 replications).",
-            small_style,
-        ))
+        story.append(
+            Paragraph(
+                "This report was auto-generated by the Causal AI Audit Module using DoWhy "
+                "backdoor adjustment. Estimates are based on observational data and domain-encoded "
+                "causal assumptions. Confidence intervals are bootstrap-derived (200 replications).",
+                small_style,
+            )
+        )
 
         doc.build(story)
         return buf.getvalue()
@@ -329,12 +363,13 @@ class CausalAuditReportGenerator:
 
     async def _upload_pdf(self, disaster_id: str, pdf_bytes: bytes) -> str:
         """Upload PDF to Supabase Storage or save locally."""
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         filename = f"causal_audit_{disaster_id}_{timestamp}.pdf"
 
         # Try Supabase Storage
         try:
             from app.db_client import get_supabase_client
+
             sb = get_supabase_client()
             storage_path = f"causal_reports/{filename}"
             sb.storage.from_("reports").upload(
@@ -347,7 +382,8 @@ class CausalAuditReportGenerator:
             return url_resp
         except Exception as exc:
             logger.warning(
-                "Supabase Storage upload failed (%s), saving locally", exc,
+                "Supabase Storage upload failed (%s), saving locally",
+                exc,
             )
 
         # Fallback: save to local reports directory
@@ -372,12 +408,18 @@ class CausalAuditReportGenerator:
         from app.database import db
 
         try:
-            await db.table("causal_audit_reports").insert({
-                "disaster_id": disaster_id,
-                "report_url": report_url,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "status": "completed",
-            }).async_execute()
+            await (
+                db.table("causal_audit_reports")
+                .insert(
+                    {
+                        "disaster_id": disaster_id,
+                        "report_url": report_url,
+                        "generated_at": datetime.now(UTC).isoformat(),
+                        "status": "completed",
+                    }
+                )
+                .async_execute()
+            )
         except Exception as exc:
             logger.error("Failed to store report reference: %s", exc)
 
@@ -385,6 +427,7 @@ class CausalAuditReportGenerator:
 # ---------------------------------------------------------------------------
 # Hook for auto-generating reports on status change to "resolved"
 # ---------------------------------------------------------------------------
+
 
 async def on_disaster_resolved(disaster: dict) -> str | None:
     """Call this when a disaster status transitions to ``resolved``.

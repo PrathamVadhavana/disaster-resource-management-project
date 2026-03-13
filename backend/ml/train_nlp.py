@@ -18,16 +18,15 @@ Output:
   backend/ml/models/label_map.json               (label ↔ id mapping)
   Prints sklearn classification report (precision / recall / F1 per class).
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 import random
 import sys
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -47,65 +46,65 @@ NUM_LABELS = len(LABEL_MAP)
 # CrisisNLP original labels → our 4-class mapping
 CRISISNLP_LABEL_MAP: dict[str, str] = {
     # Infrastructure / Utilities → medium
-    "infrastructure_and_utilities_damage":        "medium",
-    "infrastructure damage":                      "medium",
+    "infrastructure_and_utilities_damage": "medium",
+    "infrastructure damage": "medium",
     # Injured / dead / found → critical
-    "injured_or_dead_people":                     "critical",
-    "injured or dead people":                     "critical",
-    "dead":                                       "critical",
-    "deaths":                                     "critical",
-    "injured":                                    "high",
+    "injured_or_dead_people": "critical",
+    "injured or dead people": "critical",
+    "dead": "critical",
+    "deaths": "critical",
+    "injured": "high",
     # Missing / trapped → critical
-    "missing_trapped_or_found_people":            "critical",
-    "missing, trapped, or found people":          "critical",
-    "missing people":                             "critical",
+    "missing_trapped_or_found_people": "critical",
+    "missing, trapped, or found people": "critical",
+    "missing people": "critical",
     # Displaced → high
-    "displaced_and_evacuations":                  "high",
-    "displaced people and evacuations":           "high",
-    "displaced":                                  "high",
-    "evacuation":                                 "high",
+    "displaced_and_evacuations": "high",
+    "displaced people and evacuations": "high",
+    "displaced": "high",
+    "evacuation": "high",
     # Donation / volunteer → low
-    "donation_and_volunteering":                  "low",
-    "donations and volunteering":                 "low",
-    "money":                                      "low",
-    "volunteer":                                  "low",
-    "donation_needs_or_offers_or_டn_response":    "low",
+    "donation_and_volunteering": "low",
+    "donations and volunteering": "low",
+    "money": "low",
+    "volunteer": "low",
+    "donation_needs_or_offers_or_டn_response": "low",
     # Sympathy / emotional → low
-    "sympathy_and_emotional_support":             "low",
-    "sympathy and emotional support":             "low",
-    "sympathy":                                   "low",
-    "prayers":                                    "low",
+    "sympathy_and_emotional_support": "low",
+    "sympathy and emotional support": "low",
+    "sympathy": "low",
+    "prayers": "low",
     # Caution / advice → medium
-    "caution_and_advice":                         "medium",
-    "caution and advice":                         "medium",
-    "advice":                                     "medium",
-    "warnings":                                   "medium",
+    "caution_and_advice": "medium",
+    "caution and advice": "medium",
+    "advice": "medium",
+    "warnings": "medium",
     # Other useful → medium
-    "other_useful_info":                          "medium",
-    "other useful information":                   "medium",
-    "useful information":                         "medium",
-    "informative":                                "medium",
-    "information":                                "medium",
+    "other_useful_info": "medium",
+    "other useful information": "medium",
+    "useful information": "medium",
+    "informative": "medium",
+    "information": "medium",
     # Not labelled / irrelevant → low
-    "not_related_or_irrelevant":                  "low",
-    "not related or irrelevant":                  "low",
-    "not applicable":                             "low",
-    "irrelevant":                                 "low",
-    "not related":                                "low",
-    "not_labeled":                                "low",
+    "not_related_or_irrelevant": "low",
+    "not related or irrelevant": "low",
+    "not applicable": "low",
+    "irrelevant": "low",
+    "not related": "low",
+    "not_labeled": "low",
     # Requests → high
-    "requests_or_urgent_needs":                   "high",
-    "needs":                                      "high",
-    "urgent needs":                               "critical",
-    "request":                                    "high",
-    "search and rescue":                          "critical",
+    "requests_or_urgent_needs": "high",
+    "needs": "high",
+    "urgent needs": "critical",
+    "request": "high",
+    "search and rescue": "critical",
     # Affected individuals → high
-    "affected_individuals":                       "high",
-    "affected individuals":                       "high",
-    "affected":                                   "high",
+    "affected_individuals": "high",
+    "affected individuals": "high",
+    "affected": "high",
     # Personal → low
-    "personal":                                   "low",
-    "personal only":                              "low",
+    "personal": "low",
+    "personal only": "low",
 }
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -116,6 +115,7 @@ MODEL_DIR = BASE_DIR / "models" / "distilbert-crisis-urgency"
 # ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
+
 
 def load_crisisnlp_data(data_dir: Path) -> pd.DataFrame:
     """Load and merge all CrisisNLP CSV files into a single DataFrame.
@@ -128,8 +128,7 @@ def load_crisisnlp_data(data_dir: Path) -> pd.DataFrame:
     csv_files = list(data_dir.rglob("*.csv"))
     if not csv_files:
         raise FileNotFoundError(
-            f"No CSV files found in {data_dir}. "
-            "Download CrisisNLP data first — see docstring at the top of this file."
+            f"No CSV files found in {data_dir}. Download CrisisNLP data first — see docstring at the top of this file."
         )
     logger.info("Found %d CSV files in %s", len(csv_files), data_dir)
 
@@ -254,13 +253,19 @@ def generate_synthetic_data(n_per_class: int = 500) -> pd.DataFrame:
             base = random.choice(tmpls)
             # Add slight variation
             noise_words = [
-                "please", "urgently", "ASAP", "help", "SOS",
-                "desperate", "emergency", "request", "need", "",
+                "please",
+                "urgently",
+                "ASAP",
+                "help",
+                "SOS",
+                "desperate",
+                "emergency",
+                "request",
+                "need",
+                "",
             ]
             prefix = random.choice(["", "", "", f"{random.choice(noise_words)} - "])
-            suffix = random.choice(
-                ["", "", f" ({random.randint(1, 20)} people)", " #disaster", " #help"]
-            )
+            suffix = random.choice(["", "", f" ({random.randint(1, 20)} people)", " #disaster", " #help"])
             rows.append({"text": f"{prefix}{base}{suffix}", "label": label})
 
     df = pd.DataFrame(rows)
@@ -276,9 +281,10 @@ def generate_synthetic_data(n_per_class: int = 500) -> pd.DataFrame:
 # Training
 # ---------------------------------------------------------------------------
 
+
 def train(
-    data_dir: Optional[Path] = None,
-    output_dir: Optional[Path] = None,
+    data_dir: Path | None = None,
+    output_dir: Path | None = None,
     synthetic: bool = False,
     epochs: int = 4,
     batch_size: int = 16,
@@ -292,18 +298,17 @@ def train(
     # ── Guard: check torch + transformers are installed ──
     try:
         import torch
+        from datasets import Dataset
         from transformers import (
-            DistilBertTokenizerFast,
             DistilBertForSequenceClassification,
+            DistilBertTokenizerFast,
+            EarlyStoppingCallback,
             Trainer,
             TrainingArguments,
-            EarlyStoppingCallback,
         )
-        from datasets import Dataset
     except ImportError as e:
         logger.error(
-            "Missing dependency: %s\n"
-            "Install with: pip install torch transformers datasets",
+            "Missing dependency: %s\nInstall with: pip install torch transformers datasets",
             e,
         )
         sys.exit(1)
@@ -333,9 +338,7 @@ def train(
     df["label_id"] = df["label_id"].astype(int)
 
     # Stratified split
-    train_df, test_df = train_test_split(
-        df, test_size=test_size, random_state=seed, stratify=df["label_id"]
-    )
+    train_df, test_df = train_test_split(df, test_size=test_size, random_state=seed, stratify=df["label_id"])
     logger.info("Train: %d  |  Test: %d", len(train_df), len(test_df))
 
     # ── Tokeniser ──
@@ -458,10 +461,9 @@ def train(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Fine-tune DistilBERT on CrisisNLP for urgency classification"
-    )
+    parser = argparse.ArgumentParser(description="Fine-tune DistilBERT on CrisisNLP for urgency classification")
     parser.add_argument(
         "--data-dir",
         type=Path,

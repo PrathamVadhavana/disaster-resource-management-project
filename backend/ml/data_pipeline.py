@@ -6,15 +6,14 @@ ml/data_pipeline.py – Data pipeline for Temporal Fusion Transformer severity f
 3. Build a time-series dataset suitable for pytorch-forecasting
 4. Cyclical encoding for temporal features (hour, day-of-week, month)
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -151,7 +150,7 @@ def _compute_severity_score(row: pd.Series) -> int:
         return 2  # high
     if deaths >= 10 or affected >= 10_000:
         return 1  # medium
-    return 0       # low
+    return 0  # low
 
 
 # ─── Open-Meteo Weather Fetcher ─────────────────────────────────────────────
@@ -163,7 +162,7 @@ async def fetch_weather_openmeteo(
     start_date: datetime,
     hours: int = LOOKBACK_HOURS,
     retries: int = 3,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """Fetch hourly weather from the Open-Meteo Historical Weather API.
 
     Returns a DataFrame with columns: datetime, temperature_2m,
@@ -196,13 +195,15 @@ async def fetch_weather_openmeteo(
                 logger.warning("No hourly data returned for (%.2f, %.2f)", latitude, longitude)
                 return None
 
-            weather_df = pd.DataFrame({
-                "datetime": pd.to_datetime(times),
-                "temperature_2m": hourly.get("temperature_2m", [None] * len(times)),
-                "wind_speed_10m": hourly.get("wind_speed_10m", [None] * len(times)),
-                "precipitation": hourly.get("precipitation", [None] * len(times)),
-                "relative_humidity_2m": hourly.get("relative_humidity_2m", [None] * len(times)),
-            })
+            weather_df = pd.DataFrame(
+                {
+                    "datetime": pd.to_datetime(times),
+                    "temperature_2m": hourly.get("temperature_2m", [None] * len(times)),
+                    "wind_speed_10m": hourly.get("wind_speed_10m", [None] * len(times)),
+                    "precipitation": hourly.get("precipitation", [None] * len(times)),
+                    "relative_humidity_2m": hourly.get("relative_humidity_2m", [None] * len(times)),
+                }
+            )
 
             # Trim to exactly the lookback window
             weather_df = weather_df.tail(hours).reset_index(drop=True)
@@ -213,7 +214,7 @@ async def fetch_weather_openmeteo(
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                wait = 2 ** attempt
+                wait = 2**attempt
                 logger.warning("Rate limited by Open-Meteo, retrying in %ds…", wait)
                 await asyncio.sleep(wait)
             else:
@@ -284,7 +285,7 @@ async def build_tft_dataset(
     if len(events_df) > max_events:
         events_df = events_df.sample(n=max_events, random_state=42).reset_index(drop=True)
 
-    all_rows: List[pd.DataFrame] = []
+    all_rows: list[pd.DataFrame] = []
     logger.info("Fetching weather for %d events…", len(events_df))
 
     for idx, event in events_df.iterrows():
@@ -341,8 +342,7 @@ def _generate_synthetic_events(n_events: int = 200) -> pd.DataFrame:
     """Generate synthetic disaster events for pipeline testing."""
     rng = np.random.RandomState(42)
 
-    types = ["earthquake", "flood", "hurricane", "tornado", "wildfire",
-             "tsunami", "drought", "landslide", "volcano"]
+    types = ["earthquake", "flood", "hurricane", "tornado", "wildfire", "tsunami", "drought", "landslide", "volcano"]
 
     rows = []
     for i in range(n_events):
@@ -352,29 +352,31 @@ def _generate_synthetic_events(n_events: int = 200) -> pd.DataFrame:
         month = rng.randint(1, 13)
         day = rng.randint(1, 29)
         try:
-            start = datetime(year, month, day, tzinfo=timezone.utc)
+            start = datetime(year, month, day, tzinfo=UTC)
         except ValueError:
-            start = datetime(year, month, 1, tzinfo=timezone.utc)
+            start = datetime(year, month, 1, tzinfo=UTC)
 
         deaths = int(rng.exponential(50))
         affected = int(rng.exponential(50_000))
         sev = _compute_severity_score(pd.Series({"total_deaths": deaths, "total_affected": affected}))
 
-        rows.append({
-            "event_id": f"SYNTH-{i:04d}",
-            "disaster_type": rng.choice(types),
-            "country": "Synthetic",
-            "iso": "SYN",
-            "start_date": start,
-            "latitude": lat,
-            "longitude": lon,
-            "total_deaths": deaths,
-            "total_affected": affected,
-            "total_damage_kusd": rng.exponential(10_000),
-            "magnitude": rng.uniform(1, 9),
-            "severity_numeric": sev,
-            "severity_label": SEVERITY_INV[sev],
-        })
+        rows.append(
+            {
+                "event_id": f"SYNTH-{i:04d}",
+                "disaster_type": rng.choice(types),
+                "country": "Synthetic",
+                "iso": "SYN",
+                "start_date": start,
+                "latitude": lat,
+                "longitude": lon,
+                "total_deaths": deaths,
+                "total_affected": affected,
+                "total_damage_kusd": rng.exponential(10_000),
+                "magnitude": rng.uniform(1, 9),
+                "severity_numeric": sev,
+                "severity_label": SEVERITY_INV[sev],
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -398,7 +400,7 @@ def _generate_synthetic_dataset(output_dir: Path, n_events: int = 200) -> pd.Dat
         base_precip = severity * 3 + rng.exponential(2)
         base_humidity = 40 + severity * 10 + rng.normal(0, 5)
 
-        start_dt = datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(hours=rng.randint(0, 365 * 24))
+        start_dt = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(hours=rng.randint(0, 365 * 24))
 
         for t in range(LOOKBACK_HOURS):
             dt = start_dt + timedelta(hours=t)
@@ -413,26 +415,28 @@ def _generate_synthetic_dataset(output_dir: Path, n_events: int = 200) -> pd.Dat
             dow = dt.weekday()
             month = dt.month
 
-            all_rows.append({
-                "datetime": dt,
-                "temperature_2m": round(temp, 1),
-                "wind_speed_10m": round(wind, 1),
-                "precipitation": round(precip, 2),
-                "relative_humidity_2m": round(humidity, 1),
-                "hour_sin": round(math.sin(2 * math.pi * hour / 24), 4),
-                "hour_cos": round(math.cos(2 * math.pi * hour / 24), 4),
-                "dow_sin": round(math.sin(2 * math.pi * dow / 7), 4),
-                "dow_cos": round(math.cos(2 * math.pi * dow / 7), 4),
-                "month_sin": round(math.sin(2 * math.pi * month / 12), 4),
-                "month_cos": round(math.cos(2 * math.pi * month / 12), 4),
-                "group_id": group_id,
-                "time_idx": t,
-                "severity_numeric": severity,
-                "severity_label": SEVERITY_INV[severity],
-                "disaster_type": disaster_type,
-                "latitude": round(lat, 4),
-                "longitude": round(lon, 4),
-            })
+            all_rows.append(
+                {
+                    "datetime": dt,
+                    "temperature_2m": round(temp, 1),
+                    "wind_speed_10m": round(wind, 1),
+                    "precipitation": round(precip, 2),
+                    "relative_humidity_2m": round(humidity, 1),
+                    "hour_sin": round(math.sin(2 * math.pi * hour / 24), 4),
+                    "hour_cos": round(math.cos(2 * math.pi * hour / 24), 4),
+                    "dow_sin": round(math.sin(2 * math.pi * dow / 7), 4),
+                    "dow_cos": round(math.cos(2 * math.pi * dow / 7), 4),
+                    "month_sin": round(math.sin(2 * math.pi * month / 12), 4),
+                    "month_cos": round(math.cos(2 * math.pi * month / 12), 4),
+                    "group_id": group_id,
+                    "time_idx": t,
+                    "severity_numeric": severity,
+                    "severity_label": SEVERITY_INV[severity],
+                    "disaster_type": disaster_type,
+                    "latitude": round(lat, 4),
+                    "longitude": round(lon, 4),
+                }
+            )
 
     dataset = pd.DataFrame(all_rows)
     out_path = output_dir / "tft_dataset.parquet"

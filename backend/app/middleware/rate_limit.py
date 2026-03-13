@@ -10,20 +10,22 @@ shared across all workers via Redis. Otherwise, limits are per-process only.
 
 import logging
 import os
-from fastapi import FastAPI, Request
+
+from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
 try:
     from slowapi import Limiter, _rate_limit_exceeded_handler
-    from slowapi.util import get_remote_address
     from slowapi.errors import RateLimitExceeded
+    from slowapi.util import get_remote_address
 
     # Check for Redis backend
     _redis_url = os.getenv("REDIS_URL", "")
     if _redis_url:
         try:
             from slowapi.util import get_remote_address
+
             limiter = Limiter(
                 key_func=get_remote_address,
                 storage_uri=_redis_url,

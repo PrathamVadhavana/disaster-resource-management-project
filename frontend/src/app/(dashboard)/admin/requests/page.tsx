@@ -16,6 +16,7 @@ const STATUS_COLORS: Record<string, { bg: string; text: string; ring: string; ic
     pending: { bg: 'bg-amber-500/10', text: 'text-amber-600 dark:text-amber-400', ring: 'ring-amber-500/20', icon: Clock },
     approved: { bg: 'bg-green-500/10', text: 'text-green-600 dark:text-green-400', ring: 'ring-green-500/20', icon: CheckCircle2 },
     under_review: { bg: 'bg-indigo-500/10', text: 'text-indigo-600 dark:text-indigo-400', ring: 'ring-indigo-500/20', icon: Eye },
+    availability_submitted: { bg: 'bg-cyan-500/10', text: 'text-cyan-600 dark:text-cyan-400', ring: 'ring-cyan-500/20', icon: FileCheck },
     assigned: { bg: 'bg-blue-500/10', text: 'text-blue-600 dark:text-blue-400', ring: 'ring-blue-500/20', icon: User },
     in_progress: { bg: 'bg-purple-500/10', text: 'text-purple-600 dark:text-purple-400', ring: 'ring-purple-500/20', icon: TrendingUp },
     delivered: { bg: 'bg-teal-500/10', text: 'text-teal-600 dark:text-teal-400', ring: 'ring-teal-500/20', icon: Truck },
@@ -116,7 +117,7 @@ function AuditTrailTimeline({ requestId }: { requestId: string }) {
     )
 }
 
-function NgoSubmissionsPanel({ requestId, status, onAssign }: { requestId: string; status: string; onAssign: (ngoId: string) => void }) {
+function NgoSubmissionsPanel({ requestId, status, onAssign }: { requestId: string; status: string; onAssign: (ngoId: string, role: string) => void }) {
     const { data, isLoading } = useQuery({
         queryKey: ['ngo-submissions', requestId],
         queryFn: () => api.getRequestNgoSubmissions(requestId),
@@ -157,7 +158,7 @@ function NgoSubmissionsPanel({ requestId, status, onAssign }: { requestId: strin
                             </div>
                             {(status === 'availability_submitted' || status === 'under_review') && (
                                 <button
-                                    onClick={() => onAssign(s.ngo_id)}
+                                    onClick={() => onAssign(s.ngo_id, s.role || 'ngo')}
                                     className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:opacity-90 shadow-sm"
                                 >
                                     Assign
@@ -165,10 +166,13 @@ function NgoSubmissionsPanel({ requestId, status, onAssign }: { requestId: strin
                             )}
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-xs">
-                            {s.metadata?.available_quantity && (
+                                {(s.metadata?.available_quantity || (s.metadata?.resource_items?.length > 0)) && (
                                 <div>
                                     <span className="text-slate-400">Quantity: </span>
-                                    <span className="font-semibold text-slate-700 dark:text-slate-300">{s.metadata.available_quantity}</span>
+                                    <span className="font-semibold text-slate-700 dark:text-slate-300">
+                                        {s.metadata.available_quantity ??
+                                            s.metadata.resource_items?.reduce((sum: number, ri: any) => sum + (ri.quantity || 0), 0)}
+                                    </span>
                                 </div>
                             )}
                             {s.metadata?.estimated_delivery_time && (
@@ -626,10 +630,10 @@ export default function AdminRequestsPage() {
                             )}
 
                             {/* NGO Availability Submissions */}
-                            <NgoSubmissionsPanel requestId={selectedRequest.id} status={selectedRequest.status} onAssign={(ngoId: string) => {
+                            <NgoSubmissionsPanel requestId={selectedRequest.id} status={selectedRequest.status} onAssign={(ngoId: string, role: string) => {
                                 actionMutation.mutate({
                                     requestId: selectedRequest.id,
-                                    data: { action: 'approve', assigned_to: ngoId }
+                                    data: { action: 'approve', assigned_to: ngoId, assigned_role: role }
                                 })
                             }} />
 

@@ -16,14 +16,14 @@ Supabase realtime subscriptions).
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.database import db_admin
-from app.dependencies import get_current_user_id, _verify_supabase_token
+from app.dependencies import _verify_supabase_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/realtime", tags=["Realtime SSE"])
@@ -46,7 +46,7 @@ async def _event_stream(
     """Yield SSE events whenever new rows appear in the requested tables."""
     # Track the latest timestamp we've seen per table
     watermarks: dict[str, str] = {}
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     for t in tables:
         watermarks[t] = now_iso
 
@@ -57,12 +57,7 @@ async def _event_stream(
         try:
             for table in tables:
                 since = watermarks[table]
-                query = (
-                    db_admin.table(table)
-                    .select("*")
-                    .order("created_at", desc=False)
-                    .limit(50)
-                )
+                query = db_admin.table(table).select("*").order("created_at", desc=False).limit(50)
                 # For notifications, filter by user (avoid composite index
                 # requirement by NOT combining .eq() + .gte() server-side;
                 # instead we filter by created_at client-side)
@@ -126,6 +121,7 @@ async def realtime_events(
 
     if not user_id:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=401, detail="Authentication required")
 
     table_list = [t.strip() for t in tables.split(",") if t.strip()]

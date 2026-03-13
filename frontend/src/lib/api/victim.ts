@@ -78,6 +78,7 @@ export interface ResourceRequestCreate {
     longitude?: number
     address_text?: string
     attachments?: string[]
+    disaster_type?: string
 }
 
 export interface ResourceRequestUpdate {

@@ -1,4 +1,4 @@
-/**
+    /**
  * Centralised API client — barrel export consumed by every dashboard module.
  *
  * Usage:  import { api } from '@/lib/api'
@@ -54,8 +54,13 @@ async function apiFetch<T = any>(
             throw err
         }
         const body = await res.json().catch(() => ({}))
-        const err = new Error(body?.detail || `API error ${res.status}`) as any
+        const msg = (typeof body?.detail === 'string') 
+            ? body.detail 
+            : `API error ${res.status}`
+        const err = new Error(msg) as any
         err.status = res.status
+        err.detail = body?.detail
+        err.body = body
         throw err
     }
     // 204 No Content
@@ -75,7 +80,7 @@ function qs(params?: Record<string, any>): string {
 
 export const api = {
     // ━━ Disasters ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    getDisasters: (params?: { status?: string; severity?: string; type?: string; limit?: number; offset?: number }) =>
+    getDisasters: (params?: { status?: string; severity?: string; type?: string; limit?: number; offset?: number; search?: string; source?: string }) =>
         apiFetch(`/api/disasters${qs(params)}`),
 
     getDisaster: (id: string) =>
@@ -97,6 +102,12 @@ export const api = {
     createResource: (data: any) =>
         apiFetch('/api/resources', { method: 'POST', body: JSON.stringify(data) }),
 
+    updateResource: (resourceId: string, data: any) =>
+        apiFetch(`/api/resources/${resourceId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    deleteResource: (resourceId: string) =>
+        apiFetch(`/api/resources/${resourceId}`, { method: 'DELETE' }),
+
     // ━━ Predictions ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getPredictions: (params?: { disaster_id?: string; limit?: number }) =>
         apiFetch(`/api/predictions${qs(params)}`),
@@ -117,6 +128,12 @@ export const api = {
 
     updateUserRole: (userId: string, role: string, reason?: string) =>
         apiFetch(`/api/admin/users/${userId}/role`, { method: 'PATCH', body: JSON.stringify({ role, reason }) }),
+
+    reviewRoleSwitchRequest: (
+        userId: string,
+        data: { action: 'approve' | 'reject'; requested_role: string; request_id?: string; reason?: string }
+    ) =>
+        apiFetch(`/api/admin/users/${userId}/role-request/review`, { method: 'POST', body: JSON.stringify(data) }),
 
     deleteUser: (userId: string) =>
         apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' }),
@@ -145,8 +162,8 @@ export const api = {
         apiFetch(`/api/ml/sitreps/${id}`),
 
     // Natural language queries
-    askCoordinatorQuery: (query: string, userId?: string, sessionId?: string) =>
-        apiFetch('/api/ml/query', { method: 'POST', body: JSON.stringify({ query, user_id: userId, session_id: sessionId }) }),
+    askCoordinatorQuery: (query: string, userId?: string, sessionId?: string, context?: Array<{question: string, answer: string}>) =>
+        apiFetch('/api/ml/query', { method: 'POST', body: JSON.stringify({ query, user_id: userId, session_id: sessionId, context }) }),
 
     getQueryHistory: (params?: { user_id?: string; session_id?: string; limit?: number }) =>
         apiFetch(`/api/ml/query-history${qs(params)}`),
@@ -267,7 +284,7 @@ export const api = {
     getAdminRequestDetail: (requestId: string) =>
         apiFetch(`/api/admin/requests/${requestId}`),
 
-    adminRequestAction: (requestId: string, data: { action: string; rejection_reason?: string; admin_note?: string; assigned_to?: string; estimated_delivery?: string }) =>
+    adminRequestAction: (requestId: string, data: { action: 'approve' | 'reject' | 'reassign' | 'escalate' | string; rejection_reason?: string; admin_note?: string; assigned_to?: string; assigned_role?: string; estimated_delivery?: string }) =>
         apiFetch(`/api/admin/requests/${requestId}/action`, { method: 'POST', body: JSON.stringify(data) }),
 
     adminUpdateRequestStatus: (requestId: string, data: { status: string; rejection_reason?: string; assigned_to?: string; estimated_delivery?: string }) =>
@@ -473,6 +490,9 @@ export const api = {
     applyFairnessPlan: (data: { plan_index: number; disaster_id?: string }) =>
         apiFetch('/api/admin/fairness-frontier/apply', { method: 'POST', body: JSON.stringify(data) }),
 
+    getDisasterDropdownOptions: () =>
+        apiFetch('/api/disasters/dropdown/options'),
+
     getFairnessAudits: (params?: { disaster_id?: string; limit?: number }) =>
         apiFetch(`/api/admin/fairness-audit${qs(params)}`),
 
@@ -659,4 +679,11 @@ export const api = {
     // ━━ ML Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getMLHealth: () =>
         apiFetch('/api/ml/health'),
+
+    // ━━ Scheduled SitRep ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    scheduleSitrep: (data: { interval_hours: number }) =>
+        apiFetch('/api/admin/sitrep/schedule', { method: 'POST', body: JSON.stringify(data) }),
+
+    getSitrepSchedule: () =>
+        apiFetch('/api/admin/sitrep/schedule'),
 }

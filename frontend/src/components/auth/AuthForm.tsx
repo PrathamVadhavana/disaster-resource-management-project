@@ -46,12 +46,20 @@ interface AuthFormProps {
     initialView?: 'login' | 'signup';
 }
 
+interface PendingSignUpData {
+    email: string;
+    password: string;
+    fullName: string;
+    role: UserRole;
+}
+
 export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
     const [view, setView] = useState<'login' | 'signup'>(initialView);
     const [step, setStep] = useState<'CREDENTIALS' | 'VERIFICATION'>('CREDENTIALS');
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [emailToVerify, setEmailToVerify] = useState<string>('');
+    const [pendingSignUpData, setPendingSignUpData] = useState<PendingSignUpData | null>(null);
 
     const router = useRouter();
     const { signIn, signUp } = useAuth();
@@ -93,9 +101,21 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
         setError(null);
         try {
             // Use AuthProvider's signUp which handles Supabase + backend registration
-            const { error } = await signUp(data.email, data.password, data.fullName, data.role);
+            const { error, requiresEmailVerification } = await signUp(data.email, data.password, data.fullName, data.role);
             if (error) throw error;
+
+            if (!requiresEmailVerification) {
+                await finalizeVerificationWithCurrentSession();
+                return;
+            }
+
             setEmailToVerify(data.email);
+            setPendingSignUpData({
+                email: data.email,
+                password: data.password,
+                fullName: data.fullName,
+                role: data.role,
+            });
             setStep('VERIFICATION');
         } catch (err: any) {
             console.error('Signup error:', err);
@@ -105,11 +125,121 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
         }
     };
 
-    const onVerifyOtp = async (_data: OtpValues) => {
-        // Supabase handles email verification.
-        // After signup, the user is already signed in. Redirect to onboarding.
-        router.push('/onboarding');
-        router.refresh();
+    const onVerifyOtp = async (data: OtpValues) => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const sb = getSupabaseClient();
+            const { data: verifyData, error: verifyError } = await sb.auth.verifyOtp({
+                email: emailToVerify,
+                token: data.token.trim(),
+                type: 'signup',
+            });
+
+            if (verifyError) {
+                throw verifyError;
+            }
+
+            let sessionToken = verifyData.session?.access_token;
+            if (!sessionToken) {
+                const { data: sessionData } = await sb.auth.getSession();
+                sessionToken = sessionData.session?.access_token;
+            }
+            if (sessionToken && pendingSignUpData) {
+                const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                await fetch(`${API_BASE}/api/auth/register`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${sessionToken}`,
+                    },
+                    body: JSON.stringify({
+                        email: pendingSignUpData.email,
+                        password: pendingSignUpData.password,
+                        full_name: pendingSignUpData.fullName,
+                        role: pendingSignUpData.role,
+                    }),
+                });
+
+                // Verify email status after registration
+                try {
+                    await fetch(`${API_BASE}/api/auth/verify-email`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${sessionToken}`,
+                        },
+                    });
+                } catch (verifyErr) {
+                    console.warn('Email verification check failed:', verifyErr);
+                }
+
+                document.cookie = `sb-token=${sessionToken}; path=/; max-age=3600; SameSite=Lax`;
+            }
+
+            router.push('/onboarding');
+            router.refresh();
+        } catch (err: any) {
+            const msg = String(err?.message || '').toLowerCase();
+            if (msg.includes('expired') || msg.includes('invalid')) {
+                setError('Invalid or expired OTP. Please request a new verification email and try again.');
+            } else {
+                setError(err.message || 'Failed to verify OTP.');
+            }
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const finalizeVerificationWithCurrentSession = async () => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const sb = getSupabaseClient();
+            const { data: sessionData } = await sb.auth.getSession();
+            const sessionToken = sessionData.session?.access_token;
+
+            if (!sessionToken) {
+                setError('No verified session found yet. Please click the verification link in your email first.');
+                return;
+            }
+
+            if (pendingSignUpData) {
+                const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                await fetch(`${API_BASE}/api/auth/register`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${sessionToken}`,
+                    },
+                    body: JSON.stringify({
+                        email: pendingSignUpData.email,
+                        password: pendingSignUpData.password,
+                        full_name: pendingSignUpData.fullName,
+                        role: pendingSignUpData.role,
+                    }),
+                });
+
+                // Verify email status after registration
+                try {
+                    await fetch(`${API_BASE}/api/auth/verify-email`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${sessionToken}`,
+                        },
+                    });
+                } catch (verifyErr) {
+                    console.warn('Email verification check failed:', verifyErr);
+                }
+            }
+
+            document.cookie = `sb-token=${sessionToken}; path=/; max-age=3600; SameSite=Lax`;
+            router.push('/onboarding');
+            router.refresh();
+        } catch (err: any) {
+            setError(err.message || 'Failed to complete verification.');
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     /** Complete post-Google-sign-in steps (backend registration + redirect) */
@@ -132,6 +262,18 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
                 role: 'victim', // Default role for OAuth sign-ups
             }),
         });
+
+        // Verify email status - OAuth users are typically verified
+        try {
+            await fetch(`${API_BASE}/api/auth/verify-email`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${session.access_token}`,
+                },
+            });
+        } catch (verifyErr) {
+            console.warn('Email verification check failed:', verifyErr);
+        }
 
         // Set cookie so middleware can read the token
         document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
@@ -170,7 +312,11 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
             if (event === 'SIGNED_IN') {
                 setIsLoading(true);
                 try {
-                    await completeGoogleSignIn();
+                    if (step === 'VERIFICATION') {
+                        await finalizeVerificationWithCurrentSession();
+                    } else {
+                        await completeGoogleSignIn();
+                    }
                 } catch (err: any) {
                     console.error('Google redirect completion error:', err);
                     setError(err.message || 'Failed to complete Google sign-in');
@@ -181,12 +327,15 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
         });
         return () => subscription.unsubscribe();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [step]);
 
     const toggleView = () => {
         setView(view === 'login' ? 'signup' : 'login');
         setError(null);
         setStep('CREDENTIALS');
+        setPendingSignUpData(null);
+        setEmailToVerify('');
+        otpForm.reset({ token: '' });
     };
 
     // --- Google OAuth Button (shared between login and signup) ---
@@ -240,7 +389,7 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
                 </h2>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
                     {step === 'VERIFICATION'
-                        ? `Enter the code sent to ${emailToVerify}`
+                        ? `Check your inbox for a verification link sent to ${emailToVerify}`
                         : view === 'login'
                             ? 'Enter your credentials to access your account'
                             : 'Join the community to assist or receive aid'}
@@ -257,6 +406,9 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
             {step === 'VERIFICATION' ? (
                 // --- OTP VERIFICATION FORM ---
                 <form onSubmit={otpForm.handleSubmit(onVerifyOtp)} className="space-y-6">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 text-center">
+                        Check your inbox for a verification link. If you received a 6-digit code, you can enter it below.
+                    </p>
                     <div className="space-y-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-300">OTP Code</label>
                         <input
@@ -282,11 +434,24 @@ export default function AuthForm({ initialView = 'login' }: AuthFormProps) {
                         <button
                             type="button"
                             disabled={isLoading}
+                            onClick={finalizeVerificationWithCurrentSession}
+                            className="w-full text-sm font-bold text-emerald-600 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
+                        >
+                            I clicked the verification email link
+                        </button>
+
+                        <button
+                            type="button"
+                            disabled={isLoading}
                             onClick={async () => {
                                 setIsLoading(true);
                                 try {
                                     const sb = getSupabaseClient();
-                                    const { error } = await sb.auth.resend({ type: 'signup', email: emailToVerify });
+                                    const { error } = await sb.auth.resend({
+                                        type: 'signup',
+                                        email: emailToVerify,
+                                        options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+                                    });
                                     if (error) throw error;
                                     alert('Verification email re-sent! Please check your inbox.');
                                 } catch (err: any) {

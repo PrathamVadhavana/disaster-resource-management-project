@@ -32,17 +32,19 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 # ── Agent Roles ──────────────────────────────────────────────────────────────
 
-class AgentRole(str, Enum):
+
+class AgentRole(StrEnum):
     COORDINATOR = "coordinator"
     PREDICTOR = "predictor"
     ALLOCATOR = "allocator"
@@ -52,19 +54,22 @@ class AgentRole(str, Enum):
 
 # ── Message Protocol ─────────────────────────────────────────────────────────
 
+
 @dataclass
 class AgentMessage:
     """Message passed between agents via the message bus."""
+
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     sender: AgentRole = AgentRole.COORDINATOR
     recipient: AgentRole = AgentRole.COORDINATOR
     msg_type: str = "request"  # request | response | broadcast
-    content: Dict[str, Any] = field(default_factory=dict)
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    correlation_id: Optional[str] = None  # links request → response
+    content: dict[str, Any] = field(default_factory=dict)
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    correlation_id: str | None = None  # links request → response
 
 
 # ── Shared Blackboard ────────────────────────────────────────────────────────
+
 
 class Blackboard:
     """Shared state accessible by all agents.
@@ -77,7 +82,7 @@ class Blackboard:
     """
 
     def __init__(self):
-        self._state: Dict[str, Any] = {
+        self._state: dict[str, Any] = {
             "disaster_context": {},
             "predictions": {},
             "allocations": {},
@@ -101,19 +106,20 @@ class Blackboard:
                 self._state[key] = []
             self._state[key].append(value)
 
-    async def get_snapshot(self) -> Dict[str, Any]:
+    async def get_snapshot(self) -> dict[str, Any]:
         async with self._lock:
             return dict(self._state)
 
 
 # ── Message Bus ──────────────────────────────────────────────────────────────
 
+
 class MessageBus:
     """Asynchronous message bus for inter-agent communication."""
 
     def __init__(self):
-        self._queues: Dict[AgentRole, asyncio.Queue] = {}
-        self._history: List[AgentMessage] = []
+        self._queues: dict[AgentRole, asyncio.Queue] = {}
+        self._history: list[AgentMessage] = []
 
     def register(self, role: AgentRole) -> None:
         if role not in self._queues:
@@ -128,15 +134,15 @@ class MessageBus:
                 if role != message.sender:
                     await q.put(message)
 
-    async def receive(self, role: AgentRole, timeout: float = 30.0) -> Optional[AgentMessage]:
+    async def receive(self, role: AgentRole, timeout: float = 30.0) -> AgentMessage | None:
         if role not in self._queues:
             return None
         try:
             return await asyncio.wait_for(self._queues[role].get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
-    def get_history(self) -> List[Dict[str, Any]]:
+    def get_history(self) -> list[dict[str, Any]]:
         return [
             {
                 "id": m.id,
@@ -152,6 +158,7 @@ class MessageBus:
 
 # ── Base Agent ───────────────────────────────────────────────────────────────
 
+
 class BaseAgent:
     """Base class for all agents."""
 
@@ -161,11 +168,11 @@ class BaseAgent:
         self.bus = bus
         self.bus.register(role)
 
-    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, task: dict[str, Any]) -> dict[str, Any]:
         """Process a task and return results. Override in subclasses."""
         raise NotImplementedError
 
-    async def send_to(self, recipient: AgentRole, content: Dict[str, Any], correlation_id: Optional[str] = None) -> None:
+    async def send_to(self, recipient: AgentRole, content: dict[str, Any], correlation_id: str | None = None) -> None:
         msg = AgentMessage(
             sender=self.role,
             recipient=recipient,
@@ -175,7 +182,7 @@ class BaseAgent:
         )
         await self.bus.send(msg)
 
-    async def respond_to(self, original: AgentMessage, content: Dict[str, Any]) -> None:
+    async def respond_to(self, original: AgentMessage, content: dict[str, Any]) -> None:
         msg = AgentMessage(
             sender=self.role,
             recipient=original.sender,
@@ -188,6 +195,7 @@ class BaseAgent:
 
 # ── Predictor Agent ──────────────────────────────────────────────────────────
 
+
 class PredictorAgent(BaseAgent):
     """Agent for severity prediction and risk assessment.
 
@@ -198,16 +206,17 @@ class PredictorAgent(BaseAgent):
     def __init__(self, blackboard: Blackboard, bus: MessageBus):
         super().__init__(AgentRole.PREDICTOR, blackboard, bus)
 
-    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, task: dict[str, Any]) -> dict[str, Any]:
         disaster_type = task.get("disaster_type", "unknown")
         severity = task.get("severity", "medium")
-        location = task.get("location", {})
+        task.get("location", {})
 
         # Try ML model prediction
         try:
             from app.dependencies import get_ml_service
+
             ml_svc = get_ml_service()
-            if ml_svc and hasattr(ml_svc, 'predict_severity'):
+            if ml_svc and hasattr(ml_svc, "predict_severity"):
                 prediction = await ml_svc.predict_severity(task)
                 pred_sev = prediction.get("severity", severity)
                 pred_conf = prediction.get("confidence", 0.7)
@@ -237,8 +246,12 @@ class PredictorAgent(BaseAgent):
         risk_score = severity_scores.get(severity, 0.5)
 
         type_risk = {
-            "earthquake": 0.9, "flood": 0.7, "hurricane": 0.85,
-            "wildfire": 0.75, "tsunami": 0.95, "tornado": 0.8,
+            "earthquake": 0.9,
+            "flood": 0.7,
+            "hurricane": 0.85,
+            "wildfire": 0.75,
+            "tsunami": 0.95,
+            "tornado": 0.8,
         }
         risk_score = max(risk_score, type_risk.get(disaster_type.lower(), 0.5))
 
@@ -268,6 +281,7 @@ class PredictorAgent(BaseAgent):
 
 # ── Allocator Agent ──────────────────────────────────────────────────────────
 
+
 class AllocatorAgent(BaseAgent):
     """Agent for resource allocation decisions.
 
@@ -278,7 +292,7 @@ class AllocatorAgent(BaseAgent):
     def __init__(self, blackboard: Blackboard, bus: MessageBus):
         super().__init__(AgentRole.ALLOCATOR, blackboard, bus)
 
-    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, task: dict[str, Any]) -> dict[str, Any]:
         disaster_id = task.get("disaster_id", "")
         required_resources = task.get("required_resources", [])
         predictions = await self.blackboard.read("predictions") or {}
@@ -286,9 +300,11 @@ class AllocatorAgent(BaseAgent):
         # Try RL allocator
         try:
             from ml.rl_allocator import RLAllocator
+
             rl = RLAllocator()
             if rl.is_trained:
                 from app.database import db
+
                 resp = db.table("resources").select("*").eq("status", "available").execute()
                 resources = resp.data or []
 
@@ -306,8 +322,7 @@ class AllocatorAgent(BaseAgent):
                     "method": rl_result.get("method", "rl"),
                     "informed_by_prediction": bool(predictions),
                     "summary": (
-                        f"Allocated **{len(allocs)} resources** "
-                        f"with **{coverage}%** coverage using RL optimisation."
+                        f"Allocated **{len(allocs)} resources** with **{coverage}%** coverage using RL optimisation."
                     ),
                 }
                 await self.blackboard.write("allocations", result)
@@ -333,16 +348,14 @@ class AllocatorAgent(BaseAgent):
             "recommended_resources": recs,
             "method": "heuristic",
             "informed_by_prediction": bool(predictions),
-            "summary": (
-                f"Urgency level: **{urgency}/10**. "
-                f"Recommended resources: {rec_str}."
-            ),
+            "summary": (f"Urgency level: **{urgency}/10**. Recommended resources: {rec_str}."),
         }
         await self.blackboard.write("allocations", result)
         return result
 
 
 # ── Analyst Agent ────────────────────────────────────────────────────────────
+
 
 class AnalystAgent(BaseAgent):
     """Agent for causal analysis and NLP assessment.
@@ -354,7 +367,7 @@ class AnalystAgent(BaseAgent):
     def __init__(self, blackboard: Blackboard, bus: MessageBus):
         super().__init__(AgentRole.ANALYST, blackboard, bus)
 
-    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, task: dict[str, Any]) -> dict[str, Any]:
         disaster_id = task.get("disaster_id", "")
         query_text = task.get("query", "")
 
@@ -363,9 +376,11 @@ class AnalystAgent(BaseAgent):
         # Try causal analysis
         try:
             from ml.causal_model import DisasterCausalModel
+
             cm = DisasterCausalModel()
             if disaster_id:
                 from app.database import db
+
                 resp = db.table("disasters").select("*").eq("id", disaster_id).maybe_single().execute()
                 if resp.data:
                     disaster_data = resp.data
@@ -393,7 +408,7 @@ class AnalystAgent(BaseAgent):
             }
 
         # Build human-readable summary
-        summary_parts: List[str] = []
+        summary_parts: list[str] = []
         if "nlp" in analyses:
             nlp = analyses["nlp"]
             summary_parts.append(f"Query intent: **{nlp.get('query_intent', 'unknown')}**.")
@@ -434,7 +449,7 @@ class AnalystAgent(BaseAgent):
         return "general_inquiry"
 
     @staticmethod
-    def _extract_entities(text: str) -> List[str]:
+    def _extract_entities(text: str) -> list[str]:
         entities = []
         disaster_types = ["earthquake", "flood", "hurricane", "wildfire", "tornado", "tsunami"]
         resource_types = ["food", "water", "medical", "shelter", "clothing"]
@@ -446,7 +461,7 @@ class AnalystAgent(BaseAgent):
         return entities
 
     @staticmethod
-    def _detect_urgency(text: str) -> Dict[str, Any]:
+    def _detect_urgency(text: str) -> dict[str, Any]:
         urgent_words = ["urgent", "emergency", "critical", "immediately", "asap", "dying", "trapped"]
         text_lower = text.lower()
         signals = [w for w in urgent_words if w in text_lower]
@@ -459,6 +474,7 @@ class AnalystAgent(BaseAgent):
 
 # ── Responder Agent ──────────────────────────────────────────────────────────
 
+
 class ResponderAgent(BaseAgent):
     """Agent for knowledge-based response generation using DisasterGPT RAG.
 
@@ -468,7 +484,7 @@ class ResponderAgent(BaseAgent):
     def __init__(self, blackboard: Blackboard, bus: MessageBus):
         super().__init__(AgentRole.RESPONDER, blackboard, bus)
 
-    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, task: dict[str, Any]) -> dict[str, Any]:
         query = task.get("query", "")
         disaster_id = task.get("disaster_id")
 
@@ -482,6 +498,7 @@ class ResponderAgent(BaseAgent):
         rag_response = None
         try:
             from ml.disaster_rag import DisasterRAG
+
             rag = DisasterRAG()
             result = await rag.query(
                 question=query,
@@ -514,11 +531,11 @@ class ResponderAgent(BaseAgent):
     def _synthesise(
         self,
         query: str,
-        predictions: Dict,
-        allocations: Dict,
-        analyses: Dict,
-        rag_response: Optional[str],
-    ) -> Dict[str, Any]:
+        predictions: dict,
+        allocations: dict,
+        analyses: dict,
+        rag_response: str | None,
+    ) -> dict[str, Any]:
         """Combine outputs from all agents into a unified response."""
         parts = []
         sources = []
@@ -572,7 +589,7 @@ class ResponderAgent(BaseAgent):
             sources.append("ResponderAgent/RAG")
 
         if not parts:
-            response = f"I've analysed your query: \"{query}\". Based on available data, please provide a disaster ID or more context for a detailed multi-agent analysis."
+            response = f'I\'ve analysed your query: "{query}". Based on available data, please provide a disaster ID or more context for a detailed multi-agent analysis.'
         else:
             response = "\n\n".join(parts)
 
@@ -592,6 +609,7 @@ class ResponderAgent(BaseAgent):
 
 # ── Coordinator Agent ────────────────────────────────────────────────────────
 
+
 class CoordinatorAgent(BaseAgent):
     """Orchestrator agent that dispatches tasks to specialist agents.
 
@@ -606,21 +624,24 @@ class CoordinatorAgent(BaseAgent):
         self,
         blackboard: Blackboard,
         bus: MessageBus,
-        agents: Dict[AgentRole, BaseAgent],
+        agents: dict[AgentRole, BaseAgent],
     ):
         super().__init__(AgentRole.COORDINATOR, blackboard, bus)
         self.agents = agents
 
-    async def process(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, task: dict[str, Any]) -> dict[str, Any]:
         """Orchestrate the multi-agent pipeline for a given task."""
         query = task.get("query", "")
         disaster_id = task.get("disaster_id")
 
-        await self.blackboard.write("disaster_context", {
-            "query": query,
-            "disaster_id": disaster_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        await self.blackboard.write(
+            "disaster_context",
+            {
+                "query": query,
+                "disaster_id": disaster_id,
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+        )
 
         results = {}
         agent_sequence = self._plan_execution(task)
@@ -643,10 +664,10 @@ class CoordinatorAgent(BaseAgent):
             "disaster_id": disaster_id,
             "agent_results": results,
             "execution_order": [r.value for r in agent_sequence],
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    def _plan_execution(self, task: Dict[str, Any]) -> List[AgentRole]:
+    def _plan_execution(self, task: dict[str, Any]) -> list[AgentRole]:
         """Determine the agent execution order based on the task."""
         query = task.get("query", "").lower()
 
@@ -665,6 +686,7 @@ class CoordinatorAgent(BaseAgent):
 
 
 # ── Multi-Agent System (Top-Level) ───────────────────────────────────────────
+
 
 class MultiAgentSystem:
     """Top-level multi-agent system for disaster coordination.
@@ -697,9 +719,9 @@ class MultiAgentSystem:
     async def process_query(
         self,
         query: str,
-        disaster_id: Optional[str] = None,
+        disaster_id: str | None = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Process a natural-language query through the multi-agent pipeline.
 
         Args:
@@ -710,6 +732,12 @@ class MultiAgentSystem:
         Returns:
             dict with coordinated response from all agents
         """
+        # Reset state to prevent leakage between queries
+        self.blackboard = Blackboard()
+        for agent in self.coordinator.agents.values():
+            agent.blackboard = self.blackboard
+        self.coordinator.blackboard = self.blackboard
+
         task = {
             "query": query,
             "disaster_id": disaster_id,
@@ -720,7 +748,7 @@ class MultiAgentSystem:
     async def process_query_stream(
         self,
         query: str,
-        disaster_id: Optional[str] = None,
+        disaster_id: str | None = None,
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """Streaming version — yields SSE events as agents complete work.
@@ -728,6 +756,12 @@ class MultiAgentSystem:
         Each event is a JSON string with:
           {"type": "agent_start|agent_result|final", "agent": "...", "data": {...}}
         """
+        # Reset state to prevent leakage between queries
+        self.blackboard = Blackboard()
+        for agent in self.coordinator.agents.values():
+            agent.blackboard = self.blackboard
+        self.coordinator.blackboard = self.blackboard
+
         task = {
             "query": query,
             "disaster_id": disaster_id,
@@ -741,46 +775,50 @@ class MultiAgentSystem:
             if agent is None:
                 continue
 
-            yield json.dumps({
-                "type": "agent_start",
-                "agent": role.value,
-                "message": f"Agent '{role.value}' is processing...",
-            })
+            yield json.dumps(
+                {
+                    "type": "agent_start",
+                    "agent": role.value,
+                    "message": f"Agent '{role.value}' is processing...",
+                }
+            )
 
             try:
                 result = await agent.process(task)
-                yield json.dumps({
-                    "type": "agent_result",
-                    "agent": role.value,
-                    "data": result,
-                })
+                yield json.dumps(
+                    {
+                        "type": "agent_result",
+                        "agent": role.value,
+                        "data": result,
+                    }
+                )
             except Exception as exc:
-                yield json.dumps({
-                    "type": "agent_error",
-                    "agent": role.value,
-                    "error": str(exc),
-                })
+                yield json.dumps(
+                    {
+                        "type": "agent_error",
+                        "agent": role.value,
+                        "error": str(exc),
+                    }
+                )
 
         # Final synthesis
-        snapshot = await self.blackboard.get_snapshot()
-        yield json.dumps({
-            "type": "final",
-            "data": {
-                "query": query,
-                "disaster_id": disaster_id,
-                "execution_order": [r.value for r in agent_sequence],
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-        })
+        await self.blackboard.get_snapshot()
+        yield json.dumps(
+            {
+                "type": "final",
+                "data": {
+                    "query": query,
+                    "disaster_id": disaster_id,
+                    "execution_order": [r.value for r in agent_sequence],
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+            }
+        )
 
-    async def get_status(self) -> Dict[str, Any]:
+    async def get_status(self) -> dict[str, Any]:
         """Return the status of all agents."""
         return {
-            "agents": [
-                {"role": role.value, "status": "active"}
-                for role in AgentRole
-                if role != AgentRole.COORDINATOR
-            ],
+            "agents": [{"role": role.value, "status": "active"} for role in AgentRole if role != AgentRole.COORDINATOR],
             "coordinator": "active",
             "message_history_size": len(self.bus.get_history()),
         }
@@ -788,7 +826,7 @@ class MultiAgentSystem:
 
 # ── Singleton accessor ──────────────────────────────────────────────────────
 
-_system_instance: Optional[MultiAgentSystem] = None
+_system_instance: MultiAgentSystem | None = None
 
 
 def get_multi_agent_system() -> MultiAgentSystem:

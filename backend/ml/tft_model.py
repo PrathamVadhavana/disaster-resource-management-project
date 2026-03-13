@@ -8,16 +8,17 @@ Provides:
   • create_tft_model()           – instantiate a TFT with quantile loss
   • TFTSeverityForecaster class  – high-level wrapper for inference
 """
+
 from __future__ import annotations
 
 import logging
 import warnings
+from datetime import UTC
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ FORECAST_HORIZONS = [6, 12, 24, 48]
 
 # Quantiles for uncertainty bands
 QUANTILES = [0.1, 0.5, 0.9]
+
+# Severity index to label mapping (matches training data pipeline)
+SEVERITY_INV = {0: "low", 1: "medium", 2: "high", 3: "critical"}
 
 # Default model directory
 MODEL_DIR = Path(__file__).resolve().parent / "models" / "tft_severity"
@@ -44,7 +48,7 @@ def build_tft_datasets(
     max_prediction_length: int = 48,
     val_fraction: float = 0.2,
     batch_size: int = 32,
-) -> Tuple[Any, Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any]:
     """Convert a pandas DataFrame into pytorch-forecasting datasets.
 
     Uses a time-based split: training covers timesteps up to a cutoff,
@@ -105,9 +109,12 @@ def build_tft_datasets(
     # Time-varying known reals (cyclical encodings – known at all future times)
     time_varying_known_reals = [
         "time_idx",
-        "hour_sin", "hour_cos",
-        "dow_sin", "dow_cos",
-        "month_sin", "month_cos",
+        "hour_sin",
+        "hour_cos",
+        "dow_sin",
+        "dow_cos",
+        "month_sin",
+        "month_cos",
     ]
 
     # Time-varying unknown reals (weather – only known for past)
@@ -151,12 +158,8 @@ def build_tft_datasets(
         stop_randomization=True,
     )
 
-    train_dataloader = training_dataset.to_dataloader(
-        train=True, batch_size=batch_size, num_workers=0
-    )
-    val_dataloader = validation_dataset.to_dataloader(
-        train=False, batch_size=batch_size, num_workers=0
-    )
+    train_dataloader = training_dataset.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
+    val_dataloader = validation_dataset.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
 
     return training_dataset, validation_dataset, train_dataloader, val_dataloader
 
@@ -221,9 +224,8 @@ class TFTSeverityForecaster:
 
         try:
             from pytorch_forecasting import TemporalFusionTransformer
-            self.model = TemporalFusionTransformer.load_from_checkpoint(
-                str(self.model_path)
-            )
+
+            self.model = TemporalFusionTransformer.load_from_checkpoint(str(self.model_path))
             self.model.eval()
             self._loaded = True
             logger.info("TFT model loaded from %s", self.model_path)
@@ -234,8 +236,8 @@ class TFTSeverityForecaster:
 
     def predict_from_features(
         self,
-        features: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        features: dict[str, Any],
+    ) -> dict[str, Any]:
         """Run inference on a single feature dict (from the API).
 
         Constructs a minimal time-series input from the provided weather
@@ -265,10 +267,10 @@ class TFTSeverityForecaster:
             logger.error("TFT inference failed: %s", e)
             return self._fallback_prediction(features)
 
-    def _build_input_df(self, features: Dict[str, Any]) -> pd.DataFrame:
+    def _build_input_df(self, features: dict[str, Any]) -> pd.DataFrame:
         """Build a DataFrame suitable for TFT inference from raw features."""
         import math
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         temp = float(features.get("temperature", features.get("temperature_2m", 25)))
         wind = float(features.get("wind_speed", features.get("wind_speed_10m", 15)))
@@ -278,7 +280,7 @@ class TFTSeverityForecaster:
         lat = float(features.get("latitude", 0))
         lon = float(features.get("longitude", 0))
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rows = []
 
         # Create 96 timesteps: 48 encoder + 48 decoder
@@ -293,11 +295,11 @@ class TFTSeverityForecaster:
 
             # For encoder steps, use provided weather; decoder steps get 0
             if t < encoder_len:
-                t_temp = temp + np.random.normal(0, 1)
-                t_wind = max(0, wind + np.random.normal(0, 1))
-                t_precip = max(0, precip + np.random.normal(0, 0.3))
-                t_hum = np.clip(humidity + np.random.normal(0, 2), 0, 100)
-                sev = 0.0  # placeholder; model predicts this
+                t_temp = temp
+                t_wind = max(0, wind)
+                t_precip = max(0, precip)
+                t_hum = np.clip(humidity, 0, 100)
+                sev = 0.0
             else:
                 t_temp = 0.0
                 t_wind = 0.0
@@ -305,29 +307,31 @@ class TFTSeverityForecaster:
                 t_hum = 0.0
                 sev = 0.0
 
-            rows.append({
-                "datetime": dt,
-                "temperature_2m": round(t_temp, 1),
-                "wind_speed_10m": round(t_wind, 1),
-                "precipitation": round(t_precip, 2),
-                "relative_humidity_2m": round(t_hum, 1),
-                "hour_sin": round(math.sin(2 * math.pi * hour / 24), 4),
-                "hour_cos": round(math.cos(2 * math.pi * hour / 24), 4),
-                "dow_sin": round(math.sin(2 * math.pi * dow / 7), 4),
-                "dow_cos": round(math.cos(2 * math.pi * dow / 7), 4),
-                "month_sin": round(math.sin(2 * math.pi * month / 12), 4),
-                "month_cos": round(math.cos(2 * math.pi * month / 12), 4),
-                "group_id": "inference_0",
-                "time_idx": t,
-                "severity_numeric": sev,
-                "disaster_type": disaster_type,
-                "latitude": lat,
-                "longitude": lon,
-            })
+            rows.append(
+                {
+                    "datetime": dt,
+                    "temperature_2m": round(t_temp, 1),
+                    "wind_speed_10m": round(t_wind, 1),
+                    "precipitation": round(t_precip, 2),
+                    "relative_humidity_2m": round(t_hum, 1),
+                    "hour_sin": round(math.sin(2 * math.pi * hour / 24), 4),
+                    "hour_cos": round(math.cos(2 * math.pi * hour / 24), 4),
+                    "dow_sin": round(math.sin(2 * math.pi * dow / 7), 4),
+                    "dow_cos": round(math.cos(2 * math.pi * dow / 7), 4),
+                    "month_sin": round(math.sin(2 * math.pi * month / 12), 4),
+                    "month_cos": round(math.cos(2 * math.pi * month / 12), 4),
+                    "group_id": "inference_0",
+                    "time_idx": t,
+                    "severity_numeric": sev,
+                    "disaster_type": disaster_type,
+                    "latitude": lat,
+                    "longitude": lon,
+                }
+            )
 
         return pd.DataFrame(rows)
 
-    def _run_inference(self, input_df: pd.DataFrame) -> Dict[str, Any]:
+    def _run_inference(self, input_df: pd.DataFrame) -> dict[str, Any]:
         """Run actual TFT inference and extract multi-horizon predictions."""
         from pytorch_forecasting import TimeSeriesDataSet
         from pytorch_forecasting.data import GroupNormalizer
@@ -341,12 +345,19 @@ class TFTSeverityForecaster:
             max_encoder_length=48,
             max_prediction_length=48,
             time_varying_known_reals=[
-                "time_idx", "hour_sin", "hour_cos",
-                "dow_sin", "dow_cos", "month_sin", "month_cos",
+                "time_idx",
+                "hour_sin",
+                "hour_cos",
+                "dow_sin",
+                "dow_cos",
+                "month_sin",
+                "month_cos",
             ],
             time_varying_unknown_reals=[
-                "temperature_2m", "wind_speed_10m",
-                "precipitation", "relative_humidity_2m",
+                "temperature_2m",
+                "wind_speed_10m",
+                "precipitation",
+                "relative_humidity_2m",
                 "severity_numeric",
             ],
             static_categoricals=["disaster_type"],
@@ -366,7 +377,6 @@ class TFTSeverityForecaster:
 
         # Extract at specific horizons (index = horizon - 1 since prediction starts at t+1)
         horizon_map = {6: 5, 12: 11, 24: 23, 48: 47}
-        from ml.data_pipeline import SEVERITY_INV
 
         result = {}
         lower_bounds = {}
@@ -390,10 +400,7 @@ class TFTSeverityForecaster:
                 upper_bounds[f"severity_{h}h"] = 1.0
 
         # Overall confidence: inverse of average uncertainty width
-        widths = [
-            upper_bounds[f"severity_{h}h"] - lower_bounds[f"severity_{h}h"]
-            for h in FORECAST_HORIZONS
-        ]
+        widths = [upper_bounds[f"severity_{h}h"] - lower_bounds[f"severity_{h}h"] for h in FORECAST_HORIZONS]
         avg_width = np.mean(widths)
         confidence = float(np.clip(1.0 - avg_width / 3.0, 0.1, 0.99))
 
@@ -407,9 +414,8 @@ class TFTSeverityForecaster:
         }
 
     @staticmethod
-    def _fallback_prediction(features: Dict[str, Any]) -> Dict[str, Any]:
+    def _fallback_prediction(features: dict[str, Any]) -> dict[str, Any]:
         """Rule-based fallback when TFT model is unavailable."""
-        from ml.data_pipeline import SEVERITY_INV
 
         temp = float(features.get("temperature", features.get("temperature_2m", 25)))
         wind = float(features.get("wind_speed", features.get("wind_speed_10m", 15)))

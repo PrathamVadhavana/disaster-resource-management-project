@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -38,17 +40,16 @@ router = APIRouter()
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
+
 class RLAllocateRequest(BaseModel):
     disaster_id: str
-    required_resources: List[Dict[str, Any]] = Field(
-        ..., description="List of {type, quantity, priority} dicts"
-    )
+    required_resources: list[dict[str, Any]] = Field(..., description="List of {type, quantity, priority} dicts")
     max_distance_km: float = Field(100.0, ge=1, le=1000)
 
 
 class RLAllocateResponse(BaseModel):
     disaster_id: str
-    allocations: List[Dict[str, Any]]
+    allocations: list[dict[str, Any]]
     coverage_pct: float
     total_reward: float
     method: str
@@ -71,18 +72,24 @@ class FederatedTrainRequest(BaseModel):
 
 class AgentQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
-    disaster_id: Optional[str] = None
+    disaster_id: str | None = None
 
 
 class PINNPredictRequest(BaseModel):
-    points: List[List[float]] = Field(
-        ..., description="List of [x, y, t] points"
-    )
+    points: list[list[float]] = Field(..., description="List of [x, y, t] points")
+
+
+class PINNTrainRequest(BaseModel):
+    n_observations: int = Field(500, ge=100, le=5000)
+    epochs: int = Field(500, ge=100, le=5000)
+    diffusion: float = Field(0.02, ge=0.001, le=1.0)
+    wind_x: float = Field(0.5, ge=-10, le=10)
+    wind_y: float = Field(0.2, ge=-10, le=10)
 
 
 class PINNGridRequest(BaseModel):
-    x_range: List[float] = Field(..., min_length=2, max_length=2)
-    y_range: List[float] = Field(..., min_length=2, max_length=2)
+    x_range: list[float] = Field(..., min_length=2, max_length=2)
+    y_range: list[float] = Field(..., min_length=2, max_length=2)
     time: float = Field(..., ge=0)
     resolution: int = Field(50, ge=10, le=200)
 
@@ -94,11 +101,14 @@ _federated_service = None
 _multi_agent = None
 _pinn_model = None
 
+_rl_training_status = {"status": "idle", "progress": 0, "result": None}
+
 
 def _get_rl():
     global _rl_allocator
     if _rl_allocator is None:
         from ml.rl_allocator import RLAllocator
+
         _rl_allocator = RLAllocator()
     return _rl_allocator
 
@@ -107,6 +117,7 @@ def _get_federated():
     global _federated_service
     if _federated_service is None:
         from ml.federated_service import FederatedService
+
         _federated_service = FederatedService()
     return _federated_service
 
@@ -115,6 +126,7 @@ def _get_agent_system():
     global _multi_agent
     if _multi_agent is None:
         from ml.multi_agent import get_multi_agent_system
+
         _multi_agent = get_multi_agent_system()
     return _multi_agent
 
@@ -122,7 +134,8 @@ def _get_agent_system():
 def _get_pinn():
     global _pinn_model
     if _pinn_model is None:
-        from ml.pinn_spread import PINNSpreadModel, PINN_CHECKPOINT
+        from ml.pinn_spread import PINN_CHECKPOINT, PINNSpreadModel
+
         _pinn_model = PINNSpreadModel()
         if PINN_CHECKPOINT.exists():
             try:
@@ -132,7 +145,24 @@ def _get_pinn():
     return _pinn_model
 
 
+async def _train_rl_background(n_episodes: int):
+    global _rl_training_status, _rl_allocator
+    _rl_training_status = {"status": "training", "progress": 0, "result": None}
+    try:
+        from ml.rl_allocator import RLAllocator
+
+        allocator = RLAllocator()
+        # Use the new train method that loads historical data from Supabase first
+        # Note: train() is async, so we await it
+        await allocator.train(db_client=db, n_episodes=n_episodes)
+        _rl_training_status = {"status": "complete", "progress": 100, "result": "success"}
+        _rl_allocator = None  # Force reload
+    except Exception as e:
+        _rl_training_status = {"status": "failed", "progress": 0, "result": str(e)}
+
+
 # ── RL Allocation endpoints ──────────────────────────────────────────────────
+
 
 @router.post("/rl-allocate", response_model=RLAllocateResponse)
 async def rl_allocate(
@@ -155,7 +185,7 @@ async def rl_allocate(
         location_ids = list({r.get("location_id", "") for r in raw_resources if r.get("location_id")})
         if location_ids:
             loc_resp = await db.table("locations").select("*").in_("id", location_ids[:30]).async_execute()
-            for loc in (loc_resp.data or []):
+            for loc in loc_resp.data or []:
                 location_cache[loc["id"]] = (
                     float(loc.get("latitude", 0)),
                     float(loc.get("longitude", 0)),
@@ -163,7 +193,9 @@ async def rl_allocate(
 
         # Get disaster location
         zone_lat, zone_lon = 0.0, 0.0
-        disaster_resp = await db.table("disasters").select("*").eq("id", body.disaster_id).maybe_single().async_execute()
+        disaster_resp = (
+            await db.table("disasters").select("*").eq("id", body.disaster_id).maybe_single().async_execute()
+        )
         if disaster_resp.data:
             d_loc_id = disaster_resp.data.get("location_id", "")
             if d_loc_id in location_cache:
@@ -177,6 +209,51 @@ async def rl_allocate(
             zone_lat=zone_lat,
             zone_lon=zone_lon,
         )
+
+        # Log each allocation to rl_allocation_log table
+        try:
+            for allocation in result.get("allocations", []):
+                # Get resource type and quantity from the allocation
+                resource_id = allocation.get("resource_id", "")
+                request_id = allocation.get("request_id", "")
+                
+                # Fetch resource details for logging
+                resource_detail = None
+                if resource_id:
+                    res_resp = await db.table("resources").select("*").eq("id", resource_id).maybe_single().async_execute()
+                    if res_resp.data:
+                        resource_detail = res_resp.data
+                
+                # Get quantity allocated (use quantity from resource if available)
+                quantity_allocated = 1
+                if resource_detail:
+                    quantity_allocated = resource_detail.get("quantity", 1)
+                
+                # Get resource type
+                resource_type = allocation.get("type", "unknown")
+                if resource_detail:
+                    resource_type = resource_detail.get("type", resource_type)
+                
+                # Allocation score (use coverage or total_reward as proxy)
+                allocation_score = result.get("total_reward", 0.0)
+                
+                # Log to rl_allocation_log table
+                log_entry = {
+                    "id": str(uuid.uuid4()),
+                    "disaster_id": body.disaster_id,
+                    "resource_type": resource_type,
+                    "quantity_allocated": quantity_allocated,
+                    "allocation_score": allocation_score,
+                    "actual_outcome": None,  # To be filled later
+                    "allocated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                
+                await db.table("rl_allocation_log").insert(log_entry).async_execute()
+                
+            logger.info("Logged %d allocations to rl_allocation_log for disaster %s", 
+                        len(result.get("allocations", [])), body.disaster_id)
+        except Exception as log_err:
+            logger.warning("Failed to log allocations to rl_allocation_log: %s", log_err)
 
         return RLAllocateResponse(**result)
 
@@ -201,28 +278,26 @@ async def rl_status(user: dict = Depends(get_current_user)):
 
 @router.post("/rl-train")
 async def rl_train(
-    n_episodes: int = 500,
+    background_tasks: BackgroundTasks,
+    n_episodes: int = 2000,
     user: dict = Depends(require_role("admin")),
 ):
-    """Trigger RL agent training (admin only). Runs on synthetic data."""
-    try:
-        from ml.rl_allocator import train_rl
-        agent = train_rl(n_episodes=min(n_episodes, 5000))
-        return {
-            "status": "complete",
-            "episodes": n_episodes,
-            "final_epsilon": round(agent.epsilon, 4),
-            "buffer_size": len(agent.replay_buffer),
-            "avg_reward_last_100": round(
-                sum(agent.episode_rewards[-100:]) / max(len(agent.episode_rewards[-100:]), 1), 4
-            ),
-        }
-    except Exception as exc:
-        logger.error("RL training failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"RL training failed: {exc}")
+    """Trigger RL agent training in background (admin only)."""
+    if _rl_training_status.get("status") == "training":
+        raise HTTPException(status_code=409, detail="Training already in progress")
+
+    background_tasks.add_task(_train_rl_background, min(n_episodes, 5000))
+    return {"status": "training_started", "message": "RL training started in background"}
+
+
+@router.get("/rl-training-status")
+async def get_rl_training_status():
+    """Get current status of background RL training."""
+    return _rl_training_status
 
 
 # ── Federated Learning endpoints ─────────────────────────────────────────────
+
 
 @router.post("/federated/round")
 async def federated_round(
@@ -275,6 +350,7 @@ async def federated_train(
 
 
 # ── Multi-Agent endpoints ────────────────────────────────────────────────────
+
 
 @router.post("/agent/query")
 async def agent_query(
@@ -348,6 +424,7 @@ async def agent_status(user: dict = Depends(get_current_user)):
 
 # ── PINN Spread endpoints ────────────────────────────────────────────────────
 
+
 @router.post("/pinn/predict")
 async def pinn_predict(
     body: PINNPredictRequest,
@@ -392,6 +469,40 @@ async def pinn_predict_grid(
         raise HTTPException(status_code=500, detail=f"PINN grid prediction failed: {exc}")
 
 
+@router.post("/pinn/train", summary="Train PINN model")
+async def train_pinn(
+    req: PINNTrainRequest,
+    user: dict = Depends(require_role("admin")),
+):
+    """Train the PINN spread prediction model. Admin only."""
+    try:
+        from ml.pinn_spread import PINNSpreadModel, generate_synthetic_spread_data
+
+        observations, terrain = generate_synthetic_spread_data(
+            n_observations=req.n_observations,
+            diffusion=req.diffusion,
+            wind_x=req.wind_x,
+            wind_y=req.wind_y,
+        )
+
+        pinn = PINNSpreadModel()
+        result = pinn.train(observations, terrain, epochs=req.epochs)
+        pinn.save()
+
+        # Reset the global singleton so it reloads
+        global _pinn_model
+        _pinn_model = None
+
+        return {
+            "status": "trained",
+            "epochs": req.epochs,
+            "observations": req.n_observations,
+            **result,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"PINN training failed: {str(e)}")
+
+
 @router.get("/pinn/status")
 async def pinn_status(user: dict = Depends(get_current_user)):
     """Get PINN model status."""
@@ -408,9 +519,11 @@ async def pinn_status(user: dict = Depends(get_current_user)):
 
 # ── GAT Matching ──────────────────────────────────────────────────────────────
 
+
 class GATMatchRequest(BaseModel):
-    disaster_id: Optional[str] = None
+    disaster_id: str | None = None
     radius_km: float = Field(50.0, description="Max distance for edges")
+
 
 @router.post("/gat/match")
 async def gat_match(
@@ -428,9 +541,7 @@ async def gat_match(
 
     try:
         # Fetch approved/under_review requests
-        rq = db_admin.table("resource_requests").select("*").in_(
-            "status", ["approved", "under_review"]
-        )
+        rq = db_admin.table("resource_requests").select("*").in_("status", ["approved", "under_review"])
         if body.disaster_id:
             rq = rq.eq("disaster_id", body.disaster_id)
         requests = (await rq.async_execute()).data or []
@@ -443,44 +554,56 @@ async def gat_match(
             return {"assignments": [], "method": "none", "reason": "No requests or NGOs found"}
 
         # Build victim and NGO nodes for graph
-        from ml.graph_builder import VictimNode, NgoNode, build_graph, RESOURCE_TYPES
+        from ml.graph_builder import RESOURCE_TYPES, NgoNode, VictimNode, build_graph
 
         victim_nodes = []
         for r in requests:
             rt = (r.get("resource_type") or "").lower()
-            victim_nodes.append(VictimNode(
-                id=r["id"],
-                lat=r.get("latitude") or 0.0,
-                lon=r.get("longitude") or 0.0,
-                priority=r.get("priority") or "medium",
-                quantity=r.get("quantity") or 1,
-                resource_type=rt,
-                hours_since_submission=0.0,
-            ))
+            victim_nodes.append(
+                VictimNode(
+                    id=r["id"],
+                    lat=float(r.get("latitude") or 0.0),
+                    lon=float(r.get("longitude") or 0.0),
+                    priority_score=5.0
+                    if r.get("priority") == "medium"
+                    else 10.0
+                    if r.get("priority") == "high"
+                    else 2.0,
+                    medical_needs_encoded=1.0 if rt == "medical" else 0.0,
+                    hours_since_request=0.0,
+                    resource_type=rt,
+                )
+            )
 
         ngo_nodes = []
         for n in ngos:
-            ngo_nodes.append(NgoNode(
-                id=n["id"],
-                lat=n.get("latitude") or 0.0,
-                lon=n.get("longitude") or 0.0,
-                capacity=100,
-                available_resource_types=[t.lower() for t in RESOURCE_TYPES[:5]],
-            ))
+            ngo_nodes.append(
+                NgoNode(
+                    id=n["id"],
+                    lat=float(n.get("latitude") or 0.0),
+                    lon=float(n.get("longitude") or 0.0),
+                    capacity_score=0.8,
+                    available_resource_types=[t.lower() for t in RESOURCE_TYPES[:5]],
+                    avg_response_time_hours=2.0,
+                    current_load_ratio=0.1,
+                )
+            )
 
         graph_data = build_graph(victim_nodes, ngo_nodes, radius_km=body.radius_km)
 
         # Try loading trained GAT model
         try:
-            from ml.gat_model import load_checkpoint, hungarian_assignment, explain_assignment, DEFAULT_CHECKPOINT
             import torch
+
+            from ml.gat_model import DEFAULT_CHECKPOINT, hungarian_assignment, load_checkpoint
 
             if DEFAULT_CHECKPOINT.exists():
                 model = load_checkpoint()
                 with torch.no_grad():
                     edge_probs = model(graph_data)
                 assignments = hungarian_assignment(
-                    edge_probs, graph_data,
+                    edge_probs,
+                    graph_data,
                     victim_ids=[v.id for v in victim_nodes],
                     ngo_ids=[n.id for n in ngo_nodes],
                 )
@@ -490,26 +613,31 @@ async def gat_match(
 
         # Distance-based fallback assignment
         from app.services.distance import haversine
+
         assignments = []
         for v in victim_nodes:
             best_ngo = min(ngo_nodes, key=lambda n: haversine(v.lat, v.lon, n.lat, n.lon))
             dist = haversine(v.lat, v.lon, best_ngo.lat, best_ngo.lon)
-            assignments.append({
-                "victim_request_id": v.id,
-                "ngo_id": best_ngo.id,
-                "distance_km": round(dist, 2),
-            })
+            assignments.append(
+                {
+                    "victim_request_id": v.id,
+                    "ngo_id": best_ngo.id,
+                    "distance_km": round(dist, 2),
+                }
+            )
         return {"assignments": assignments, "method": "distance_fallback", "total": len(assignments)}
 
     except Exception as exc:
         logger.exception("GAT matching failed")
         raise HTTPException(status_code=500, detail=str(exc))
 
+
 @router.get("/gat/status")
 async def gat_status(user: dict = Depends(get_current_user)):
     """Get GAT model status."""
     try:
         from ml.gat_model import DEFAULT_CHECKPOINT
+
         return {
             "status": "trained" if DEFAULT_CHECKPOINT.exists() else "untrained",
             "model": "Heterogeneous Graph Attention Network (GATv2)",
@@ -520,6 +648,7 @@ async def gat_status(user: dict = Depends(get_current_user)):
 
 
 # ── ML Health Check ──────────────────────────────────────────────────────────
+
 
 @router.get("/health")
 async def ml_health():
@@ -533,6 +662,7 @@ async def ml_health():
     # GAT model
     try:
         from ml.gat_model import DEFAULT_CHECKPOINT as GAT_CKPT
+
         models["gat_allocator"] = {
             "checkpoint_exists": GAT_CKPT.exists(),
             "status": "loaded" if GAT_CKPT.exists() else "needs_training",
@@ -544,6 +674,7 @@ async def ml_health():
     # RL allocator
     try:
         from ml.rl_allocator import DEFAULT_RL_CHECKPOINT
+
         models["rl_allocator"] = {
             "checkpoint_exists": DEFAULT_RL_CHECKPOINT.exists(),
             "status": "loaded" if DEFAULT_RL_CHECKPOINT.exists() else "needs_training",
@@ -555,6 +686,7 @@ async def ml_health():
     # Federated model
     try:
         from ml.federated_service import FEDERATED_CHECKPOINT
+
         models["federated_global"] = {
             "checkpoint_exists": FEDERATED_CHECKPOINT.exists(),
             "status": "loaded" if FEDERATED_CHECKPOINT.exists() else "needs_training",
@@ -566,6 +698,7 @@ async def ml_health():
     # PINN model
     try:
         from ml.pinn_spread import PINN_CHECKPOINT
+
         models["pinn_spread"] = {
             "checkpoint_exists": PINN_CHECKPOINT.exists(),
             "status": "loaded" if PINN_CHECKPOINT.exists() else "needs_training",
@@ -612,4 +745,156 @@ async def ml_health():
         "models_loaded": n_loaded,
         "models_total": n_total,
         "models": models,
+    }
+
+
+# ── Anomaly Detection Endpoints ─────────────────────────────────────
+
+
+# Lazy singleton for anomaly service
+_anomaly_service = None
+
+
+def get_anomaly_service():
+    """Get the anomaly detection service singleton."""
+    global _anomaly_service
+    if _anomaly_service is None:
+        from app.services.anomaly_service import AnomalyDetectionService
+        _anomaly_service = AnomalyDetectionService()
+    return _anomaly_service
+
+
+class AnomalyFeedbackRequest(BaseModel):
+    alert_id: str
+    status: str = Field(..., description="Status: 'false_positive' or 'resolved'")
+
+
+class AnomalyDetectionResponse(BaseModel):
+    success: bool
+    message: str
+    alerts_generated: int = 0
+    details: dict | None = None
+
+
+@router.post("/anomaly/build-baseline", response_model=dict)
+async def build_anomaly_baseline():
+    """
+    Build the anomaly detection baseline model.
+    
+    Queries historical data and trains an Isolation Forest model
+    to establish a baseline for anomaly detection.
+    """
+    service = get_anomaly_service()
+    result = await service.build_baseline()
+    return result
+
+
+@router.post("/anomaly/rebuild-baseline", response_model=dict)
+async def rebuild_anomaly_baseline():
+    """
+    Manually rebuild the anomaly detection baseline model.
+    
+    Useful when there's been significant changes in the data
+    and you want to retrain from scratch.
+    """
+    service = get_anomaly_service()
+    result = await service.rebuild_baseline()
+    return result
+
+
+@router.post("/anomaly/detect", response_model=AnomalyDetectionResponse)
+async def run_anomaly_detection():
+    """
+    Manually trigger anomaly detection.
+    
+    Runs the full detection pipeline including:
+    - Baseline deviation detection
+    - Geographic surge detection
+    - Traditional time-series anomaly detection
+    """
+    service = get_anomaly_service()
+    alerts = await service.run_detection()
+    
+    return AnomalyDetectionResponse(
+        success=True,
+        message=f"Detection complete. Generated {len(alerts)} alerts.",
+        alerts_generated=len(alerts),
+        details={"alerts": alerts} if alerts else None
+    )
+
+
+@router.get("/anomaly/alerts", response_model=list)
+async def get_anomaly_alerts(
+    status: str | None = Query(None, description="Filter by status: active, acknowledged, resolved, false_positive"),
+    severity: str | None = Query(None, description="Filter by severity: low, medium, high, critical"),
+    anomaly_type: str | None = Query(None, description="Filter by anomaly type"),
+    limit: int = Query(50, ge=1, le=200),
+    admin: dict = Depends(require_role("admin")),
+):
+    """
+    Get anomaly alerts with optional filtering.
+    
+    Requires admin role.
+    """
+    service = get_anomaly_service()
+    alerts = await service.get_all_alerts(
+        status=status,
+        severity=severity,
+        limit=limit
+    )
+    
+    if anomaly_type:
+        alerts = [a for a in alerts if a.get("anomaly_type") == anomaly_type]
+    
+    return alerts
+
+
+@router.post("/anomaly/feedback", response_model=dict)
+async def submit_anomaly_feedback(
+    body: AnomalyFeedbackRequest,
+    admin: dict = Depends(require_role("admin")),
+):
+    """
+    Submit feedback on an anomaly alert.
+    
+    - **false_positive**: Add to exclusion list, model stops flagging similar patterns
+    - **resolved**: Mark as confirmed anomaly for future model refinement
+    
+    Requires admin role.
+    """
+    service = get_anomaly_service()
+    user_id = admin.get("id", "unknown")
+    
+    result = await service.handle_feedback(
+        alert_id=body.alert_id,
+        status=body.status,
+        user_id=user_id
+    )
+    
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Failed to process feedback"))
+    
+    return result
+
+
+@router.get("/anomaly/status", response_model=dict)
+async def get_anomaly_status():
+    """
+    Get the status of the anomaly detection system.
+    
+    Returns information about:
+    - Whether baseline model is loaded
+    - Number of exclusion entries
+    - Number of confirmed anomalies
+    """
+    service = get_anomaly_service()
+    
+    from app.services.anomaly_service import BASELINE_MODEL_PATH, EXCLUSION_LIST_PATH, CONFIRMED_ANOMALIES_PATH
+    
+    return {
+        "baseline_loaded": service._baseline_model is not None,
+        "baseline_path": str(BASELINE_MODEL_PATH) if BASELINE_MODEL_PATH.exists() else None,
+        "exclusion_count": len(service._exclusion_list),
+        "confirmed_anomalies_count": len(service._confirmed_anomalies),
+        "feature_columns": service._feature_columns
     }

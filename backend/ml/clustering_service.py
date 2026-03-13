@@ -24,8 +24,8 @@ import logging
 import math
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 
@@ -48,7 +48,7 @@ _MIN_SAMPLES: int = 3
 _EARTH_RADIUS_M: float = 6_371_000.0
 
 # Priority string → numeric score mapping
-_PRIORITY_SCORE: Dict[str, float] = {
+_PRIORITY_SCORE: dict[str, float] = {
     "critical": 4.0,
     "high": 3.0,
     "medium": 2.0,
@@ -56,7 +56,7 @@ _PRIORITY_SCORE: Dict[str, float] = {
 }
 
 # Reverse lookup: score → label
-_SCORE_LABEL: Dict[str, str] = {
+_SCORE_LABEL: dict[str, str] = {
     "4": "critical",
     "3": "high",
     "2": "medium",
@@ -65,6 +65,7 @@ _SCORE_LABEL: Dict[str, str] = {
 
 
 # ── Geo helpers ───────────────────────────────────────────────────────────────
+
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in **metres** between two WGS-84 points."""
@@ -87,7 +88,7 @@ def _haversine_distance_matrix(coords: np.ndarray) -> np.ndarray:
     return matrix
 
 
-def _convex_hull_geojson(points: List[Tuple[float, float]]) -> Dict[str, Any]:
+def _convex_hull_geojson(points: list[tuple[float, float]]) -> dict[str, Any]:
     """Return a GeoJSON Polygon for the convex hull of *points* (lat, lon).
 
     When < 3 unique points exist, fall back to a ~250 m buffered circle
@@ -103,7 +104,7 @@ def _convex_hull_geojson(points: List[Tuple[float, float]]) -> Dict[str, Any]:
     # Simple gift-wrapping (Jarvis march) for convex hull
     pts = sorted(unique, key=lambda p: (p[1], p[0]))  # sort by lon then lat
 
-    def cross(o: Tuple, a: Tuple, b: Tuple) -> float:
+    def cross(o: tuple, a: tuple, b: tuple) -> float:
         return (a[1] - o[1]) * (b[0] - o[0]) - (a[0] - o[0]) * (b[1] - o[1])
 
     lower: list = []
@@ -129,9 +130,7 @@ def _convex_hull_geojson(points: List[Tuple[float, float]]) -> Dict[str, Any]:
     }
 
 
-def _buffered_circle(
-    lat: float, lon: float, radius_m: float = 250, segments: int = 32
-) -> Dict[str, Any]:
+def _buffered_circle(lat: float, lon: float, radius_m: float = 250, segments: int = 32) -> dict[str, Any]:
     """Generate a GeoJSON Polygon approximating a circle of *radius_m*."""
     coords = []
     for i in range(segments):
@@ -156,7 +155,7 @@ def _priority_label(avg_score: float) -> str:
     return "low"
 
 
-def _compute_clusters(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _compute_clusters(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Run DBSCAN over *requests* and return cluster descriptors.
 
     Each request dict must have at minimum:
@@ -177,7 +176,7 @@ def _compute_clusters(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     db = DBSCAN(eps=_EPS_METERS, min_samples=_MIN_SAMPLES, metric="precomputed")
     labels = db.fit_predict(dist_matrix)
 
-    clusters: List[Dict[str, Any]] = []
+    clusters: list[dict[str, Any]] = []
     unique_labels = set(labels)
     unique_labels.discard(-1)  # noise
 
@@ -200,17 +199,19 @@ def _compute_clusters(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         boundary = _convex_hull_geojson([(r["latitude"], r["longitude"]) for r in cluster_requests])
 
-        clusters.append({
-            "centroid_lat": round(centroid_lat, 6),
-            "centroid_lon": round(centroid_lon, 6),
-            "request_count": len(cluster_requests),
-            "total_people": total_people,
-            "dominant_type": dominant_type,
-            "avg_priority": round(avg_score, 2),
-            "priority_label": _priority_label(avg_score),
-            "boundary": boundary,
-            "request_ids": [r["id"] for r in cluster_requests],
-        })
+        clusters.append(
+            {
+                "centroid_lat": round(centroid_lat, 6),
+                "centroid_lon": round(centroid_lon, 6),
+                "request_count": len(cluster_requests),
+                "total_people": total_people,
+                "dominant_type": dominant_type,
+                "avg_priority": round(avg_score, 2),
+                "priority_label": _priority_label(avg_score),
+                "boundary": boundary,
+                "request_ids": [r["id"] for r in cluster_requests],
+            }
+        )
 
     return clusters
 
@@ -218,34 +219,39 @@ def _compute_clusters(requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ── Database write helpers ──────────────────────────────────────────────────
 
 
-def _write_hotspot_to_db(cluster: Dict[str, Any], doc_id: str) -> None:
+def _write_hotspot_to_db(cluster: dict[str, Any], doc_id: str) -> None:
     """Write/overwrite a hotspot document in ``hotspot_clusters`` table."""
     from app.database import db_admin
-    db_admin.table("hotspot_clusters").upsert({
-        "id": doc_id,
-        "centroid": {"lat": cluster["centroid_lat"], "lon": cluster["centroid_lon"]},
-        "boundary": cluster["boundary"],
-        "request_count": cluster["request_count"],
-        "total_people": cluster["total_people"],
-        "dominant_type": cluster["dominant_type"],
-        "avg_priority": cluster["avg_priority"],
-        "priority_label": cluster["priority_label"],
-        "request_ids": cluster["request_ids"],
-        "status": "active",
-        "detected_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).execute()
+
+    db_admin.table("hotspot_clusters").upsert(
+        {
+            "id": doc_id,
+            "centroid": {"lat": cluster["centroid_lat"], "lon": cluster["centroid_lon"]},
+            "boundary": cluster["boundary"],
+            "request_count": cluster["request_count"],
+            "total_people": cluster["total_people"],
+            "dominant_type": cluster["dominant_type"],
+            "avg_priority": cluster["avg_priority"],
+            "priority_label": cluster["priority_label"],
+            "request_ids": cluster["request_ids"],
+            "status": "active",
+            "detected_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    ).execute()
     logger.info("Hotspot doc written: %s", doc_id)
 
 
-def _find_nearest_ngos(lat: float, lon: float, limit: int = 3) -> List[Dict[str, Any]]:
+def _find_nearest_ngos(lat: float, lon: float, limit: int = 3) -> list[dict[str, Any]]:
     """Find the *limit* nearest NGOs with status 'active' / 'verified'.
 
     NGO user records are expected to have ``latitude`` and ``longitude``
     fields (set during onboarding).  Falls back gracefully if no NGOs
     have coordinates.  Cached for 5 minutes to reduce database reads.
     """
-    from app.core.query_cache import cache_get as mem_get, cache_set as mem_set, TTL_MEDIUM
+    from app.core.query_cache import TTL_MEDIUM
+    from app.core.query_cache import cache_get as mem_get
+    from app.core.query_cache import cache_set as mem_set
 
     cache_key = "clustering:ngo_list"
     ngos = mem_get(cache_key)
@@ -278,7 +284,7 @@ def _find_nearest_ngos(lat: float, lon: float, limit: int = 3) -> List[Dict[str,
     return ngos_with_coords[:limit]
 
 
-def _send_hotspot_alert(cluster: Dict[str, Any], doc_id: str) -> None:
+def _send_hotspot_alert(cluster: dict[str, Any], doc_id: str) -> None:
     """Push a ``hotspot_alert`` document to ``ngo_alerts/{ngo_id}`` for each
     of the nearest NGOs.  The NGO dashboard uses an ``onSnapshot`` listener
     on this collection to display real-time alerts.
@@ -297,7 +303,7 @@ def _send_hotspot_alert(cluster: Dict[str, Any], doc_id: str) -> None:
         "avg_priority": cluster["avg_priority"],
         "priority_label": cluster["priority_label"],
         "status": "new",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     for ngo in nearest:
@@ -313,10 +319,11 @@ def _send_hotspot_alert(cluster: Dict[str, Any], doc_id: str) -> None:
 
 # ── Persist cluster to database ──────────────────────────────────────────────
 
-async def _persist_cluster(cluster: Dict[str, Any]) -> str:
+
+async def _persist_cluster(cluster: dict[str, Any]) -> str:
     """Save a cluster to ``hotspot_clusters`` table and return its doc ID."""
     doc_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     record = {
         "id": doc_id,
@@ -347,7 +354,8 @@ async def _persist_cluster(cluster: Dict[str, Any]) -> str:
 
 # ── Main entry point (called by scheduler) ───────────────────────────────────
 
-async def run_clustering() -> List[Dict[str, Any]]:
+
+async def run_clustering() -> list[dict[str, Any]]:
     """Fetch active requests, run DBSCAN, persist new clusters,
     and alert NGOs for high-priority hotspots.
 
@@ -370,11 +378,7 @@ async def run_clustering() -> List[Dict[str, Any]]:
         return []
 
     # Keep only requests that have coordinates
-    requests = [
-        r for r in all_requests
-        if r.get("latitude") is not None
-        and r.get("longitude") is not None
-    ]
+    requests = [r for r in all_requests if r.get("latitude") is not None and r.get("longitude") is not None]
 
     logger.info("Clustering %d geo-located active requests (of %d fetched)", len(requests), len(all_requests))
 
@@ -392,37 +396,48 @@ async def run_clustering() -> List[Dict[str, Any]]:
     #    longer detected (single batch query instead of N updates).
     try:
         old_resp = await (
-            db_admin.table("hotspot_clusters")
-            .select("id")
-            .eq("status", "active")
-            .limit(500)
-            .async_execute()
+            db_admin.table("hotspot_clusters").select("id").eq("status", "active").limit(500).async_execute()
         )
         old_ids = [r["id"] for r in (old_resp.data or [])]
         if old_ids:
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             # Batch resolve: update all old clusters at once using in_ filter
             for batch_start in range(0, len(old_ids), 30):
-                batch_ids = old_ids[batch_start:batch_start + 30]
-                await db_admin.table("hotspot_clusters").update({
-                    "status": "resolved",
-                    "resolved_at": now_iso,
-                }).in_("id", batch_ids).async_execute()
+                batch_ids = old_ids[batch_start : batch_start + 30]
+                await (
+                    db_admin.table("hotspot_clusters")
+                    .update(
+                        {
+                            "status": "resolved",
+                            "resolved_at": now_iso,
+                        }
+                    )
+                    .in_("id", batch_ids)
+                    .async_execute()
+                )
     except Exception as exc:
         logger.warning("Could not expire old clusters: %s", exc)
 
     # 4. Persist new clusters + NGO alerts
-    new_clusters: List[Dict[str, Any]] = []
+    new_clusters: list[dict[str, Any]] = []
     for cluster in clusters:
         doc_id = await _persist_cluster(cluster)
 
         # Upsert to database for real-time map layer
         try:
             import asyncio as _asyncio
+
             await _asyncio.to_thread(_write_hotspot_to_db, cluster, doc_id)
-            await db_admin.table("hotspot_clusters").update({
-                "synced": True,
-            }).eq("id", doc_id).async_execute()
+            await (
+                db_admin.table("hotspot_clusters")
+                .update(
+                    {
+                        "synced": True,
+                    }
+                )
+                .eq("id", doc_id)
+                .async_execute()
+            )
         except Exception as exc:
             logger.error("Hotspot sync failed for %s: %s", doc_id, exc)
 
@@ -430,6 +445,7 @@ async def run_clustering() -> List[Dict[str, Any]]:
         if cluster["priority_label"] in ("high", "critical"):
             try:
                 import asyncio
+
                 await asyncio.to_thread(_send_hotspot_alert, cluster, doc_id)
             except Exception as exc:
                 logger.error("NGO alerting failed for %s: %s", doc_id, exc)
@@ -443,7 +459,8 @@ async def run_clustering() -> List[Dict[str, Any]]:
 
 # ── GeoJSON builder (used by the API endpoint) ───────────────────────────────
 
-def build_geojson_feature_collection() -> Dict[str, Any]:
+
+def build_geojson_feature_collection() -> dict[str, Any]:
     """Return all **active** hotspot clusters as a GeoJSON FeatureCollection.
 
     Each Feature carries the cluster statistics as ``properties`` and the
@@ -463,11 +480,12 @@ def build_geojson_feature_collection() -> Dict[str, Any]:
         logger.error("Failed to fetch hotspot clusters: %s", exc)
         rows = []
 
-    features: List[Dict[str, Any]] = []
+    features: list[dict[str, Any]] = []
     for row in rows:
         boundary = row.get("boundary", {})
         if isinstance(boundary, str):
             import json
+
             try:
                 boundary = json.loads(boundary)
             except Exception:

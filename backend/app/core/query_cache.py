@@ -7,23 +7,23 @@ Falls back transparently on cache miss.
 """
 
 import logging
-import time
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any
 
 logger = logging.getLogger("query_cache")
 
 # ── Cache storage ─────────────────────────────────────────────────────────────
 
-_cache: Dict[str, Tuple[Any, float]] = {}  # key → (value, expires_at)
+_cache: dict[str, tuple[Any, float]] = {}  # key → (value, expires_at)
 _lock = threading.Lock()
 
 # TTL presets (seconds)
-TTL_VERY_SHORT = 15       # 15s — volatile data (active request counts)
-TTL_SHORT = 60            # 1 min — lists that change moderately
-TTL_MEDIUM = 300          # 5 min — users-by-role, locations
-TTL_LONG = 900            # 15 min — platform_settings, static lookups
-TTL_VERY_LONG = 1800      # 30 min — rarely changing reference data
+TTL_VERY_SHORT = 15  # 15s — volatile data (active request counts)
+TTL_SHORT = 60  # 1 min — lists that change moderately
+TTL_MEDIUM = 300  # 5 min — users-by-role, locations
+TTL_LONG = 900  # 15 min — platform_settings, static lookups
+TTL_VERY_LONG = 1800  # 30 min — rarely changing reference data
 
 # Collections that benefit most from caching
 CACHEABLE_COLLECTIONS = {
@@ -35,7 +35,7 @@ CACHEABLE_COLLECTIONS = {
 }
 
 
-def cache_get(key: str) -> Optional[Any]:
+def cache_get(key: str) -> Any | None:
     """Return cached value or None if miss/expired."""
     with _lock:
         entry = _cache.get(key)
@@ -74,7 +74,7 @@ def cache_clear() -> None:
         _cache.clear()
 
 
-def cache_stats() -> Dict[str, int]:
+def cache_stats() -> dict[str, int]:
     """Return cache size and expired count."""
     now = time.monotonic()
     with _lock:
@@ -97,9 +97,16 @@ def cleanup_expired() -> int:
 
 # ── Query-result cache helpers ────────────────────────────────────────────────
 
-def make_query_cache_key(table: str, operation: str, filters: list, order: list,
-                         limit: Optional[int], range_start: Optional[int],
-                         range_end: Optional[int]) -> str:
+
+def make_query_cache_key(
+    table: str,
+    operation: str,
+    filters: list,
+    order: list,
+    limit: int | None,
+    range_start: int | None,
+    range_end: int | None,
+) -> str:
     """Build a deterministic cache key from query parameters."""
     filter_str = str(sorted((f, o, str(v)) for f, o, v in filters))
     order_str = str(order)
@@ -108,10 +115,10 @@ def make_query_cache_key(table: str, operation: str, filters: list, order: list,
 
 # ── Users-by-role cache (heavily used by notification_service) ────────────────
 
-_users_by_role_cache: Dict[str, Tuple[List[Dict], float]] = {}
+_users_by_role_cache: dict[str, tuple[list[dict], float]] = {}
 
 
-def get_users_by_role_cached(role: str) -> Optional[List[Dict]]:
+def get_users_by_role_cached(role: str) -> list[dict] | None:
     """Return cached users list for a role, or None."""
     entry = _users_by_role_cache.get(role)
     if entry is None:
@@ -123,7 +130,7 @@ def get_users_by_role_cached(role: str) -> Optional[List[Dict]]:
     return data
 
 
-def set_users_by_role_cached(role: str, users: List[Dict], ttl: int = TTL_MEDIUM) -> None:
+def set_users_by_role_cached(role: str, users: list[dict], ttl: int = TTL_MEDIUM) -> None:
     """Cache users list for a role."""
     _users_by_role_cache[role] = (users, time.monotonic() + ttl)
 

@@ -39,7 +39,7 @@ interface AuthContextType {
   loading: boolean
   role: string | null
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>
-  signUp: (email: string, password: string, fullName?: string, role?: string) => Promise<{ error: Error | null }>
+  signUp: (email: string, password: string, fullName?: string, role?: string) => Promise<{ error: Error | null; requiresEmailVerification: boolean }>
   signOut: () => Promise<void>
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>
   getIdToken: () => Promise<string | null>
@@ -54,12 +54,60 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [role, setRole] = useState<string | null>(null)
   const loadingRef = useRef(true)
+  const attemptedAutoUpsertRef = useRef(false)
   const router = useRouter()
 
   const supabase = getSupabaseClient()
 
   // Keep ref in sync
   useEffect(() => { loadingRef.current = loading }, [loading])
+
+  // Keep client role/cookie in sync with backend role changes (e.g. admin-approved switch)
+  useEffect(() => {
+    if (!user) return
+
+    let stopped = false
+
+    const syncRoleFromBackend = async () => {
+      try {
+        const profileRow = await db.getProfile().catch(() => null) as UserProfile | null
+        if (!profileRow || stopped) return
+
+        setProfile((prev) => (prev ? { ...prev, ...profileRow } : profileRow))
+
+        if (profileRow.role && profileRow.role !== role) {
+          setRole(profileRow.role)
+          document.cookie = `sb-role=${profileRow.role}; path=/; max-age=3600; SameSite=Lax`
+          const target = getRoleDashboardPath(profileRow.role)
+          if (typeof window !== 'undefined' && !window.location.pathname.startsWith(target)) {
+            window.location.href = target
+            return
+          }
+          router.refresh()
+        }
+      } catch {
+        // ignore transient sync failures
+      }
+    }
+
+    const onFocus = () => {
+      void syncRoleFromBackend()
+    }
+
+    const interval = window.setInterval(() => {
+      void syncRoleFromBackend()
+    }, 30000)
+
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
+
+    return () => {
+      stopped = true
+      window.clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
+    }
+  }, [user, role, router])
 
   useEffect(() => {
     let mounted = true
@@ -82,17 +130,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
           const token = session.access_token
           setIdToken(token)
+          attemptedAutoUpsertRef.current = false
 
           const appMeta = session.user.app_metadata || {}
           const userMeta = session.user.user_metadata || {}
           const claimRole = appMeta.role || userMeta.role || null
-          setRole(claimRole)
+          // Keep claim role only as temporary local fallback.
+          // Authoritative role/cookie comes from backend profile in loadProfile().
+          setRole((prev) => prev || claimRole)
 
           // Store token in cookie for middleware access
           document.cookie = `sb-token=${token}; path=/; max-age=3600; SameSite=Lax`
-          if (claimRole) {
-            document.cookie = `sb-role=${claimRole}; path=/; max-age=3600; SameSite=Lax`
-          }
 
           await loadProfile(session.user, session)
         } else {
@@ -140,13 +188,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // 2. If no profile, create one via upsert (2-second max)
       if (!profileData) {
+        if (attemptedAutoUpsertRef.current) {
+          setProfile(null)
+          setLoading(false)
+          return
+        }
+        attemptedAutoUpsertRef.current = true
+
         const appMeta = currentUser.app_metadata || {}
         const userMeta = currentUser.user_metadata || {}
         const claimRole = appMeta.role || userMeta.role || 'victim'
         const insertData = {
           id: currentUser.id,
           email: currentUser.email!,
-          role: claimRole,
           full_name: userMeta.full_name || null,
           updated_at: new Date().toISOString(),
         }
@@ -200,16 +254,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const appMeta = sbUser.app_metadata || {}
       const userMeta = sbUser.user_metadata || {}
       const claimRole = appMeta.role || userMeta.role || null
-      setRole(claimRole)
-      if (claimRole) {
-        document.cookie = `sb-role=${claimRole}; path=/; max-age=3600; SameSite=Lax`
-      }
+      setRole((prev) => prev || claimRole)
 
       // Check profile completion to decide redirect target
       try {
         const profileRow = await db.getProfile().catch(() => null) as { is_profile_completed: boolean; role?: string } | null
 
         const dbRole = profileRow?.role || claimRole
+        if (dbRole) {
+          setRole(dbRole)
+          document.cookie = `sb-role=${dbRole}; path=/; max-age=3600; SameSite=Lax`
+        }
 
         if (dbRole === 'admin') {
           router.push('/admin')
@@ -250,6 +305,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email,
         password,
         options: {
+          emailRedirectTo: typeof window !== 'undefined' ? `${window.location.origin}/auth/callback` : undefined,
           data: {
             full_name: fullName || '',
             role: role || 'victim',
@@ -260,27 +316,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const sbUser = data.user
       if (!sbUser) throw new Error('User creation failed')
+      const requiresEmailVerification = !data.session
 
-      // Register with backend (creates DB profile + sets app_metadata)
-      const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      const token = data.session?.access_token || ''
-      await fetch(`${API_BASE}/api/auth/register`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          email,
-          password,
-          full_name: fullName || '',
-          role: role || 'victim',
-        }),
-      })
+      // Register with backend only when a session token is available
+      // (email verification flows may return no session until OTP/link confirmation).
+      const token = data.session?.access_token
+      if (token) {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+        await fetch(`${API_BASE}/api/auth/register`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            email,
+            password,
+            full_name: fullName || '',
+            role: role || 'victim',
+          }),
+        })
+      }
 
-      return { error: null }
+      return { error: null, requiresEmailVerification }
     } catch (err: any) {
-      return { error: err }
+      return { error: err, requiresEmailVerification: true }
     }
   }
 
