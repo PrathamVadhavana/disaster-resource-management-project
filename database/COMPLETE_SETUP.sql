@@ -248,7 +248,7 @@ CREATE TABLE IF NOT EXISTS public.donor_details (
   id UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  donor_type VARCHAR(50) CHECK (donor_type IN ('individual', 'corporate', 'government')),
+  donor_type VARCHAR(50) CHECK (donor_type IN ('individual', 'corporate', 'foundation', 'government')),
   preferred_causes TEXT[] DEFAULT '{}',
   total_donated DECIMAL(12,2) DEFAULT 0,
   tax_id VARCHAR(100),

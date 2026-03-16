@@ -246,7 +246,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const session = data.session
       const sbUser = data.user
 
-      // Get token and role
+      // Persist token cookie immediately so middleware can read it on redirect
       const token = session.access_token
       setIdToken(token)
       document.cookie = `sb-token=${token}; path=/; max-age=3600; SameSite=Lax`
@@ -256,42 +256,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const claimRole = appMeta.role || userMeta.role || null
       setRole((prev) => prev || claimRole)
 
-      // Check profile completion to decide redirect target
+      // Fetch the authoritative profile from the backend to decide where to redirect.
+      // Use a 4-second ceiling so a slow API never freezes the login button.
+      let profileRow: { is_profile_completed: boolean; role?: string } | null = null
       try {
-        const profileRow = await db.getProfile().catch(() => null) as { is_profile_completed: boolean; role?: string } | null
-
-        const dbRole = profileRow?.role || claimRole
-        if (dbRole) {
-          setRole(dbRole)
-          document.cookie = `sb-role=${dbRole}; path=/; max-age=3600; SameSite=Lax`
-        }
-
-        if (dbRole === 'admin') {
-          router.push('/admin')
-        } else if (profileRow?.is_profile_completed && dbRole) {
-          document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`
-          router.push(getRoleDashboardPath(dbRole))
-        } else {
-          // Check the profile-completed cookie as fallback
-          const hasCompletedCookie = document.cookie.split('; ').some(c => c === 'profile-completed=true')
-          if (hasCompletedCookie && dbRole) {
-            router.push(getRoleDashboardPath(dbRole))
-          } else if (dbRole) {
-            router.push('/onboarding')
-          } else {
-            router.push('/onboarding')
-          }
-        }
+        profileRow = await Promise.race([
+          db.getProfile() as Promise<{ is_profile_completed: boolean; role?: string }>,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+        ])
       } catch {
-        // Even on error, check cookie fallback before defaulting to onboarding
-        const hasCompletedCookie = document.cookie.split('; ').some(c => c === 'profile-completed=true')
-        if (hasCompletedCookie && claimRole) {
-          router.push(getRoleDashboardPath(claimRole))
+        profileRow = null
+      }
+
+      const dbRole = profileRow?.role || claimRole
+      if (dbRole) {
+        setRole(dbRole)
+        document.cookie = `sb-role=${dbRole}; path=/; max-age=3600; SameSite=Lax`
+      }
+
+      // Sync profile-completed cookie when DB confirms it
+      if (profileRow?.is_profile_completed) {
+        document.cookie = `profile-completed=true; path=/; max-age=86400; SameSite=Lax`
+      }
+
+      // Decide redirect target:
+      //  1. Admin always goes to /admin
+      //  2. Completed profile → role dashboard
+      //  3. Profile not yet complete (or fetch timed-out) → check stale cookie first, then onboarding
+      if (dbRole === 'admin') {
+        window.location.href = '/admin'
+      } else if (profileRow?.is_profile_completed && dbRole) {
+        window.location.href = getRoleDashboardPath(dbRole)
+      } else {
+        // Fallback: trust the profile-completed cookie that was written during a previous session
+        const hasCompletedCookie = document.cookie.split('; ').some((c) => c === 'profile-completed=true')
+        if (hasCompletedCookie && dbRole) {
+          window.location.href = getRoleDashboardPath(dbRole)
         } else {
-          router.push('/onboarding')
+          window.location.href = '/onboarding'
         }
       }
-      router.refresh()
 
       return { error: null }
     } catch (err: any) {

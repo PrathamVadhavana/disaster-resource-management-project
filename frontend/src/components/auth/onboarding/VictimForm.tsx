@@ -28,23 +28,28 @@ export function VictimForm({ userId }: { userId: string }) {
     const onSubmit = async (data: VictimFormData) => {
         setLoading(true);
         try {
-            // 0. Ensure users row exists (FK parent for victim_details)
+            // 0. Ensure users row exists and role is set
             const sb = getSupabaseClient();
             const { data: { session } } = await sb.auth.getSession();
             await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'victim' });
 
-            // 1. Insert victim details
-            await db.upsertDetails('victim_details', {
-                id: userId,
-                current_status: data.current_status,
-                needs: data.needs,
-                medical_needs: data.medical_needs || null
-            });
+            // 1. Save role-specific details — non-blocking: a details failure must
+            //    never prevent the user from being marked as profile-complete.
+            try {
+                await db.upsertDetails('victim_details', {
+                    id: userId,
+                    current_status: data.current_status,
+                    needs: data.needs,
+                    medical_needs: data.medical_needs || null,
+                });
+            } catch (detailsErr: any) {
+                console.error('victim_details save failed (non-fatal):', detailsErr);
+            }
 
-            // 2. Mark profile as completed
+            // 2. Always mark profile as completed regardless of details outcome
             await db.updateProfile({ is_profile_completed: true });
 
-            // 3. Set cookies with Supabase access token
+            // 3. Set cookies so middleware routes correctly on hard redirect
             if (session) {
                 document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
                 document.cookie = `sb-role=victim; path=/; max-age=3600; SameSite=Lax`;
@@ -55,7 +60,7 @@ export function VictimForm({ userId }: { userId: string }) {
             window.location.href = '/victim';
         } catch (error: any) {
             console.error('Onboarding submit error:', error);
-            alert('Failed to save details: ' + (error?.message || 'Unknown error'));
+            alert('Failed to complete onboarding: ' + (error?.message || 'Unknown error'));
             setLoading(false);
         }
     };

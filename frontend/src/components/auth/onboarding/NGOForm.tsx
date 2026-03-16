@@ -29,24 +29,29 @@ export function NGOForm({ userId }: { userId: string }) {
     const onSubmit = async (data: NGOFormData) => {
         setLoading(true);
         try {
-            // 0. Ensure users row exists (FK parent for ngo_details)
+            // 0. Ensure users row exists and role is set
             const sb = getSupabaseClient();
             const { data: { session } } = await sb.auth.getSession();
             await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'ngo' });
 
-            // 1. Insert NGO details
-            await db.upsertDetails('ngo_details', {
-                id: userId,
-                organization_name: data.organization_name,
-                registration_number: data.registration_number,
-                operating_sectors: data.operating_sectors,
-                website: data.website || null,
-                verification_status: 'pending'
-            });
+            // 1. Save NGO details — non-blocking so a details failure does not
+            //    trap the user in an infinite onboarding loop.
+            try {
+                await db.upsertDetails('ngo_details', {
+                    id: userId,
+                    organization_name: data.organization_name,
+                    registration_number: data.registration_number,
+                    operating_sectors: data.operating_sectors,
+                    website: data.website || null,
+                    verification_status: 'pending',
+                });
+            } catch (detailsErr: any) {
+                console.error('ngo_details save failed (non-fatal):', detailsErr);
+            }
 
+            // 2. Always mark profile as completed regardless of details outcome
             await db.updateProfile({ is_profile_completed: true });
 
-            // Set cookies with Supabase access token
             if (session) {
                 document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
                 document.cookie = `sb-role=ngo; path=/; max-age=3600; SameSite=Lax`;
@@ -57,7 +62,7 @@ export function NGOForm({ userId }: { userId: string }) {
             window.location.href = '/ngo';
         } catch (error: any) {
             console.error('NGO onboarding submit error:', error);
-            alert('Failed to save details: ' + (error?.message || 'Unknown error'));
+            alert('Failed to complete onboarding: ' + (error?.message || 'Unknown error'));
             setLoading(false);
         }
     };

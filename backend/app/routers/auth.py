@@ -10,7 +10,14 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.database import db_admin
 from app.db_client import get_supabase_client
 from app.dependencies import _verify_supabase_token, get_current_user
-from app.schemas import ForgotPasswordRequest, ResetPasswordRequest, Token, UserLogin, UserRegister, EmailVerificationResponse
+from app.schemas import (
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    Token,
+    UserLogin,
+    UserRegister,
+    EmailVerificationResponse,
+)
 
 try:
     from app.middleware.rate_limit import limiter
@@ -54,7 +61,11 @@ async def register(request: Request, user: UserRegister):
                 # Try to get their ID from the JWT bearer token
                 existing_user = True
                 auth_header = request.headers.get("Authorization", "")
-                bearer_token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+                bearer_token = (
+                    auth_header.replace("Bearer ", "")
+                    if auth_header.startswith("Bearer ")
+                    else ""
+                )
                 if bearer_token:
                     try:
                         decoded = _verify_supabase_token(bearer_token)
@@ -66,35 +77,50 @@ async def register(request: Request, user: UserRegister):
                             {
                                 "app_metadata": {"role": user.role},
                                 "user_metadata": {
-                                    "full_name": user.full_name or (sb_user.user_metadata or {}).get("full_name", ""),
+                                    "full_name": user.full_name
+                                    or (sb_user.user_metadata or {}).get(
+                                        "full_name", ""
+                                    ),
                                     "role": user.role,
                                 },
                             },
                         )
                     except Exception:
-                        raise HTTPException(status_code=400, detail="Email already registered")
+                        raise HTTPException(
+                            status_code=400, detail="Email already registered"
+                        )
                 else:
-                    raise HTTPException(status_code=400, detail="Email already registered")
+                    raise HTTPException(
+                        status_code=400, detail="Email already registered"
+                    )
             else:
-                raise HTTPException(status_code=500, detail=f"Auth creation failed: {err_msg}")
+                raise HTTPException(
+                    status_code=500, detail=f"Auth creation failed: {err_msg}"
+                )
 
         # 2. Send verification email for newly created users
         # Always try to send verification email (Supabase handles duplicates gracefully)
         try:
             allowed_origins = _parse_allowed_origins()
-            default_origin = allowed_origins[0] if allowed_origins else "http://localhost:3000"
+            default_origin = (
+                allowed_origins[0] if allowed_origins else "http://localhost:3000"
+            )
             request_origin = (request.headers.get("origin") or "").strip().rstrip("/")
             if request_origin and request_origin in allowed_origins:
                 default_origin = request_origin
-            
+
             redirect_url = f"{default_origin}/auth/callback"
-            
-            sb.auth.resend({
-                "type": "signup",
-                "email": user.email,
-                "redirect_to": redirect_url,
-            })
-            logger.info("Verification email sent for email (hash: %s)", hash(user.email))
+
+            sb.auth.resend(
+                {
+                    "type": "signup",
+                    "email": user.email,
+                    "redirect_to": redirect_url,
+                }
+            )
+            logger.info(
+                "Verification email sent for email (hash: %s)", hash(user.email)
+            )
         except Exception as e:
             logger.warning(f"Failed to send verification email: {e}")
 
@@ -205,7 +231,13 @@ async def me(user: dict = Depends(get_current_user)):
     """Get current user profile"""
     try:
         # Get user profile from DB
-        response = await db_admin.table("users").select("*").eq("id", user["id"]).single().async_execute()
+        response = (
+            await db_admin.table("users")
+            .select("*")
+            .eq("id", user["id"])
+            .single()
+            .async_execute()
+        )
 
         return response.data
 
@@ -227,7 +259,12 @@ async def update_me(request: Request, user: dict = Depends(get_current_user)):
         body.pop("verification_notes", None)
         body.pop("metadata", None)
 
-        response = await db_admin.table("users").update(body).eq("id", user["id"]).async_execute()
+        response = (
+            await db_admin.table("users")
+            .update(body)
+            .eq("id", user["id"])
+            .async_execute()
+        )
         return response.data[0] if response.data else {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -239,11 +276,15 @@ async def upsert_me(request: Request, user: dict = Depends(get_current_user)):
     try:
         body = await request.json()
         # Prevent upsert from mutating auth-sensitive fields.
-        body.pop("role", None)
+        # Role IS allowed here (onboarding sets the chosen role) but 'admin'
+        # can never be self-assigned.
+        if body.get("role") == "admin":
+            body.pop("role", None)
         body.pop("additional_roles", None)
         body.pop("verification_status", None)
         body.pop("verification_notes", None)
         body.pop("metadata", None)
+        # Always force id from the authenticated JWT — do not trust client-supplied id.
         body["id"] = user["id"]
 
         response = await db_admin.table("users").upsert(body).async_execute()
@@ -259,9 +300,16 @@ async def upsert_details(
     user: dict = Depends(get_current_user),
 ):
     """Upsert role-specific detail table (donor_details, victim_details, etc.)."""
-    allowed_tables = {"donor_details", "victim_details", "volunteer_details", "ngo_details"}
+    allowed_tables = {
+        "donor_details",
+        "victim_details",
+        "volunteer_details",
+        "ngo_details",
+    }
     if detail_table not in allowed_tables:
-        raise HTTPException(status_code=400, detail=f"Invalid detail table: {detail_table}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid detail table: {detail_table}"
+        )
 
     try:
         body = await request.json()
@@ -315,7 +363,13 @@ async def switch_role(body: _RoleSwitchBody, user: dict = Depends(get_current_us
 
     uid = user["id"]
 
-    metadata_resp = await db_admin.table("users").select("metadata").eq("id", uid).maybe_single().async_execute()
+    metadata_resp = (
+        await db_admin.table("users")
+        .select("metadata")
+        .eq("id", uid)
+        .maybe_single()
+        .async_execute()
+    )
     existing_meta = (metadata_resp.data or {}).get("metadata") or {}
 
     if body.new_role == "victim":
@@ -346,7 +400,9 @@ async def switch_role(body: _RoleSwitchBody, user: dict = Depends(get_current_us
 
         try:
             sb = get_supabase_client()
-            sb.auth.admin.update_user_by_id(uid, {"app_metadata": {"role": body.new_role}})
+            sb.auth.admin.update_user_by_id(
+                uid, {"app_metadata": {"role": body.new_role}}
+            )
         except Exception as e:
             print(f"Warning: Failed to sync Supabase auth metadata: {e}")
 
@@ -361,7 +417,8 @@ async def switch_role(body: _RoleSwitchBody, user: dict = Depends(get_current_us
         (
             req
             for req in pending_requests
-            if req.get("status") == "pending" and req.get("requested_role") == body.new_role
+            if req.get("status") == "pending"
+            and req.get("requested_role") == body.new_role
         ),
         None,
     )
@@ -422,7 +479,11 @@ _PASSWORD_REGEX = re.compile(r"^(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}$")
 
 def _parse_allowed_origins() -> list[str]:
     origins_raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
-    return [origin.strip().rstrip("/") for origin in origins_raw.split(",") if origin.strip()]
+    return [
+        origin.strip().rstrip("/")
+        for origin in origins_raw.split(",")
+        if origin.strip()
+    ]
 
 
 def _is_allowed_reset_redirect(url: str, allowed_origins: list[str]) -> bool:
@@ -471,7 +532,9 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
     email = (body.email or "").strip().lower()
     if not email or "@" not in email:
         # Still return success to avoid leaking info
-        return {"message": "If an account exists with this email, a password reset link has been sent."}
+        return {
+            "message": "If an account exists with this email, a password reset link has been sent."
+        }
 
     # Determine the redirect URL for the reset link
     allowed_origins = _parse_allowed_origins()
@@ -483,7 +546,9 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
 
     redirect_url = f"{default_origin}/reset-password"
     requested_redirect = (body.redirect_to or "").strip()
-    if requested_redirect and _is_allowed_reset_redirect(requested_redirect, allowed_origins):
+    if requested_redirect and _is_allowed_reset_redirect(
+        requested_redirect, allowed_origins
+    ):
         redirect_url = requested_redirect
 
     try:
@@ -498,7 +563,9 @@ async def forgot_password(request: Request, body: ForgotPasswordRequest):
         logger.warning("Forgot password send result: %s", str(e))
 
     # Always return success — never reveal whether the email exists
-    return {"message": "If an account exists with this email, a password reset link has been sent."}
+    return {
+        "message": "If an account exists with this email, a password reset link has been sent."
+    }
 
 
 @router.post("/reset-password")
@@ -616,7 +683,9 @@ async def resend_verification(request: Request, body: ResendVerificationRequest)
 
         # Get the origin for redirect
         allowed_origins = _parse_allowed_origins()
-        default_origin = allowed_origins[0] if allowed_origins else "http://localhost:3000"
+        default_origin = (
+            allowed_origins[0] if allowed_origins else "http://localhost:3000"
+        )
         request_origin = (request.headers.get("origin") or "").strip().rstrip("/")
         if request_origin and request_origin in allowed_origins:
             default_origin = request_origin
@@ -633,9 +702,13 @@ async def resend_verification(request: Request, body: ResendVerificationRequest)
         )
 
         logger.info("Verification email resent for email (hash: %s)", hash(body.email))
-        return {"message": "Verification email has been resent. Please check your inbox."}
+        return {
+            "message": "Verification email has been resent. Please check your inbox."
+        }
 
     except Exception as e:
         logger.warning("Resend verification failed: %s", str(e))
         # Always return success to avoid leaking whether email exists
-        return {"message": "Verification email has been resent. Please check your inbox."}
+        return {
+            "message": "Verification email has been resent. Please check your inbox."
+        }

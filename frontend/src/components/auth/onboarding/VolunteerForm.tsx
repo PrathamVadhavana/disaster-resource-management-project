@@ -44,16 +44,22 @@ export function VolunteerForm({ userId }: { userId: string }) {
             const { data: { session } } = await sb.auth.getSession();
             await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'volunteer' });
 
-            await db.upsertDetails('volunteer_details', {
-                id: userId,
-                skills: data.skills,
-                availability_status: data.availability_status,
-                certifications: data.certifications || [],
-            });
+            // Save volunteer details — non-blocking so a details failure does not
+            // trap the user in an infinite onboarding loop.
+            try {
+                await db.upsertDetails('volunteer_details', {
+                    id: userId,
+                    skills: data.skills,
+                    availability_status: data.availability_status,
+                    certifications: data.certifications || [],
+                });
+            } catch (detailsErr: any) {
+                console.error('volunteer_details save failed (non-fatal):', detailsErr);
+            }
 
+            // Always mark profile as completed regardless of details outcome
             await db.updateProfile({ is_profile_completed: true });
 
-            // Set cookies with Supabase access token
             if (session) {
                 document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
                 document.cookie = `sb-role=volunteer; path=/; max-age=3600; SameSite=Lax`;
@@ -62,7 +68,7 @@ export function VolunteerForm({ userId }: { userId: string }) {
             window.location.href = '/volunteer';
         } catch (error: any) {
             console.error('Volunteer onboarding error:', error);
-            alert('Failed to save details: ' + (error?.message || 'Unknown error'));
+            alert('Failed to complete onboarding: ' + (error?.message || 'Unknown error'));
             setLoading(false);
         }
     };

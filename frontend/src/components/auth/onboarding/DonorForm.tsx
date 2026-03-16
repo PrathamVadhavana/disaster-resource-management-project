@@ -45,16 +45,22 @@ export function DonorForm({ userId }: { userId: string }) {
             const { data: { session } } = await sb.auth.getSession();
             await db.upsertProfile({ id: userId, email: session?.user?.email ?? '', role: 'donor' });
 
-            await db.upsertDetails('donor_details', {
-                id: userId,
-                donor_type: data.donor_type,
-                preferred_causes: data.preferred_causes,
-                tax_id: data.tax_id || null,
-            });
+            // Save donor details — non-blocking so a constraint/network failure
+            // does not trap the user in an infinite onboarding loop.
+            try {
+                await db.upsertDetails('donor_details', {
+                    id: userId,
+                    donor_type: data.donor_type,
+                    preferred_causes: data.preferred_causes,
+                    tax_id: data.tax_id || null,
+                });
+            } catch (detailsErr: any) {
+                console.error('donor_details save failed (non-fatal):', detailsErr);
+            }
 
+            // Always mark profile as completed regardless of details outcome
             await db.updateProfile({ is_profile_completed: true });
 
-            // Set cookies with Supabase access token
             if (session) {
                 document.cookie = `sb-token=${session.access_token}; path=/; max-age=3600; SameSite=Lax`;
                 document.cookie = `sb-role=donor; path=/; max-age=3600; SameSite=Lax`;
@@ -63,7 +69,7 @@ export function DonorForm({ userId }: { userId: string }) {
             window.location.href = '/donor';
         } catch (error: any) {
             console.error('Donor onboarding error:', error);
-            alert('Failed to save details: ' + (error?.message || 'Unknown error'));
+            alert('Failed to complete onboarding: ' + (error?.message || 'Unknown error'));
             setLoading(false);
         }
     };
@@ -83,11 +89,10 @@ export function DonorForm({ userId }: { userId: string }) {
                     {DONOR_TYPES.map(dt => (
                         <label
                             key={dt.value}
-                            className={`cursor-pointer rounded-xl border p-3 flex flex-col gap-0.5 transition-all hover:bg-slate-50 dark:hover:bg-slate-800 ${
-                                form.watch('donor_type') === dt.value
+                            className={`cursor-pointer rounded-xl border p-3 flex flex-col gap-0.5 transition-all hover:bg-slate-50 dark:hover:bg-slate-800 ${form.watch('donor_type') === dt.value
                                     ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-900/10 ring-1 ring-emerald-500'
                                     : 'border-slate-200 dark:border-slate-700'
-                            }`}
+                                }`}
                         >
                             <input type="radio" value={dt.value} {...form.register('donor_type')} className="sr-only" />
                             <span className="text-sm font-bold dark:text-white">{dt.label}</span>
