@@ -41,6 +41,9 @@ export function NotificationBell() {
     const notifications = data?.notifications || []
     const unread = data?.unread_count || 0
 
+    // Track seen notification IDs to prevent duplicate browser notifications
+    const seenNotifIds = useRef<Set<string>>(new Set())
+
     // SSE realtime subscription for instant notifications
     useEffect(() => {
         if (!profile?.id) return
@@ -49,6 +52,11 @@ export function NotificationBell() {
             // Only care about inserts for this user
             if (evt.type !== 'INSERT') return
             if (evt.row?.user_id !== profile.id) return
+
+            const notifId: string = evt.row?.id
+            // Deduplicate: skip if we've already processed this notification ID
+            if (notifId && seenNotifIds.current.has(notifId)) return
+            if (notifId) seenNotifIds.current.add(notifId)
 
             qc.invalidateQueries({ queryKey: ['notifications'] })
             // Play sound for new notification
