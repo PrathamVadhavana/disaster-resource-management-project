@@ -182,10 +182,11 @@ class NLQueryService:
         days = params.get("days", 7)
         
         # Build raw SQL for transparency
+        rt_filter = f"AND resource_type = '{resource_type}'" if resource_type else ""
         raw_sql = f"""SELECT count(*) as count, resource_type 
 FROM resource_requests 
 WHERE created_at > now() - interval '{days} days' 
-{'AND resource_type = \'' + resource_type + '\'' if resource_type else ''} 
+{rt_filter} 
 GROUP BY resource_type"""
         
         # Execute raw SQL
@@ -210,7 +211,7 @@ GROUP BY resource_type"""
             resp = await db_admin.rpc("exec_sql", {
                 "query": query,
                 "params": json.dumps(exec_params)
-            }).execute() if hasattr(db_admin, 'rpc') else None
+            }).async_execute() if hasattr(db_admin, 'rpc') else None
             
             if not resp or not resp.data:
                 # Fallback: use table query
@@ -219,7 +220,7 @@ GROUP BY resource_type"""
                 table_query = table_query.gte("created_at", since)
                 if resource_type:
                     table_query = table_query.eq("resource_type", resource_type)
-                resp = await table_query.execute()
+                resp = await table_query.async_execute()
                 
                 # Count by resource_type
                 counts = {}
@@ -239,7 +240,7 @@ GROUP BY resource_type"""
             table_query = table_query.gte("created_at", since)
             if resource_type:
                 table_query = table_query.eq("resource_type", resource_type)
-            resp = await table_query.execute()
+            resp = await table_query.async_execute()
             
             counts = {}
             for row in resp.data or []:
@@ -278,7 +279,7 @@ LIMIT {limit}"""
             # Get aggregated request counts by area
             query = db_admin.table("resource_requests").select("latitude, longitude")
             query = query.is_("latitude", "not.is.null").is_("longitude", "not.is.null")
-            resp = await query.execute()
+            resp = await query.async_execute()
             
             # Group by rounded lat/lng
             area_counts = {}
@@ -296,7 +297,7 @@ LIMIT {limit}"""
             areas_with_names = []
             for (lat, lng), count in sorted_areas:
                 # Find nearest location from locations table
-                loc_resp = await db_admin.table("locations").select("id, name, latitude, longitude").execute()
+                loc_resp = await db_admin.table("locations").select("id, name, latitude, longitude").async_execute()
                 
                 nearest_loc = None
                 min_dist = float('inf')
@@ -342,7 +343,7 @@ GROUP BY status"""
         
         try:
             # Get all request statuses
-            resp = await db_admin.table("resource_requests").select("status").execute()
+            resp = await db_admin.table("resource_requests").select("status").async_execute()
             
             status_counts = {}
             total = 0
@@ -389,7 +390,7 @@ LIMIT {limit}"""
         
         try:
             # Get verification counts by volunteer
-            resp = await db_admin.table("request_verifications").select("volunteer_id").execute()
+            resp = await db_admin.table("request_verifications").select("volunteer_id").async_execute()
             
             volunteer_counts = {}
             for row in resp.data or []:
@@ -403,7 +404,7 @@ LIMIT {limit}"""
             # Get user details for each volunteer
             top_volunteers = []
             for vid, count in sorted_volunteers:
-                user_resp = await db_admin.table("users").select("id, full_name, email").eq("id", vid).execute()
+                user_resp = await db_admin.table("users").select("id, full_name, email").eq("id", vid).async_execute()
                 user_data = user_resp.data[0] if user_resp.data else {}
                 
                 top_volunteers.append({
@@ -440,7 +441,7 @@ LIMIT {limit}"""
             since = (datetime.utcnow() - timedelta(days=30)).isoformat()  # Get last 30 days
             resp = await db_admin.table("resource_requests").select(
                 "resource_type, created_at, quantity"
-            ).gte("created_at", since).execute()
+            ).gte("created_at", since).async_execute()
             
             # Aggregate by resource_type and day
             daily_consumption = {}
@@ -456,7 +457,7 @@ LIMIT {limit}"""
                     daily_consumption[rt][day_key] = daily_consumption[rt].get(day_key, 0) + qty
             
             # Get current available resources
-            avail_resp = await db_admin.table("resources").select("type, quantity, status").execute()
+            avail_resp = await db_admin.table("resources").select("type, quantity, status").async_execute()
             
             available_by_type = {}
             for row in avail_resp.data or []:
@@ -540,15 +541,15 @@ LIMIT {limit}"""
             today_start_iso = today_start.isoformat()
             
             # New requests today
-            req_resp = await db_admin.table("resource_requests").select("id").gte("created_at", today_start_iso).execute()
+            req_resp = await db_admin.table("resource_requests").select("id").gte("created_at", today_start_iso).async_execute()
             new_requests_today = len(req_resp.data) if req_resp.data else 0
             
             # New disasters today
-            disaster_resp = await db_admin.table("disasters").select("id").gte("created_at", today_start_iso).execute()
+            disaster_resp = await db_admin.table("disasters").select("id").gte("created_at", today_start_iso).async_execute()
             new_disasters_today = len(disaster_resp.data) if disaster_resp.data else 0
             
             # Resources allocated today (status = 'allocated' or 'deployed')
-            allocated_resp = await db_admin.table("resources").select("id").gte("updated_at", today_start_iso).execute()
+            allocated_resp = await db_admin.table("resources").select("id").gte("updated_at", today_start_iso).async_execute()
             resources_allocated_today = 0
             for row in allocated_resp.data or []:
                 # Could add more filtering if updated_at indicates allocation
@@ -556,14 +557,14 @@ LIMIT {limit}"""
             
             # Alternative: count allocations from allocation_logs if available
             try:
-                alloc_log_resp = await db_admin.table("allocation_logs").select("id").gte("created_at", today_start_iso).execute()
+                alloc_log_resp = await db_admin.table("allocation_logs").select("id").gte("created_at", today_start_iso).async_execute()
                 resources_allocated_today = len(alloc_log_resp.data) if alloc_log_resp.data else 0
             except Exception:
                 pass
             
             # Alerts triggered today
             try:
-                alerts_resp = await db_admin.table("anomaly_alerts").select("id").gte("detected_at", today_start_iso).execute()
+                alerts_resp = await db_admin.table("anomaly_alerts").select("id").gte("detected_at", today_start_iso).async_execute()
                 alerts_triggered_today = len(alerts_resp.data) if alerts_resp.data else 0
             except Exception:
                 alerts_triggered_today = 0

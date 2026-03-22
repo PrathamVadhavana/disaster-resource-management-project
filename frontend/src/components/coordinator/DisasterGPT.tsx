@@ -393,16 +393,31 @@ export function DisasterGPT({ embedded = false, onClose }: DisasterGPTProps) {
 
     function renderContent(content: string) {
         const lines = content.split('\n'); const elements: React.ReactNode[] = []; let inCode = false; let code = ''; let inTable = false; let table: string[][] = []
-        const flushTable = () => { if (table.length) { elements.push(<div key={`t-${elements.length}`} className="overflow-x-auto my-3"><table className="min-w-full text-sm border border-slate-200 dark:border-slate-700 rounded-lg"><thead className="bg-slate-50 dark:bg-slate-800"><tr>{table[0].map((c, i) => <th key={i} className="px-3 py-2 text-left font-semibold border-b">{c.trim()}</th>)}</tr></thead><tbody>{table.slice(1).map((r, ri) => <tr key={ri}>{r.map((c, ci) => <td key={ci} className="px-3 py-2 border-b">{c.trim()}</td>)}</tr>)}</tbody></table></div>); table = [] } inTable = false }
+        const flushTable = () => { if (table.length) { elements.push(<div key={`t-${elements.length}`} className="overflow-x-auto my-3"><table className="min-w-full text-sm border border-slate-200 dark:border-slate-700 rounded-lg"><thead className="bg-slate-50 dark:bg-slate-800"><tr>{table[0].map((c, i) => <th key={i} className="px-3 py-2 text-left font-semibold border-b">{c.trim()}</th>)}</tr></thead><tbody>{table.slice(1).map((r, ri) => <tr key={ri}>{r.map((c, ci) => <td key={ci} className="px-3 py-2 border-b">{formatInline(c.trim())}</td>)}</tr>)}</tbody></table></div>); table = [] } inTable = false }
+        function formatInline(text: string): React.ReactNode {
+            const parts: React.ReactNode[] = []
+            const regex = /\*\*(.+?)\*\*/g
+            let lastIndex = 0; let match
+            while ((match = regex.exec(text)) !== null) {
+                if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index))
+                parts.push(<strong key={`b-${match.index}`} className="font-semibold text-slate-900 dark:text-white">{match[1]}</strong>)
+                lastIndex = regex.lastIndex
+            }
+            if (lastIndex < text.length) parts.push(text.slice(lastIndex))
+            return parts.length === 1 ? parts[0] : <>{parts}</>
+        }
         lines.forEach((line, i) => {
             if (line.trim().startsWith('```')) { if (inCode) { elements.push(<div key={`c-${i}`} className="my-3 rounded-lg bg-slate-900 p-3 overflow-x-auto"><pre className="text-sm text-green-400 font-mono whitespace-pre-wrap">{code}</pre></div>); code = '' } inCode = !inCode; return }
             if (inCode) { code += line + '\n'; return }
-            if (line.includes('|') && line.trim().startsWith('|')) { if (!inTable) { flushTable(); inTable = true } table.push(line.split('|').filter(c => c.trim())); return } else if (inTable) flushTable()
-            if (line.startsWith('## ')) { elements.push(<h2 key={i} className="text-xl font-bold mt-4 mb-2">{line.slice(3)}</h2>); return }
-            if (line.startsWith('# ')) { elements.push(<h1 key={i} className="text-2xl font-bold mt-4 mb-2">{line.slice(2)}</h1>); return }
+            if (line.includes('|') && line.trim().startsWith('|')) { if (!inTable) { flushTable(); inTable = true } const cells = line.split('|').filter(c => c.trim()); if (cells.every(c => /^[-:]+$/.test(c.trim()))) return; table.push(cells); return } else if (inTable) flushTable()
+            if (line.startsWith('### ')) { elements.push(<h3 key={i} className="text-base font-bold mt-3 mb-1.5 text-slate-800 dark:text-slate-200">{formatInline(line.slice(4))}</h3>); return }
+            if (line.startsWith('## ')) { elements.push(<h2 key={i} className="text-xl font-bold mt-4 mb-2">{formatInline(line.slice(3))}</h2>); return }
+            if (line.startsWith('# ')) { elements.push(<h1 key={i} className="text-2xl font-bold mt-4 mb-2">{formatInline(line.slice(2))}</h1>); return }
             if (line.trim() === '---') { elements.push(<hr key={i} className="my-4 border-slate-200 dark:border-slate-700" />); return }
+            if (line.trim().startsWith('- ')) { elements.push(<div key={i} className="flex items-start gap-2 mb-1 ml-2 text-sm text-slate-700 dark:text-slate-300"><span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500 shrink-0" /><span className="leading-relaxed">{formatInline(line.trim().slice(2))}</span></div>); return }
             if (line.trim() === '') { elements.push(<br key={i} />); return }
-            elements.push(<p key={i} className="mb-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{line}</p>)
+            if (line.startsWith('*') && line.endsWith('*') && !line.startsWith('**')) { elements.push(<p key={i} className="mb-2 text-xs text-slate-500 dark:text-slate-400 italic leading-relaxed">{line.slice(1, -1)}</p>); return }
+            elements.push(<p key={i} className="mb-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{formatInline(line)}</p>)
         })
         flushTable(); return elements
     }

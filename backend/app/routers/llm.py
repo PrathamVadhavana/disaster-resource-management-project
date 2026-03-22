@@ -308,6 +308,20 @@ def _get_semantic_classifier():
                     "registered accounts overview",
                     "platform user statistics",
                 ],
+                "victim_medical": [
+                    "victims requiring medical support",
+                    "how many victims need medical help",
+                    "medical needs of victims",
+                    "critical victims needing help",
+                    "victims in critical condition",
+                ],
+                "urgent_needs": [
+                    "what are the urgent needs",
+                    "current critical situation",
+                    "most pressing needs right now",
+                    "what needs immediate attention",
+                    "emergency priorities",
+                ],
             }
 
             # Pre-encode all exemplars
@@ -525,6 +539,10 @@ def _detect_intent_fallback(message: str) -> str:
         return "generate_report"
     if any(p in msg for p in ["how many request", "number of request", "request count", "pending request", "open request", "total request"]):
         return "resource_requests"
+    if any(p in msg for p in ["victim medical", "medical need", "medical support", "critical victim", "victims need", "victims requiring", "how many victims", "victim condition", "victims in critical", "needs_help", "needs help", "safe victims", "evacuated victims"]):
+        return "victim_medical"
+    if any(p in msg for p in ["urgent need", "most pressing", "immediate attention", "emergency priorit", "critical situation", "what needs attention now", "most urgent", "top priorities", "critical needs"]):
+        return "urgent_needs"
     if any(p in msg for p in ["how many users", "number of users", "total users", "user count", "registered users", "all users", "list users", "user accounts", "total accounts"]):
         return "users_overview"
     if any(p in msg for p in ["what resources are available", "available resources", "inventory", "stock", "supply", "resources we have"]):
@@ -657,6 +675,16 @@ def _generate_follow_up_suggestions(intent: str, context_data: dict | None, user
             "Give me details on the critical alerts",
             "Show me the affected resources",
             "What's the recommended action?",
+        ],
+        "victim_medical": [
+            "How many victims are in critical condition?",
+            "Show me victims by disaster",
+            "What are the most common medical needs?",
+        ],
+        "urgent_needs": [
+            "Show me the supply-demand gaps",
+            "Which disasters need immediate attention?",
+            "Give me a full admin briefing",
         ],
     }
 
@@ -875,6 +903,11 @@ _INTENT_CONTEXT_MAP = {
     "generate_report": ["active_disasters", "resource_requests_summary", "inventory_summary", "active_alerts"],
     "anomalies": ["active_alerts"],
     "users_overview": ["platform_users"],
+    "victim_medical": ["victim_medical_summary", "active_disasters"],
+    "urgent_needs": [
+        "victim_medical_summary", "resource_requests_summary", "inventory_summary",
+        "active_alerts", "supply_demand_gaps", "request_lifecycle",
+    ],
     "general": None,  # Keep all context for general queries
     "causal": ["active_disasters"],
     "multi_agent": ["active_disasters", "supply_demand_gaps"],
@@ -958,11 +991,13 @@ async def _persist_message(
         }).async_execute()
 
         # Update session message count
-        await db_admin.table("disastergpt_sessions").update({
-            "last_message_at": datetime.now(UTC).isoformat(),
-            "message_count": db_admin.rpc("increment", {"x": 1}),  # May need manual SQL
-            "updated_at": datetime.now(UTC).isoformat(),
-        }).eq("session_id", session_id).async_execute()
+        try:
+            await db_admin.table("disastergpt_sessions").update({
+                "last_message_at": datetime.now(UTC).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
+            }).eq("session_id", session_id).async_execute()
+        except Exception:
+            pass  # Non-critical
     except Exception as exc:
         logger.warning("Failed to persist message for session %s: %s", session_id, exc)
 
@@ -1200,9 +1235,14 @@ async def _get_active_alerts() -> list[dict]:
     """Get active anomaly alerts."""
     try:
         resp = await db.table("anomaly_alerts").select(
-            "id,alert_type,severity,description,status,created_at"
+            "id,anomaly_type,severity,title,description,status,created_at"
         ).eq("status", "active").order("severity", desc=True).limit(10).async_execute()
-        return resp.data or []
+        # Normalize: rename 'anomaly_type' to 'alert_type' for downstream consumers
+        alerts = []
+        for a in (resp.data or []):
+            a["alert_type"] = a.pop("anomaly_type", "unknown")
+            alerts.append(a)
+        return alerts
     except Exception as e:
         logger.warning(f"Failed to fetch active alerts: {e}")
         return []
@@ -1212,23 +1252,16 @@ async def _get_chatbot_intake_activity(hours: int = 24) -> dict:
     """Get recent victim chatbot intake activity."""
     try:
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        resp = await db_admin.table("chatbot_sessions").select(
-            "id,session_id,final_resource_type,final_priority,completion_status,created_at"
+        resp = await db_admin.table("disastergpt_sessions").select(
+            "id,session_id,created_at"
         ).gte("created_at", cutoff).order("created_at", desc=True).limit(100).async_execute()
 
         sessions = resp.data or []
-        completed = [s for s in sessions if s.get("completion_status") == "completed"]
-        abandoned = [s for s in sessions if s.get("completion_status") == "abandoned"]
+        completed = sessions  # All sessions from disastergpt_sessions are considered completed
+        abandoned = []  # No abandonment tracking in disastergpt_sessions
 
         resource_demand: dict[str, int] = {}
         priority_dist: dict[str, int] = {}
-        for s in completed:
-            rt = s.get("final_resource_type")
-            if rt:
-                resource_demand[rt] = resource_demand.get(rt, 0) + 1
-            pri = s.get("final_priority")
-            if pri:
-                priority_dist[pri] = priority_dist.get(pri, 0) + 1
 
         return {
             "total_sessions": len(sessions),
@@ -1372,29 +1405,28 @@ async def _get_supply_demand_gap() -> dict:
         # Get supply from donor pledges (committed resources)
         supply_by_type: dict[str, int] = {}
         try:
-            # Check donor_pledges for committed supply
+            # Check donor_pledges for committed supply (join with sourcing requests for resource_type)
             pledge_resp = await db_admin.table("donor_pledges").select(
-                "resource_type,quantity_pledged,status"
-            ).in_("status", ["pending", "confirmed"]).async_execute()
+                "id,quantity_pledged,status,sourcing_request_id,resource_sourcing_requests(resource_type)"
+            ).in_("status", ["pending", "shipped"]).async_execute()
             for r in (pledge_resp.data or []):
-                rt = r.get("resource_type", "unknown")
+                sourcing = r.get("resource_sourcing_requests") or {}
+                rt = sourcing.get("resource_type", "unknown") if isinstance(sourcing, dict) else "unknown"
                 qty = r.get("quantity_pledged", 0) or 0
                 supply_by_type[rt] = supply_by_type.get(rt, 0) + qty
         except Exception as e:
             logger.debug(f"Failed to fetch donor pledges: {e}")
 
         try:
-            # Also check available_resources for NGO/donor inventory
-            avail_resp = await db_admin.table("available_resources").select(
-                "resource_type,total_quantity,claimed_quantity,is_active"
-            ).eq("is_active", True).async_execute()
+            # Also check resources table for available supply
+            avail_resp = await db_admin.table("resources").select(
+                "type,quantity"
+            ).eq("status", "available").async_execute()
             for r in (avail_resp.data or []):
-                rt = r.get("resource_type", "unknown")
-                total = r.get("total_quantity", 0) or 0
-                claimed = r.get("claimed_quantity", 0) or 0
-                available = total - claimed
-                if available > 0:
-                    supply_by_type[rt] = supply_by_type.get(rt, 0) + available
+                rt = r.get("type", "unknown")
+                qty = r.get("quantity", 0) or 0
+                if qty > 0:
+                    supply_by_type[rt] = supply_by_type.get(rt, 0) + qty
         except Exception as e:
             logger.debug(f"Failed to fetch available resources: {e}")
 
@@ -1641,11 +1673,11 @@ async def _get_geographic_insights() -> dict:
         sorted_locs = sorted(location_stats.items(), key=lambda x: x[1]["total"], reverse=True)
 
         disaster_resp = await db_admin.table("disasters").select(
-            "location,title,severity,status"
+            "id,title,severity,status"
         ).eq("status", "active").async_execute()
         disaster_locations = [
-            {"location": d.get("location"), "disaster": d.get("title", "Unknown"), "severity": d.get("severity")}
-            for d in (disaster_resp.data or []) if d.get("location")
+            {"location": str(d.get("id", ""))[:8], "disaster": d.get("title", "Unknown"), "severity": d.get("severity")}
+            for d in (disaster_resp.data or [])
         ]
 
         resource_resp = await db_admin.table("resources").select(
@@ -1853,6 +1885,103 @@ async def _get_global_users_snapshot(include_pii: bool = False, limit: int = 200
         return {"total": 0, "returned": 0, "by_role": {}, "users": [], "pii_included": include_pii}
 
 
+async def _get_victim_medical_summary() -> dict:
+    """Get victim details summary including medical needs and status breakdown."""
+    try:
+        resp = await db_admin.table("victim_details").select(
+            "id,current_status,needs,medical_needs,disaster_id"
+        ).async_execute()
+        victims = resp.data or []
+
+        if not victims:
+            return {"total_victims": 0, "by_status": {}, "with_medical_needs": 0, "needs_breakdown": {}, "victims": []}
+
+        by_status: dict[str, int] = {}
+        needs_breakdown: dict[str, int] = {}
+        with_medical_needs = 0
+
+        for v in victims:
+            status = v.get("current_status") or "unknown"
+            by_status[status] = by_status.get(status, 0) + 1
+
+            if v.get("medical_needs"):
+                with_medical_needs += 1
+
+            needs_list = v.get("needs") or []
+            for need in needs_list:
+                if need:
+                    needs_breakdown[need] = needs_breakdown.get(need, 0) + 1
+
+        # Enrich with user names for the top victims
+        victim_ids = [str(v.get("id")) for v in victims if v.get("id")]
+        names_map: dict[str, str] = {}
+        if victim_ids:
+            try:
+                names_resp = await db_admin.table("users").select(
+                    "id,full_name"
+                ).in_("id", victim_ids[:50]).async_execute()
+                names_map = {str(u["id"]): u.get("full_name", "Unknown") for u in (names_resp.data or [])}
+            except Exception:
+                pass
+
+        enriched = []
+        for v in victims:
+            enriched.append({
+                **v,
+                "victim_name": names_map.get(str(v.get("id")), "Unknown"),
+            })
+
+        # Sort: critical first, then needs_help, then others
+        status_order = {"critical": 0, "needs_help": 1, "evacuated": 2, "safe": 3}
+        enriched.sort(key=lambda x: status_order.get(x.get("current_status", ""), 4))
+
+        return {
+            "total_victims": len(victims),
+            "by_status": by_status,
+            "with_medical_needs": with_medical_needs,
+            "needs_breakdown": dict(sorted(needs_breakdown.items(), key=lambda x: x[1], reverse=True)),
+            "victims": enriched[:30],
+        }
+    except Exception as e:
+        logger.warning(f"Failed to fetch victim medical summary: {e}")
+        return {"total_victims": 0, "by_status": {}, "with_medical_needs": 0, "needs_breakdown": {}, "victims": []}
+
+
+async def _get_alert_notifications_summary(hours: int = 72) -> dict:
+    """Get recent alert notification activity summary."""
+    try:
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        resp = await db_admin.table("alert_notifications").select(
+            "id,channel,severity,status,recipient_role,created_at,sent_at"
+        ).gte("created_at", cutoff).order("created_at", desc=True).limit(200).async_execute()
+        notifications = resp.data or []
+
+        if not notifications:
+            return {"total": 0, "by_channel": {}, "by_severity": {}, "by_status": {}, "time_range_hours": hours}
+
+        by_channel: dict[str, int] = {}
+        by_severity: dict[str, int] = {}
+        by_status: dict[str, int] = {}
+        for n in notifications:
+            ch = n.get("channel", "unknown")
+            by_channel[ch] = by_channel.get(ch, 0) + 1
+            sev = n.get("severity", "unknown")
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            st = n.get("status", "unknown")
+            by_status[st] = by_status.get(st, 0) + 1
+
+        return {
+            "total": len(notifications),
+            "by_channel": by_channel,
+            "by_severity": by_severity,
+            "by_status": by_status,
+            "time_range_hours": hours,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to fetch alert notifications summary: {e}")
+        return {"total": 0, "by_channel": {}, "by_severity": {}, "by_status": {}, "time_range_hours": hours}
+
+
 async def _get_focused_disaster(disaster_id: str) -> dict:
     """Get detailed snapshot for a specific disaster."""
     try:
@@ -1886,6 +2015,7 @@ async def _get_full_context(user: dict, disaster_id: str | None = None, intent: 
         _get_inventory_summary(),
         _get_active_alerts(),
         _get_global_users_snapshot(include_pii=include_pii, limit=250),
+        _get_victim_medical_summary(),
     ]
     base_results = await asyncio.gather(*base_tasks, return_exceptions=True)
 
@@ -1894,6 +2024,7 @@ async def _get_full_context(user: dict, disaster_id: str | None = None, intent: 
     context["inventory_summary"] = base_results[2] if not isinstance(base_results[2], Exception) else {}
     context["active_alerts"] = base_results[3] if not isinstance(base_results[3], Exception) else []
     context["platform_users"] = base_results[4] if not isinstance(base_results[4], Exception) else {}
+    context["victim_medical_summary"] = base_results[5] if not isinstance(base_results[5], Exception) else {}
 
     # ── Parallel fetch: admin-only insights ────────────────────────────────────
     if include_pii:
@@ -1910,6 +2041,7 @@ async def _get_full_context(user: dict, disaster_id: str | None = None, intent: 
             _get_geographic_insights(),
             _get_disaster_scorecards(),
             _get_responder_performance(),
+            _get_alert_notifications_summary(),
         ]
         admin_results = await asyncio.gather(*admin_tasks, return_exceptions=True)
 
@@ -1925,6 +2057,7 @@ async def _get_full_context(user: dict, disaster_id: str | None = None, intent: 
         context["geographic_insights"] = admin_results[9] if not isinstance(admin_results[9], Exception) else {}
         context["disaster_scorecards"] = admin_results[10] if not isinstance(admin_results[10], Exception) else []
         context["responder_performance"] = admin_results[11] if not isinstance(admin_results[11], Exception) else {}
+        context["alert_notifications_summary"] = admin_results[12] if not isinstance(admin_results[12], Exception) else {}
 
     if disaster_id:
         context["focused_disaster"] = await _get_focused_disaster(disaster_id)
@@ -2094,6 +2227,28 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
     else:
         parts.append("\n## Active Anomaly Alerts: None")
 
+    victim_med = context.get("victim_medical_summary") or {}
+    if victim_med.get("total_victims", 0) > 0:
+        parts.append(f"\n## Victim Details ({victim_med['total_victims']} total):")
+        by_stat = victim_med.get("by_status", {})
+        if by_stat:
+            parts.append("  Status breakdown: " + ", ".join(f"{k}: {v}" for k, v in by_stat.items()))
+        med_count = victim_med.get("with_medical_needs", 0)
+        if med_count > 0:
+            parts.append(f"  Victims requiring medical support: {med_count}")
+        needs_bd = victim_med.get("needs_breakdown", {})
+        if needs_bd:
+            parts.append("  Needs breakdown: " + ", ".join(f"{k}: {v}" for k, v in list(needs_bd.items())[:10]))
+        for v in victim_med.get("victims", [])[:15]:
+            med_info = f" | Medical: {v['medical_needs']}" if v.get("medical_needs") else ""
+            needs_str = f" | Needs: {', '.join(v['needs'])}" if v.get("needs") else ""
+            parts.append(
+                f"  - {v.get('victim_name', 'Unknown')} | Status: {v.get('current_status', '?')}"
+                f"{med_info}{needs_str}"
+            )
+    else:
+        parts.append("\n## Victim Details: No victim records found")
+
     # Admin-only sections (only included if pruned context still has them)
     for key, label in [
         ("chatbot_intake_activity", "Chatbot Intake Activity"),
@@ -2107,6 +2262,7 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
         ("geographic_insights", "Geographic Insights"),
         ("disaster_scorecards", "Disaster Scorecards"),
         ("responder_performance", "Responder Performance"),
+        ("alert_notifications_summary", "Alert Notifications Summary"),
     ]:
         data = context.get(key)
         if data:
@@ -2864,6 +3020,140 @@ async def _handle_digest_intent(context: dict) -> tuple[str, dict]:
     return "\n".join(parts), {"type": "digest", "sections": 9}
 
 
+async def _handle_victim_medical_intent(context: dict) -> tuple[str, dict]:
+    """Handle queries about victim medical needs and status."""
+    victim_med = context.get("victim_medical_summary") or {}
+    total = victim_med.get("total_victims", 0)
+
+    parts = ["## 🏥 Victim Medical & Status Summary\n"]
+
+    if total == 0:
+        parts.append("*No victim records found in the system.*\n")
+        return "\n".join(parts), {"type": "victim_medical", "data": victim_med}
+
+    parts.append(f"**Total Victims Registered:** {total}\n")
+
+    by_status = victim_med.get("by_status", {})
+    if by_status:
+        STATUS_EMOJI = {"critical": "🔴", "needs_help": "🟠", "evacuated": "🟡", "safe": "🟢"}
+        parts.append("\n### Status Breakdown\n")
+        for status in ["critical", "needs_help", "evacuated", "safe"]:
+            count = by_status.get(status, 0)
+            if count > 0:
+                emoji = STATUS_EMOJI.get(status, "⚪")
+                parts.append(f"- {emoji} **{status.replace('_', ' ').title()}**: {count} victims\n")
+        unknown = by_status.get("unknown", 0)
+        if unknown > 0:
+            parts.append(f"- ⚪ **Unknown Status**: {unknown} victims\n")
+
+    med_count = victim_med.get("with_medical_needs", 0)
+    parts.append(f"\n### 🩺 Medical Support Required: {med_count} victim(s)\n")
+
+    needs_bd = victim_med.get("needs_breakdown", {})
+    if needs_bd:
+        parts.append("\n### Needs Distribution\n")
+        for need, count in list(needs_bd.items())[:10]:
+            parts.append(f"- **{need}**: {count} victim(s)\n")
+
+    victims = victim_med.get("victims", [])
+    critical_victims = [v for v in victims if v.get("current_status") == "critical"]
+    if critical_victims:
+        parts.append(f"\n### 🚨 Critical Victims ({len(critical_victims)})\n")
+        for v in critical_victims[:10]:
+            med_info = f" | Medical: {v['medical_needs']}" if v.get("medical_needs") else ""
+            needs_str = f" | Needs: {', '.join(v['needs'])}" if v.get("needs") else ""
+            parts.append(f"- **{v.get('victim_name', 'Unknown')}**{med_info}{needs_str}\n")
+
+    needs_help = [v for v in victims if v.get("current_status") == "needs_help"]
+    if needs_help:
+        parts.append(f"\n### ⚠️ Victims Needing Help ({len(needs_help)})\n")
+        for v in needs_help[:10]:
+            med_info = f" | Medical: {v['medical_needs']}" if v.get("medical_needs") else ""
+            needs_str = f" | Needs: {', '.join(v['needs'])}" if v.get("needs") else ""
+            parts.append(f"- **{v.get('victim_name', 'Unknown')}**{med_info}{needs_str}\n")
+
+    return "\n".join(parts), {"type": "victim_medical", "data": victim_med}
+
+
+async def _handle_urgent_needs_intent(context: dict) -> tuple[str, dict]:
+    """Handle queries about urgent/critical needs — combines multiple data sources."""
+    parts = ["## 🚨 Urgent Needs Dashboard\n"]
+    parts.append(f"*Generated at {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*\n")
+    urgent_items = 0
+
+    # 1. Critical victims
+    victim_med = context.get("victim_medical_summary") or {}
+    by_status = victim_med.get("by_status", {})
+    critical_victims = by_status.get("critical", 0)
+    needs_help_victims = by_status.get("needs_help", 0)
+    if critical_victims > 0 or needs_help_victims > 0:
+        parts.append(f"\n### 🔴 Victims Requiring Immediate Attention\n")
+        if critical_victims > 0:
+            parts.append(f"- **{critical_victims} victim(s)** in CRITICAL condition\n")
+            urgent_items += critical_victims
+        if needs_help_victims > 0:
+            parts.append(f"- **{needs_help_victims} victim(s)** need help\n")
+            urgent_items += needs_help_victims
+        med_count = victim_med.get("with_medical_needs", 0)
+        if med_count > 0:
+            parts.append(f"- **{med_count} victim(s)** require medical support\n")
+
+    # 2. Critical priority pending requests
+    req = context.get("resource_requests_summary") or {}
+    pending = req.get("by_status", {}).get("pending", 0)
+    if pending > 0:
+        parts.append(f"\n### ⏳ Pending Resource Requests: {pending}\n")
+        urgent_items += pending
+
+    # 3. Stale requests
+    lifecycle = context.get("request_lifecycle") or {}
+    stale_count = lifecycle.get("stale_count", 0)
+    if stale_count > 0:
+        parts.append(f"\n### ⚠️ Stale Requests (> 48h): {stale_count}\n")
+        for sr in lifecycle.get("stale_pending_requests", [])[:5]:
+            parts.append(f"- ID: {sr['id']} | Age: {sr['age_hours']}h | Priority: {sr.get('priority', '?')}\n")
+        urgent_items += stale_count
+
+    # 4. Supply shortages
+    gaps = context.get("supply_demand_gaps") or {}
+    critical_shortages = gaps.get("critical_shortages", [])
+    if critical_shortages:
+        parts.append(f"\n### 📉 Critical Supply Shortages ({len(critical_shortages)} types)\n")
+        for g in critical_shortages[:5]:
+            parts.append(
+                f"- **{g['type']}**: {g['coverage_pct']}% coverage "
+                f"({g['supply']} available vs {g['demand']} demanded)\n"
+            )
+        urgent_items += len(critical_shortages)
+
+    # 5. Low stock items
+    inv = context.get("inventory_summary") or {}
+    low_stock = inv.get("low_stock", [])
+    if low_stock:
+        parts.append(f"\n### 📦 Low Stock Items ({len(low_stock)} types)\n")
+        by_type = inv.get("by_type", {})
+        for rtype in low_stock[:5]:
+            qty = by_type.get(rtype, {}).get("total_quantity", 0)
+            parts.append(f"- **{rtype}**: {qty} units remaining\n")
+        urgent_items += len(low_stock)
+
+    # 6. Critical alerts
+    alerts = context.get("active_alerts") or []
+    critical_alerts = [a for a in alerts if a.get("severity") == "critical"]
+    if critical_alerts:
+        parts.append(f"\n### 🔴 Critical System Alerts ({len(critical_alerts)})\n")
+        for a in critical_alerts[:5]:
+            parts.append(f"- **{a.get('alert_type', 'Unknown')}**: {a.get('description', '')}\n")
+        urgent_items += len(critical_alerts)
+
+    if urgent_items == 0:
+        parts.append("\n✅ **No urgent needs detected.** System is operating normally.\n")
+    else:
+        parts.append(f"\n---\n**Total urgent items: {urgent_items}** — Ask about any section for details.\n")
+
+    return "\n".join(parts), {"type": "urgent_needs", "urgent_count": urgent_items}
+
+
 async def _handle_general_intent(
     message: str,
     context: dict,
@@ -3060,6 +3350,10 @@ async def chat(
             response_text, context_data = await _handle_causal_intent(body.message, context)
         elif intent == "digest":
             response_text, context_data = await _handle_digest_intent(context)
+        elif intent == "victim_medical":
+            response_text, context_data = await _handle_victim_medical_intent(context)
+        elif intent == "urgent_needs":
+            response_text, context_data = await _handle_urgent_needs_intent(context)
         else:
             user_info = {
                 "role": user.get("role"),
@@ -3313,6 +3607,8 @@ async def chat_stream(
                     "responder_performance": _handle_responder_performance_intent,
                     "digest": _handle_digest_intent,
                     "users_overview": lambda ctx: _handle_users_overview_intent(ctx, user),
+                    "victim_medical": _handle_victim_medical_intent,
+                    "urgent_needs": _handle_urgent_needs_intent,
                 }
                 
                 # Causal handler for streaming

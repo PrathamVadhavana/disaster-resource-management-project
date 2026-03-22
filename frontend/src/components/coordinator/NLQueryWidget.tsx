@@ -33,16 +33,38 @@ export default function NLQueryWidget() {
   }, [messages])
 
   const queryMutation = useMutation({
-    mutationFn: (query: string) => api.askCoordinatorQuery(query, undefined, sessionId),
+    mutationFn: async (query: string) => {
+      const { getSupabaseClient } = await import('@/lib/supabase/client')
+      const sb = getSupabaseClient()
+      const { data: { session: authSession } } = await sb.auth.getSession()
+      const token = authSession?.access_token
+      const userRole = authSession?.user?.user_metadata?.role ?? 'admin'
+      const userName = authSession?.user?.user_metadata?.full_name ?? null
+      const userId = authSession?.user?.id ?? null
+      const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+      const res = await fetch(`${API_BASE}/api/llm/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          message: query,
+          session_id: sessionId,
+          user_context: { role: userRole, name: userName, user_id: userId },
+        }),
+      })
+      if (!res.ok) throw new Error(`Request failed (${res.status})`)
+      return res.json()
+    },
     onSuccess: (data) => {
       setMessages(prev => [
         ...prev,
         {
           role: 'assistant',
-          content: data.response || 'No response received.',
-          chartData: data.chart_data,
-          toolsCalled: data.tools_called,
-          latencyMs: data.latency_ms,
+          content: data.message || data.response || 'No response received.',
+          chartData: data.context_data,
+          toolsCalled: data.intent ? [{ name: data.intent }] : undefined,
         },
       ])
     },
