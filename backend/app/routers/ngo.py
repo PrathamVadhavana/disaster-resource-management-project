@@ -4,7 +4,7 @@ NGO Dashboard Router — Full Production Implementation.
 Endpoints for NGOs to:
 - View approved requests & submit availability
 - Track assigned requests & deliveries
-- Manage inventory (available_resources)
+- Manage inventory (resources)
 - View enhanced dashboard stats with GPS distance
 - Audit trail via operational_pulse
 """
@@ -942,7 +942,7 @@ async def get_ngo_dashboard_stats(
     return stats
 
 
-# ================ NGO INVENTORY (available_resources) ================
+# ================ NGO INVENTORY (resources) ================
 
 
 @router.get("/inventory")
@@ -953,44 +953,56 @@ async def get_ngo_inventory(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """Get this NGO's resource inventory from available_resources."""
+    """Get this NGO's resource inventory from resources table."""
     ngo_id = str(ngo.get("id"))
 
     query = (
-        db_admin.table("available_resources")
+        db_admin.table("resources")
         .select("*", count="exact")
         .eq("provider_id", ngo_id)
-        .eq("provider_role", "ngo")
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
     )
     if category:
-        query = query.eq("category", category)
+        query = query.eq("type", category)
     if status:
         query = query.eq("status", status)
 
     resp = await query.async_execute()
     items = resp.data or []
 
+    # Map resources fields to the frontend-expected shape
+    mapped_items = []
+    for i in items:
+        qty = i.get("quantity", 0) or 0
+        mapped_items.append({
+            "resource_id": i.get("id"),
+            "category": i.get("type"),
+            "resource_type": i.get("type"),
+            "title": i.get("name"),
+            "description": i.get("description"),
+            "total_quantity": qty,
+            "claimed_quantity": 0,
+            "available_quantity": qty,
+            "unit": i.get("unit", "units"),
+            "status": i.get("status", "available"),
+            "is_low_stock": qty < 5,
+            "sku": i.get("tags", [None])[0] if i.get("tags") else None,
+            "item_condition": i.get("quality_status", "good"),
+            "created_at": i.get("created_at"),
+            "updated_at": i.get("updated_at"),
+        })
+
     # Compute summary
     summary = {
         "total_items": resp.count or 0,
-        "total_quantity": sum(i.get("total_quantity", 0) for i in items),
-        "reserved_quantity": sum(i.get("claimed_quantity", 0) for i in items),
-        "available_quantity": sum((i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) for i in items),
-        "low_stock_count": sum(
-            1
-            for i in items
-            if (i.get("total_quantity", 0) - i.get("claimed_quantity", 0)) < max(1, i.get("total_quantity", 0) * 0.2)
-        ),
+        "total_quantity": sum(m["total_quantity"] for m in mapped_items),
+        "reserved_quantity": 0,
+        "available_quantity": sum(m["available_quantity"] for m in mapped_items),
+        "low_stock_count": sum(1 for m in mapped_items if m["is_low_stock"]),
     }
 
-    # Enrich each item with available quantity
-    for i in items:
-        i["available_quantity"] = i.get("total_quantity", 0) - i.get("claimed_quantity", 0)
-        i["is_low_stock"] = i["available_quantity"] < max(1, i.get("total_quantity", 0) * 0.2)
-
-    return {"items": items, "summary": summary, "total": resp.count or 0}
+    return {"items": mapped_items, "summary": summary, "total": resp.count or 0}
 
 
 @router.post("/inventory")
@@ -1001,32 +1013,51 @@ async def add_inventory_item(
     """Add a resource to this NGO's inventory."""
     ngo_id = str(ngo.get("id"))
 
-    item = await unified_resource_service.create_inventory_item(
-        provider_id=ngo_id,
-        category=body.category,
-        resource_type=body.resource_type,
-        title=body.title,
-        description=body.description or "",
-        total_quantity=body.total_quantity,
-        unit=body.unit,
-        address_text=body.address_text or "",
-        user_role="ngo",
-        sku=body.sku,
-        min_stock_level=body.min_stock_level,
-        reorder_point=body.reorder_point,
-        item_condition=body.item_condition,
-        storage_requirements=body.storage_requirements,
-        internal_location=body.internal_location,
-    )
+    # Get a default location_id
+    try:
+        loc_resp = await db_admin.table("locations").select("id").limit(1).async_execute()
+        location_id = loc_resp.data[0]["id"] if loc_resp.data else None
+    except Exception:
+        location_id = None
+
+    if not location_id:
+        raise HTTPException(status_code=500, detail="No location found in system")
+
+    insert_data = {
+        "provider_id": ngo_id,
+        "location_id": location_id,
+        "type": body.category.lower(),
+        "name": body.title,
+        "description": body.description or "",
+        "quantity": body.total_quantity,
+        "unit": body.unit,
+        "status": "available",
+        "quality_status": getattr(body, "item_condition", "good") or "good",
+        "tags": [body.sku] if getattr(body, "sku", None) else [],
+    }
+
+    response = await db_admin.table("resources").insert(insert_data).async_execute()
+
+    if not response.data:
+        raise HTTPException(status_code=500, detail="Failed to add inventory item")
+
+    item = response.data[0]
 
     await _log_pulse(
         ngo_id,
-        item["resource_id"],
+        item["id"],
         "inventory_added",
         f"Added {body.total_quantity} {body.unit} of {body.title}",
     )
 
-    return item
+    return {
+        "resource_id": item["id"],
+        "category": item.get("type"),
+        "title": item.get("name"),
+        "total_quantity": item.get("quantity"),
+        "unit": item.get("unit"),
+        "status": item.get("status"),
+    }
 
 
 @router.patch("/inventory/{resource_id}")
@@ -1040,9 +1071,9 @@ async def update_inventory_item(
     ngo_id = str(ngo.get("id"))
 
     existing = (
-        await db_admin.table("available_resources")
+        await db_admin.table("resources")
         .select("*")
-        .eq("resource_id", resource_id)
+        .eq("id", resource_id)
         .eq("provider_id", ngo_id)
         .single()
         .async_execute()
@@ -1053,11 +1084,11 @@ async def update_inventory_item(
 
     updates = {"updated_at": datetime.now(UTC).isoformat()}
     if total_quantity is not None:
-        updates["total_quantity"] = total_quantity
+        updates["quantity"] = total_quantity
     if status:
         updates["status"] = status
 
-    resp = await db_admin.table("available_resources").update(updates).eq("resource_id", resource_id).async_execute()
+    resp = await db_admin.table("resources").update(updates).eq("id", resource_id).async_execute()
 
     return resp.data[0] if resp.data else {"message": "Updated"}
 

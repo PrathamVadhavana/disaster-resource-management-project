@@ -57,11 +57,10 @@ async def generate_prestaging_recommendations() -> list[dict]:
 
         # Fetch available resources with location
         resources_resp = (
-            await db_admin.table("available_resources")
+            await db_admin.table("resources")
             .select(
-                "resource_id, category, title, total_quantity, claimed_quantity, address_text, latitude, longitude, provider_id"
+                "id, type, name, quantity, status, provider_id"
             )
-            .eq("is_active", True)
             .eq("status", "available")
             .async_execute()
         )

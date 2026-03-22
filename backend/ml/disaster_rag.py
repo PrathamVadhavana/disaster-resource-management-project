@@ -222,11 +222,37 @@ class DisasterKnowledgeBase:
         if docs:
             # Batch upsert in chunks of 500 (ChromaDB limit)
             for i in range(0, len(docs), 500):
-                self._collection.upsert(
-                    documents=docs[i : i + 500],
-                    metadatas=metas[i : i + 500],
-                    ids=ids[i : i + 500],
-                )
+                try:
+                    self._collection.upsert(
+                        documents=docs[i : i + 500],
+                        metadatas=metas[i : i + 500],
+                        ids=ids[i : i + 500],
+                    )
+                except AttributeError as exc:
+                    if "dimensionality" in str(exc):
+                        logger.warning(
+                            "ChromaDB data format mismatch — resetting database and retrying..."
+                        )
+                        import shutil
+
+                        shutil.rmtree(self._persist_dir, ignore_errors=True)
+                        Path(self._persist_dir).mkdir(parents=True, exist_ok=True)
+                        self._client = chromadb.PersistentClient(
+                            path=self._persist_dir,
+                            settings=ChromaSettings(anonymized_telemetry=False),
+                        )
+                        self._collection = self._client.get_or_create_collection(
+                            name=COLLECTION_NAME,
+                            embedding_function=self._ef,
+                            metadata={"hnsw:space": "cosine"},
+                        )
+                        self._collection.upsert(
+                            documents=docs[i : i + 500],
+                            metadatas=metas[i : i + 500],
+                            ids=ids[i : i + 500],
+                        )
+                    else:
+                        raise
         logger.info("Indexed %d situation reports.", len(docs))
         return len(docs)
 

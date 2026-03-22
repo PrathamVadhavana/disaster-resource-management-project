@@ -1211,15 +1211,15 @@ async def get_recommended_ngo(
             # Check inventory match
             try:
                 inv_resp = (
-                    await db_admin.table("available_resources")
-                    .select("total_quantity, claimed_quantity")
+                    await db_admin.table("resources")
+                    .select("quantity")
                     .eq("provider_id", ngo["id"])
-                    .eq("category", req.get("resource_type", ""))
-                    .eq("is_active", True)
+                    .eq("type", req.get("resource_type", ""))
+                    .eq("status", "available")
                     .async_execute()
                 )
                 available_stock = sum(
-                    (r.get("total_quantity", 0) - r.get("claimed_quantity", 0)) for r in (inv_resp.data or [])
+                    (r.get("quantity", 0) or 0) for r in (inv_resp.data or [])
                 )
             except Exception:
                 available_stock = 0

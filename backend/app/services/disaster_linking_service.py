@@ -145,7 +145,10 @@ async def auto_link_request(request_id: str, lat: float, lon: float, created_at:
 
 
 async def get_disaster_demand_supply(disaster_id: str) -> dict:
-    """Get demand vs supply summary for a specific disaster."""
+    """Get demand vs supply summary for a specific disaster.
+    
+    New model: Victims create demands (resource_requests), donors/NGOs supply via pledges and availability.
+    """
     try:
         # Demand: all linked requests
         req_resp = (
@@ -168,24 +171,67 @@ async def get_disaster_demand_supply(disaster_id: str) -> dict:
             if r.get("status") in ("pending", "approved"):
                 demand_by_type[rt]["pending"] += qty
 
-        # Supply: resources allocated to this disaster
-        res_resp = (
-            await db_admin.table("resources")
-            .select("type, quantity, status")
-            .eq("disaster_id", disaster_id)
-            .async_execute()
-        )
+        # Supply: Get from donor pledges and available_resources (new model)
         supply_by_type = {}
-        for r in res_resp.data or []:
-            rt = r.get("type", "other")
-            if rt not in supply_by_type:
-                supply_by_type[rt] = {"total": 0, "available": 0, "allocated": 0}
-            qty = r.get("quantity", 0)
-            supply_by_type[rt]["total"] += qty
-            if r.get("status") == "available":
+        
+        # 1. Get donor pledges for this disaster
+        try:
+            pledge_resp = (
+                await db_admin.table("donor_pledges")
+                .select("resource_type, quantity_pledged, status")
+                .eq("disaster_id", disaster_id)
+                .in_("status", ["pending", "confirmed"])
+                .async_execute()
+            )
+            for r in pledge_resp.data or []:
+                rt = r.get("resource_type", "Other")
+                if rt not in supply_by_type:
+                    supply_by_type[rt] = {"total": 0, "available": 0, "pledged": 0}
+                qty = r.get("quantity_pledged", 0)
+                supply_by_type[rt]["total"] += qty
+                supply_by_type[rt]["pledged"] += qty
                 supply_by_type[rt]["available"] += qty
-            else:
-                supply_by_type[rt]["allocated"] += qty
+        except Exception as e:
+            logger.debug("Failed to fetch donor pledges for disaster %s: %s", disaster_id, e)
+
+        # 2. Get available_resources (NGO/donor inventory)
+        try:
+            avail_resp = (
+                await db_admin.table("available_resources")
+                .select("resource_type, total_quantity, claimed_quantity, is_active")
+                .eq("is_active", True)
+                .async_execute()
+            )
+            for r in avail_resp.data or []:
+                rt = r.get("resource_type", "Other")
+                if rt not in supply_by_type:
+                    supply_by_type[rt] = {"total": 0, "available": 0, "pledged": 0}
+                total = r.get("total_quantity", 0)
+                claimed = r.get("claimed_quantity", 0)
+                available = total - claimed
+                supply_by_type[rt]["total"] += available
+                supply_by_type[rt]["available"] += available
+        except Exception as e:
+            logger.debug("Failed to fetch available resources: %s", e)
+
+        # 3. Get fulfilled supply from completed requests (represents delivered capacity)
+        try:
+            fulfilled_resp = (
+                await db_admin.table("resource_requests")
+                .select("resource_type, quantity")
+                .eq("linked_disaster_id", disaster_id)
+                .in_("status", ["completed", "delivered"])
+                .async_execute()
+            )
+            for r in fulfilled_resp.data or []:
+                rt = r.get("resource_type", "Other")
+                if rt not in supply_by_type:
+                    supply_by_type[rt] = {"total": 0, "available": 0, "pledged": 0}
+                qty = r.get("quantity", 0)
+                supply_by_type[rt]["total"] += qty
+                supply_by_type[rt]["available"] += qty
+        except Exception as e:
+            logger.debug("Failed to fetch fulfilled requests: %s", e)
 
         return {
             "disaster_id": disaster_id,
@@ -196,7 +242,8 @@ async def get_disaster_demand_supply(disaster_id: str) -> dict:
                 s: sum(1 for r in requests if r.get("status") == s)
                 for s in ["pending", "approved", "assigned", "in_progress", "delivered", "completed"]
             },
+            "model": "victim_demand_donor_supply",
         }
     except Exception as e:
         logger.error("Demand/supply fetch for disaster %s failed: %s", disaster_id, e)
-        return {"disaster_id": disaster_id, "total_requests": 0, "demand_by_type": {}, "supply_by_type": {}}
+        return {"disaster_id": disaster_id, "total_requests": 0, "demand_by_type": {}, "supply_by_type": {}, "model": "victim_demand_donor_supply"}

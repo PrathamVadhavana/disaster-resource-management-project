@@ -39,6 +39,7 @@ from app.routers import (
     resources,
     retrain,
     victim,
+    victim_chatbot,
     victim_profile,
     volunteer,
     workflow,
@@ -324,6 +325,7 @@ app.include_router(resources.router, prefix="/api/resources", tags=["Resources"]
 app.include_router(retrain.router, prefix="/api/ml", tags=["ML Models"])
 app.include_router(victim.router, prefix="/api/victim", tags=["Victim Requests"])
 app.include_router(victim_profile.router, prefix="/api/victim", tags=["Victim Profile"])
+app.include_router(victim_chatbot.router, tags=["Victim AI Chatbot"])
 app.include_router(nlp.router, prefix="/api/nlp", tags=["NLP Triage & Chatbot"])
 app.include_router(ingestion.router, prefix="/api/ingestion", tags=["Data Ingestion & Alerts"])
 

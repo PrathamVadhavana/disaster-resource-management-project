@@ -516,6 +516,15 @@ class VictimProfileResponse(BaseModel):
     medical_needs: str | None = None
     location_lat: float | None = None
     location_long: float | None = None
+    # Disaster linking
+    disaster_id: str | None = None
+    disaster_name: str | None = None
+    disaster_type: str | None = None
+    disaster_severity: str | None = None
+    disaster_status: str | None = None
+    # AI insights
+    ai_risk_score: float | None = None
+    ai_recommendations: list[str] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -532,6 +541,7 @@ class VictimProfileUpdate(BaseModel):
     medical_needs: str | None = None
     location_lat: float | None = Field(None, ge=-90, le=90)
     location_long: float | None = Field(None, ge=-180, le=180)
+    disaster_id: str | None = None
 
 
 class VerificationStatus(StrEnum):

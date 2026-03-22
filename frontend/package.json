@@ -31,7 +31,7 @@
         "react-leaflet-cluster": "^4.0.0",
         "react-markdown": "^10.1.0",
         "react-phone-number-input": "^3.4.14",
-        "recharts": "^2.15.0",
+        "recharts": "^2.15.4",
         "remark-gfm": "^4.0.1",
         "tailwind-merge": "^2.6.0",
         "zod": "^3.24.1",

@@ -148,6 +148,26 @@ export function AIChatbot() {
         [handleSend],
     )
 
+    const handleProvideGPS = useCallback(() => {
+        if (!navigator.geolocation) {
+            alert('Geolocation is not supported by your browser.')
+            return
+        }
+        setIsTyping(true)
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const text = `My GPS coordinates are: ${position.coords.latitude}, ${position.coords.longitude}`
+                const userMsg: Message = { id: generateMsgId(), role: 'user', content: text, timestamp: new Date() }
+                setMessages(prev => [...prev, userMsg])
+                chatMutation.mutate(text)
+            },
+            (error) => {
+                setIsTyping(false)
+                alert(`Could not get location automatically: ${error.message}. Please type it below.`)
+            }
+        )
+    }, [chatMutation])
+
     const handleSubmitRequest = useCallback(() => {
         if (!extractedData) return
 
@@ -300,6 +320,14 @@ export function AIChatbot() {
                                     )}
                                 </p>
                             ))}
+                            {msg.role === 'assistant' && msg.extractedData?.gps_requested && (
+                                <button
+                                    onClick={handleProvideGPS}
+                                    className="mt-3 flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-xl bg-orange-100 dark:bg-orange-500/20 hover:bg-orange-200 dark:hover:bg-orange-500/30 text-orange-700 dark:text-orange-300 text-sm font-semibold shadow-sm transition-colors border border-orange-200 dark:border-orange-500/30"
+                                >
+                                    <MapPin className="w-4 h-4" /> Share GPS Location
+                                </button>
+                            )}
                         </div>
                     </div>
                 ))}

@@ -123,6 +123,15 @@ export interface VictimProfile {
     medical_needs: string | null
     location_lat: number | null
     location_long: number | null
+    // Disaster linking
+    disaster_id: string | null
+    disaster_name: string | null
+    disaster_type: string | null
+    disaster_severity: string | null
+    disaster_status: string | null
+    // AI insights
+    ai_risk_score: number | null
+    ai_recommendations: string[] | null
     created_at: string
     updated_at: string
 }

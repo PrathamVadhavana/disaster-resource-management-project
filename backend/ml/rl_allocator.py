@@ -80,7 +80,7 @@ async def build_rl_environment_from_supabase(db_client) -> list[Transition]:
     Queries:
     - resource_requests with status in ('completed', 'delivered', 'satisfied') → successful
     - resource_requests with status in ('cancelled', 'rejected') → failed/unmet
-    - available_resources for current inventory state
+    - resources for current inventory state
 
     Builds state vectors:
         [resource_type_demand_vector (5 dims), disaster_severity_nearby,
@@ -113,9 +113,9 @@ async def build_rl_environment_from_supabase(db_client) -> list[Transition]:
         failed_requests = failure_resp.data or []
 
         # Query available resources for inventory state
-        resources_resp = await db_client.table("available_resources").select(
+        resources_resp = await db_client.table("resources").select(
             "*"
-        ).eq("is_active", True).execute()
+        ).eq("status", "available").execute()
         available_resources = resources_resp.data or []
 
         # Build resource type demand vector (5 dims for common types)

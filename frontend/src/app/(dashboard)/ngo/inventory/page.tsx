@@ -29,7 +29,7 @@ export default function NGOInventoryPage() {
     })
 
     useEffect(() => {
-        const unsub = subscribeToTable('available_resources', () => {
+        const unsub = subscribeToTable('resources', () => {
             qc.invalidateQueries({ queryKey: ['ngo-inventory'] })
         })
         return () => { unsub() }

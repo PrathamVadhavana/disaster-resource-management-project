@@ -128,7 +128,7 @@ async def realtime_events(
     allowed = {
         "notifications",
         "resource_requests",
-        "available_resources",
+        "resources",
         "ingested_events",
         "alert_notifications",
         "disaster_messages",

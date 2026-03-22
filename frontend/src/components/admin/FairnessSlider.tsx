@@ -11,6 +11,7 @@ import {
 import {
     Scale, TrendingUp, Shield, AlertTriangle, CheckCircle2,
     Loader2, Info, ChevronDown, ChevronUp, Zap, Heart,
+    CheckCircle, ArrowRight
 } from 'lucide-react'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -61,11 +62,23 @@ export function FairnessSlider({ disasterId }: { disasterId?: string }) {
     const [sliderValue, setSliderValue] = useState(50) // 0–100
     const [expandedPlan, setExpandedPlan] = useState<number | null>(null)
     const [confirmApply, setConfirmApply] = useState(false)
+    const [loadingStep, setLoadingStep] = useState(0)
+    const [loadingProgress, setLoadingProgress] = useState(0)
 
-    // Fetch Pareto frontier
+    // Simulate multi-step loading
     const { data: frontier, isLoading, error, refetch } = useQuery<FrontierResponse>({
         queryKey: ['fairness-frontier', disasterId],
-        queryFn: () => api.getFairnessFrontier({ disaster_id: disasterId }),
+        queryFn: async () => {
+            setLoadingStep(1)
+            setLoadingProgress(33)
+            await new Promise(r => setTimeout(r, 500))
+            setLoadingStep(2)
+            setLoadingProgress(66)
+            await new Promise(r => setTimeout(r, 500))
+            setLoadingStep(3)
+            setLoadingProgress(100)
+            return api.getFairnessFrontier({ disaster_id: disasterId })
+        },
         refetchInterval: 60_000,
         staleTime: 30_000,
     })
@@ -114,6 +127,17 @@ export function FairnessSlider({ disasterId }: { disasterId?: string }) {
             .slice(0, 15)
     }, [selectedPlan])
 
+    // Three plan previews
+    const planPreviews = useMemo(() => {
+        if (!frontier?.plans?.length) return []
+        const plans = frontier.plans
+        return [
+            { label: 'Most Efficient', plan: plans[0], icon: Zap, color: 'blue' },
+            { label: 'Balanced', plan: plans[Math.floor(plans.length / 2)], icon: Scale, color: 'purple' },
+            { label: 'Most Equitable', plan: plans[plans.length - 1], icon: Heart, color: 'emerald' }
+        ]
+    }, [frontier])
+
     const handleApply = useCallback(() => {
         if (confirmApply) {
             applyMutation.mutate(selectedPlanIndex)
@@ -126,9 +150,44 @@ export function FairnessSlider({ disasterId }: { disasterId?: string }) {
 
     if (isLoading) {
         return (
-            <div className="flex items-center justify-center h-64 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/5">
-                <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
-                <span className="ml-3 text-sm text-slate-500">Computing fairness frontier…</span>
+            <div className="space-y-6">
+                <div className="rounded-2xl border border-slate-200 dark:border-white/5 bg-white dark:bg-slate-900 p-6">
+                    <h3 className="text-sm font-semibold text-slate-900 dark:text-white mb-4">Computing Fairness Frontier</h3>
+                    <div className="space-y-3">
+                        {[
+                            { step: 1, label: 'Loading allocation data' },
+                            { step: 2, label: 'Computing Pareto frontier' },
+                            { step: 3, label: 'Ranking equity-efficiency trade-offs' }
+                        ].map((item) => (
+                            <div key={item.step} className="flex items-center gap-3">
+                                {loadingStep > item.step ? (
+                                    <CheckCircle className="w-5 h-5 text-green-500" />
+                                ) : loadingStep === item.step ? (
+                                    <Loader2 className="w-5 h-5 text-purple-500 animate-spin" />
+                                ) : (
+                                    <div className="w-5 h-5 rounded-full border-2 border-slate-200 dark:border-slate-700" />
+                                )}
+                                <span className={cn(
+                                    "text-sm",
+                                    loadingStep > item.step ? 'text-green-600 dark:text-green-400' :
+                                    loadingStep === item.step ? 'text-purple-600 dark:text-purple-400 font-medium' :
+                                    'text-slate-400'
+                                )}>
+                                    Step {item.step}/3: {item.label}
+                                    {loadingStep > item.step && ' ✓'}
+                                    {loadingStep === item.step && '...'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="mt-4 h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                        <div 
+                            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-500"
+                            style={{ width: `${loadingProgress}%` }}
+                        />
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">Estimated time: ~3 seconds</p>
+                </div>
             </div>
         )
     }
@@ -273,6 +332,67 @@ export function FairnessSlider({ disasterId }: { disasterId?: string }) {
                 </ResponsiveContainer>
             </div>
 
+            {/* Three Plan Preview Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {planPreviews.map((preview, i) => {
+                    const Icon = preview.icon
+                    const isSelected = preview.plan?.plan_index === selectedPlanIndex
+                    return (
+                        <div 
+                            key={i}
+                            className={cn(
+                                "rounded-2xl border p-5 transition-all cursor-pointer",
+                                isSelected 
+                                    ? 'border-purple-300 dark:border-purple-500/30 bg-purple-50/50 dark:bg-purple-500/5 shadow-lg shadow-purple-500/10'
+                                    : 'border-slate-200 dark:border-white/5 bg-white dark:bg-slate-900 hover:border-slate-300 dark:hover:border-white/10'
+                            )}
+                            onClick={() => {
+                                if (preview.plan) {
+                                    const planIdx = preview.plan.plan_index
+                                    const pct = (planIdx / (frontier.plans.length - 1)) * 100
+                                    setSliderValue(pct)
+                                    setConfirmApply(false)
+                                }
+                            }}
+                        >
+                            <div className="flex items-center gap-2 mb-3">
+                                <div className={cn(
+                                    "w-8 h-8 rounded-lg flex items-center justify-center",
+                                    preview.color === 'blue' ? 'bg-blue-100 dark:bg-blue-500/10' :
+                                    preview.color === 'emerald' ? 'bg-emerald-100 dark:bg-emerald-500/10' :
+                                    'bg-purple-100 dark:bg-purple-500/10'
+                                )}>
+                                    <Icon className={cn(
+                                        "w-4 h-4",
+                                        preview.color === 'blue' ? 'text-blue-600 dark:text-blue-400' :
+                                        preview.color === 'emerald' ? 'text-emerald-600 dark:text-emerald-400' :
+                                        'text-purple-600 dark:text-purple-400'
+                                    )} />
+                                </div>
+                                <h4 className="text-sm font-semibold text-slate-900 dark:text-white">{preview.label}</h4>
+                                {isSelected && <CheckCircle className="w-4 h-4 text-purple-500 ml-auto" />}
+                            </div>
+                            {preview.plan && (
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between text-xs">
+                                        <span className="text-slate-500">Gini</span>
+                                        <span className="font-medium text-slate-700 dark:text-slate-300">{(preview.plan.gini * 100).toFixed(1)}%</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-xs">
+                                        <span className="text-slate-500">Efficiency</span>
+                                        <span className="font-medium text-slate-700 dark:text-slate-300">{(preview.plan.efficiency_score * 100).toFixed(1)}%</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-xs">
+                                        <span className="text-slate-500">Allocations</span>
+                                        <span className="font-medium text-slate-700 dark:text-slate-300">{preview.plan.allocation_count}</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )
+                })}
+            </div>
+
             {/* Zone Allocation Distribution */}
             {zoneChartData.length > 0 && (
                 <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/5 p-6">
@@ -328,8 +448,8 @@ export function FairnessSlider({ disasterId }: { disasterId?: string }) {
                 </div>
             )}
 
-            {/* Apply Button */}
-            <div className="flex items-center justify-end gap-3">
+            {/* Sticky Apply Button */}
+            <div className="sticky bottom-4 flex items-center justify-end gap-3 p-4 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm rounded-2xl border border-slate-200 dark:border-white/10 shadow-lg">
                 {confirmApply && (
                     <button
                         onClick={() => setConfirmApply(false)}

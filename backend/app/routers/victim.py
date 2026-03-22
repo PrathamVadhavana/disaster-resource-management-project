@@ -116,25 +116,25 @@ async def create_resource_request(
     async def _resolve_resource_type(raw_type: str) -> str:
         """Resolve a resource type string to a valid DB enum value.
         If it's already valid, return as-is. Otherwise, look it up
-        in available_resources to find the parent category."""
+        in the resources table to find the type."""
         if raw_type in VALID_RESOURCE_TYPES:
             return raw_type
         mapped = CATEGORY_ALIAS.get(raw_type)
         if mapped:
             return mapped
-        # Try to look up the category from available_resources by title
+        # Try to look up the type from resources table by name
         try:
-            ar_resp = (
-                await db_admin.table("available_resources")
-                .select("category")
-                .eq("title", raw_type)
+            r_resp = (
+                await db_admin.table("resources")
+                .select("type")
+                .eq("name", raw_type)
                 .maybe_single()
                 .async_execute()
             )
-            if ar_resp.data:
-                cat = ar_resp.data["category"]
+            if r_resp.data:
+                rtype = r_resp.data["type"]
                 return (
-                    CATEGORY_ALIAS.get(cat, cat) if cat in VALID_RESOURCE_TYPES or cat in CATEGORY_ALIAS else "Custom"
+                    CATEGORY_ALIAS.get(rtype, rtype) if rtype in VALID_RESOURCE_TYPES or rtype in CATEGORY_ALIAS else "Custom"
                 )
         except Exception:
             pass
@@ -706,48 +706,42 @@ async def get_dashboard_stats(
 
 
 # ──────────────────────────────────────────────
-# AVAILABLE RESOURCES (from available_resources table)
+# AVAILABLE RESOURCES (from resources table)
 # ──────────────────────────────────────────────
 @router.get("/available-resources")
 async def get_available_resources(
     user: dict = Depends(require_role("victim", "admin")),
-    category: str | None = Query(None, description="Filter by category"),
+    category: str | None = Query(None, description="Filter by resource type"),
 ):
     """Get currently available resources that victims can request"""
 
     try:
         query = (
-            db_admin.table("available_resources")
-            .select(
-                "resource_id, category, resource_type, title, description, total_quantity, claimed_quantity, unit, address_text, status"
-            )
-            .eq("is_active", True)
+            db_admin.table("resources")
+            .select("id, type, name, quantity, unit, status, description")
             .eq("status", "available")
         )
 
         if category:
-            query = query.eq("category", category)
+            query = query.eq("type", category)
 
-        response = await query.order("category").async_execute()
+        response = await query.order("type").limit(500).async_execute()
 
         resources = []
         for r in response.data or []:
-            total = r.get("total_quantity", 0) or 0
-            claimed = r.get("claimed_quantity", 0) or 0
-            remaining = max(0, total - claimed)
-            if remaining > 0:
+            qty = r.get("quantity", 0) or 0
+            if qty > 0:
                 resources.append(
                     {
-                        "resource_id": r["resource_id"],
-                        "category": r["category"],
-                        "resource_type": r["resource_type"],
-                        "title": r["title"],
+                        "resource_id": r["id"],
+                        "category": r["type"],
+                        "resource_type": r["type"],
+                        "title": r["name"],
                         "description": r.get("description"),
-                        "total_quantity": total,
-                        "claimed_quantity": claimed,
-                        "remaining_quantity": remaining,
+                        "total_quantity": qty,
+                        "claimed_quantity": 0,
+                        "remaining_quantity": qty,
                         "unit": r.get("unit", "units"),
-                        "address_text": r.get("address_text"),
                     }
                 )
 

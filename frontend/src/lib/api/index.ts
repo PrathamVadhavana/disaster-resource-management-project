@@ -686,4 +686,79 @@ export const api = {
 
     getSitrepSchedule: () =>
         apiFetch('/api/admin/sitrep/schedule'),
+
+    // ━━ Disaster-Aware Enhancements ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    // Per-disaster anomaly detection
+    getDisasterAnomalies: (disasterId: string, params?: { status?: string; severity?: string; limit?: number }) =>
+        apiFetch(`/api/ml/anomalies/disaster/${disasterId}${qs(params)}`),
+
+    // Disaster-specific outcome tracking
+    getDisasterOutcomes: (disasterId: string, params?: { limit?: number }) =>
+        apiFetch(`/api/ml/outcomes/disaster/${disasterId}${qs(params)}`),
+
+    // Disaster-specific hotspots
+    getDisasterHotspots: (disasterId: string) =>
+        apiFetch(`/api/hotspots/disaster/${disasterId}`),
+
+    // Disaster-specific severity forecast
+    getDisasterSeverityForecast: (disasterId: string, params?: { horizon_hours?: number }) =>
+        apiFetch(`/api/ml/forecast/disaster/${disasterId}${qs(params)}`),
+
+    // Disaster-specific spread prediction
+    getDisasterSpreadPrediction: (disasterId: string, params?: { time_hours?: number }) =>
+        apiFetch(`/api/ml/pinn/disaster/${disasterId}${qs(params)}`),
+
+    // Disaster-specific situation report
+    generateDisasterSitrep: (disasterId: string, reportType: string = 'disaster_focused') =>
+        apiFetch('/api/ml/sitreps/generate', { method: 'POST', body: JSON.stringify({ disaster_id: disasterId, report_type: reportType, generated_by: 'user' }) }),
+
+    getDisasterSitrep: (disasterId: string, params?: { limit?: number }) =>
+        apiFetch(`/api/ml/sitreps/disaster/${disasterId}${qs(params)}`),
+
+    // Disaster-specific query history
+    getDisasterQueryHistory: (disasterId: string, params?: { limit?: number }) =>
+        apiFetch(`/api/ml/query-history/disaster/${disasterId}${qs(params)}`),
+
+    // Victim disaster context
+    getVictimDisasterContext: (victimId: string) =>
+        apiFetch(`/api/victim/disaster-context/${victimId}`),
+
+    // Disaster resource recommendations
+    getDisasterResourceRecommendations: (disasterId: string) =>
+        apiFetch(`/api/ml/recommendations/disaster/${disasterId}`),
+
+    // Nearby resources for victim
+    getNearbyResources: (latitude: number, longitude: number, params?: { radius_km?: number; category?: string; limit?: number }) =>
+        apiFetch(`/api/resources/nearby${qs({ latitude, longitude, ...params })}`),
+
+    // Real-time disaster updates
+    getDisasterUpdates: (disasterId: string, params?: { since?: string; limit?: number }) =>
+        apiFetch(`/api/disasters/${disasterId}/updates${qs(params)}`),
+
+    // Disaster evacuation routes
+    getEvacuationRoutes: (disasterId: string, latitude: number, longitude: number) =>
+        apiFetch(`/api/disasters/${disasterId}/evacuation-routes${qs({ latitude, longitude })}`),
+
+    // ━━ MoE (Mixture of Experts) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    getMoEStatus: () =>
+        apiFetch('/api/ml/moe/status'),
+
+    moePredict: (data: { features: Record<string, any>; disaster_type?: string; severity?: string; latitude?: number; longitude?: number; use_cache?: boolean }) =>
+        apiFetch('/api/ml/moe/predict', { method: 'POST', body: JSON.stringify(data) }),
+
+    moePredictTask: (data: { features: Record<string, any>; task?: string; disaster_type?: string; severity?: string; latitude?: number; longitude?: number }) =>
+        apiFetch('/api/ml/moe/predict-task', { method: 'POST', body: JSON.stringify(data) }),
+
+    trainMoE: (params?: { epochs?: number; batch_size?: number; learning_rate?: number }) =>
+        apiFetch(`/api/ml/moe/train${qs(params)}`, { method: 'POST' }),
+
+    getMoECacheStats: () =>
+        apiFetch('/api/ml/moe/cache-stats'),
+
+    clearMoECache: () =>
+        apiFetch('/api/ml/moe/clear-cache', { method: 'POST' }),
+
+    resetMoEStats: () =>
+        apiFetch('/api/ml/moe/reset-stats', { method: 'POST' }),
 }

@@ -157,10 +157,10 @@ class NLQueryService:
         return (await query.async_execute()).data or []
 
     async def _tool_query_available_resources(self, params: dict) -> Any:
-        query = db_admin.table("available_resources").select("*").eq("is_active", True)
+        query = db_admin.table("resources").select("*").eq("status", "available")
         if params.get("category"):
-            query = query.eq("category", params["category"])
-        query = query.order("category").limit(params.get("limit", 50))
+            query = query.eq("type", params["category"].lower())
+        query = query.order("type").limit(params.get("limit", 50))
         return (await query.async_execute()).data or []
 
     async def _tool_query_users(self, params: dict) -> Any:

@@ -389,26 +389,26 @@ class SitrepService:
     async def _gather_resource_inventory(self) -> dict[str, Any]:
         """
         Get resource inventory by type with available/allocated counts.
-        From available_resources table.
+        From resources table.
         """
         try:
             resp = (
-                await db_admin.table("available_resources")
-                .select("id, resource_type, quantity, status")
+                await db_admin.table("resources")
+                .select("id, type, quantity, status")
                 .async_execute()
             )
             resources = resp.data or []
             
             inventory = {}
             for r in resources:
-                rtype = r.get("resource_type", "other") or "other"
+                rtype = r.get("type", "other") or "other"
                 qty = r.get("quantity", 0) or 0
                 status = r.get("status", "available") or "available"
                 
                 if rtype not in inventory:
                     inventory[rtype] = {"available": 0, "allocated": 0}
                 
-                if status in ["available", "in_stock"]:
+                if status in ["available"]:
                     inventory[rtype]["available"] += qty
                 else:
                     inventory[rtype]["allocated"] += qty

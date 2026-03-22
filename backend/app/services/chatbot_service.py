@@ -1,10 +1,9 @@
 """
 AI Victim Chatbot Service — Phase 3
 Multi-step conversational intake assistant that guides victims through
-structured resource request creation using rule-based NLP.
+structured resource request creation using Groq-powered NLP.
 
-Zero external API dependencies — fully self-contained state-machine
-conversation engine.
+Uses Groq API for intelligent intake extraction and conversation handling.
 """
 
 from __future__ import annotations
@@ -17,12 +16,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from app.services.nlp_service import (
-    classify_request,
-    classify_resource_type,
-    estimate_quantity,
-    extract_urgency_signals,
-)
 from app.services.distance import haversine
 
 logger = logging.getLogger(__name__)
@@ -73,6 +66,8 @@ class ExtractedData:
     recommended_priority: str = "medium"
     priority_escalated: bool = False
     confidence: float = 0.5
+    language_detected: str = "en"
+    follow_up_question: str | None = None
     raw_messages: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -90,6 +85,8 @@ class ExtractedData:
             "recommended_priority": self.recommended_priority,
             "priority_escalated": self.priority_escalated,
             "confidence": self.confidence,
+            "language_detected": self.language_detected,
+            "follow_up_question": self.follow_up_question,
         }
 
 
@@ -131,61 +128,253 @@ def get_session_data(session_id: str) -> dict | None:
     return session.extracted.to_dict()
 
 
+# ── Groq intake extraction ─────────────────────────────────────────────────────
+
+_INTAKE_EXTRACTION_PROMPT = """\
+You are an emergency intake assistant. A person in distress has sent a message.
+Extract structured data and return ONLY a valid JSON object:
+
+{
+  "situation_description": "<1-2 sentence neutral summary>",
+  "resource_types": ["Food"|"Water"|"Medical"|"Shelter"|"Clothing"|"Evacuation"|"Volunteers"|"Financial Aid"|"Custom"],
+  "quantity": <integer, default 1>,
+  "location": "<address or landmark, null if not mentioned>",
+  "people_count": <integer, default 1>,
+  "has_medical_needs": <true|false>,
+  "medical_details": "<description if true, else null>",
+  "disaster_type": "<flood|fire|earthquake|storm|landslide|cyclone|drought|other|null>",
+  "urgency_level": "<critical|high|medium|low>",
+  "urgency_reason": "<one sentence explaining the urgency level>",
+  "missing_info": ["location"|"quantity"|"resource_type"|"people_count"],
+  "language_detected": "<ISO 639-1 code>",
+  "response_to_user": "<ONE empathetic sentence + ONE question in the user's language
+    to fill the most critical missing field. If all present, say:
+    'Thank you — I have everything I need to submit your request.'>"
+}
+
+URGENCY RULES — set critical if message mentions: trapped, buried, unconscious,
+not breathing, severe bleeding, drowning, fire spreading, building collapse,
+no water >24h, medical emergency, pregnant woman in labor.
+Set high for: multiple people in danger, elderly/children without shelter,
+injuries without medical access.
+
+RESOURCE RULES: resource_types is an array — include ALL implied types.
+"hungry" → Food. "no clean water" → Water. "roof collapsed" → Shelter.
+"hurt/bleeding" → Medical.
+
+LANGUAGE RULE: response_to_user MUST be in the same language as the input.
+
+STRICT: Return ONLY the JSON object. No preamble, no markdown fences.
+
+User message:
+"""
+
+_URGENCY_TO_PRIORITY = {
+    "critical": "critical", "high": "high", "medium": "medium", "low": "low",
+}
+
+# ── Resource keyword mappings (single definition) ──────────────────────────────
+RESOURCE_KEYWORDS = {
+    "Food": ["food", "foof", "eat", "hungry", "starving", "meal", "rice", "bread"],
+    "Water": ["water", "watter", "drink", "thirsty", "thristy"],
+    "Medical": ["medical", "medic", "doctor", "hospital", "hurt", "injured", "bleeding", "wound", "pain"],
+    "Shelter": ["shelter", "home", "house", "tent", "roof", "sleep", "bed"],
+    "Evacuation": ["evacuation", "evacuat", "rescue", "trapped", "stuck", "stranded", "pinned", "buried"],
+}
+
+DISASTER_RESOURCES = {
+    "flood": ["Water", "Shelter", "Food", "Evacuation"],
+    "earthquake": ["Shelter", "Medical", "Water", "Food"],
+    "fire": ["Shelter", "Water", "Evacuation", "Medical"],
+    "hurricane": ["Shelter", "Water", "Food", "Evacuation"],
+    "cyclone": ["Shelter", "Water", "Food", "Evacuation"],
+    "storm": ["Shelter", "Water", "Food"],
+    "tsunami": ["Evacuation", "Shelter", "Water", "Medical"],
+    "landslide": ["Evacuation", "Shelter", "Medical"],
+    "drought": ["Water", "Food"],
+    "tornado": ["Shelter", "Medical", "Water"],
+}
+
+TRAPPED_KEYWORDS = ["stuck", "trapped", "can't get out", "cannot get out", "cant leave", "stranded", "pinned", "buried"]
+
+
+async def _extract_intake_via_llm(text: str) -> dict:
+    """
+    Call Groq for single-shot intake extraction.
+    Raises RuntimeError on any failure — no silent fallback.
+    """
+    import json, os
+    try:
+        from groq import Groq
+    except ImportError as exc:
+        raise RuntimeError("groq package not installed. Run: pip install groq") from exc
+
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY env var is not set")
+
+    client = Groq(api_key=api_key)
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.chat.completions.create(
+            model=os.environ.get("GROQ_INTAKE_MODEL", "llama-3.1-8b-instant"),
+            messages=[{"role": "user", "content": _INTAKE_EXTRACTION_PROMPT + text}],
+            max_tokens=600,
+            temperature=0.0,
+        ),
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1].lstrip("json").strip()
+    return json.loads(raw)
+
+
+def _detect_resources_from_keywords(text_lower: str) -> list[str]:
+    """Detect resource types from keywords in text."""
+    detected = []
+    for resource_type, keywords in RESOURCE_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            detected.append(resource_type)
+            if len(detected) >= 2:
+                break
+    return detected
+
+
+def _detect_disaster_from_text(text_lower: str) -> tuple[str | None, list[str]]:
+    """Detect disaster type and infer resources from text."""
+    for disaster, resources in DISASTER_RESOURCES.items():
+        if disaster in text_lower:
+            return disaster, resources[:2]
+    return None, []
+
+
+def _determine_urgency(text_lower: str, is_trapped: bool) -> str:
+    """Determine urgency level from text signals."""
+    if is_trapped or any(word in text_lower for word in ["dying", "unconscious", "bleeding", "severe"]):
+        return "critical"
+    elif any(word in text_lower for word in ["urgent", "emergency", "help", "please"]):
+        return "high"
+    return "medium"
+
+
 # ── Response templates ─────────────────────────────────────────────────────────
 GREETING_MSG = (
-    "Hello! I'm here to help you request emergency resources. "
-    "I'll guide you through a few quick questions so we can get help to you as fast as possible.\n\n"
-    "**Can you describe your current situation?** "
-    "For example: what happened, what do you need most urgently?"
+    "🙏 **Hello! I'm your emergency assistance AI.**\n\n"
+    "I'm here to help you request the resources you need. "
+    "I'll ask a few quick questions to get help to you as fast as possible.\n\n"
+    "**Please describe your current situation:**\n"
+    "- What happened?\n"
+    "- What do you need most urgently?\n"
+    "- How many people are affected?\n\n"
+    "_Tip: The more details you provide, the faster I can help you._"
 )
 
 RESOURCE_CONFIRM_TEMPLATE = (
-    "Based on what you've told me, it sounds like you need: **{types}**.\n\n"
-    "Is that correct? If you need something different or additional, just let me know. "
+    "✅ I've identified your need as: **{types}**\n\n"
+    "Is this correct? If you need something different or additional, just tell me. "
     "Otherwise, say **yes** to continue."
 )
 
 RESOURCE_ASK = (
-    "I wasn't able to determine the type of resource you need. "
-    "Could you tell me what you need most? For example:\n"
-    "- Food\n- Water\n- Medical supplies\n- Shelter\n- Clothing\n- Evacuation\n- Volunteers\n- Financial aid"
+    "🤔 I need a bit more information to help you.\n\n"
+    "**What do you need most urgently?**\n"
+    "- 🍚 Food\n"
+    "- 💧 Water\n"
+    "- 🏥 Medical supplies\n"
+    "- 🏠 Shelter\n"
+    "- 👕 Clothing\n"
+    "- 🚗 Evacuation\n"
+    "- 🤝 Volunteers\n"
+    "- 💰 Financial aid\n\n"
+    "_You can also describe what you need in your own words._"
 )
 
 QUANTITY_ASK_TEMPLATE = (
-    "How many **{resource}** units/items do you need? And for how many people? (e.g., '5 water bottles for 3 people')"
+    "📦 **How much {resource} do you need?**\n\n"
+    "Please tell me:\n"
+    "- The quantity (e.g., 10 bottles, 5 packs)\n"
+    "- How many people this is for\n\n"
+    "_Example: '10 water bottles for 5 people'_"
 )
 
 LOCATION_ASK = (
-    "Where are you located? Please provide as much detail as possible — "
-    "address, neighborhood, landmark, or GPS coordinates if you have them."
+    "📍 **Where are you located?**\n\n"
+    "Please provide as much detail as you can:\n"
+    "- Full address\n"
+    "- Neighborhood or landmark\n"
+    "- Click the **Share GPS Location** button below\n\n"
+    "_The more specific you are, the faster help can reach you._"
 )
 
 PEOPLE_ASK = (
-    "How many people are with you who need help? "
-    "Are there any children, elderly, or people with disabilities in your group?"
+    "👥 **How many people need help?**\n\n"
+    "Please tell me:\n"
+    "- Total number of people\n"
+    "- Are there any children, elderly, or people with disabilities?\n"
+    "- Any other vulnerable individuals?\n\n"
+    "_This helps us prioritize your request appropriately._"
 )
 
 MEDICAL_ASK = (
-    "Does anyone in your group have medical needs or injuries that require attention? If yes, please describe briefly."
+    "🏥 **Does anyone have medical needs?**\n\n"
+    "Please tell me if anyone:\n"
+    "- Has injuries or wounds\n"
+    "- Needs medication (insulin, inhaler, etc.)\n"
+    "- Is pregnant or has chronic conditions\n"
+    "- Needs immediate medical attention\n\n"
+    "_If no medical needs, just say 'no' or 'none'._"
 )
 
 CONFIRM_TEMPLATE = (
-    "Here's a summary of your request:\n\n"
-    "📋 **Situation:** {situation}\n"
+    "📋 **Here's a summary of your request:**\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📝 **Situation:** {situation}\n"
     "📦 **Resource needed:** {resource}\n"
     "🔢 **Quantity:** {quantity}\n"
-    "👥 **People:** {people}\n"
+    "👥 **People affected:** {people}\n"
     "📍 **Location:** {location}\n"
     "🏥 **Medical needs:** {medical}\n"
-    "⚡ **Priority:** {priority}\n\n"
-    "Does this look correct? Say **yes** to submit or **no** to start over."
+    "⚡ **Priority level:** {priority}\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "**Does everything look correct?**\n"
+    "- Say **yes** to submit your request\n"
+    "- Say **no** to start over\n"
+    "- Or tell me what needs to be changed"
 )
 
 SUBMITTED_MSG = (
-    "Your request has been submitted successfully! "
-    "A team member will review it shortly. "
-    "Your reference information has been saved.\n\n"
-    "If your situation changes, you can start a new conversation. Stay safe!"
+    "✅ **Your request has been submitted successfully!**\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📋 A relief team will review your request shortly.\n"
+    "📞 You may be contacted for verification.\n"
+    "🔔 You'll receive updates as your request is processed.\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "**Important:**\n"
+    "- Keep your phone charged and accessible\n"
+    "- If your situation changes, start a new conversation\n"
+    "- For life-threatening emergencies, call local emergency services\n\n"
+    "_Stay safe. Help is on the way._ 🙏"
+)
+
+URGENT_FOLLOW_UP = (
+    "⚠️ **I've detected this is a high-priority situation.**\n\n"
+    "Your request has been marked as **{priority}** priority "
+    "and will be escalated to emergency responders.\n\n"
+    "Is there anything else you need to add before I submit?"
+)
+
+AREA_SUGGESTION_TEMPLATE = (
+    "💡 **Smart Suggestion:** In your area, the most common requests are for:\n"
+    "{resource_list}\n\n"
+    "Is this what you need? Or do you need something different?"
+)
+
+DISASTER_CONTEXT_TEMPLATE = (
+    "🌍 **Important:** There's an active **{disaster_type}** in your area.\n\n"
+    "We've automatically increased your request priority. "
+    "Emergency responders are already mobilized in your region.\n\n"
+    "Please continue with your request details."
 )
 
 
@@ -214,14 +403,6 @@ def _extract_number(text: str) -> int | None:
     if match:
         return int(match.group(1))
     return None
-
-
-def _detect_medical(text: str) -> bool:
-    """Check if text mentions medical needs."""
-    medical_kw = (
-        r"\b(injur|wound|bleed|fracture|medic|sick|fever|pain|diabet|asthma|chronic|surgery|pregnant|disability)\b"
-    )
-    return bool(re.search(medical_kw, text.lower()))
 
 
 def process_message(session_id: str | None, user_message: str) -> dict:
@@ -303,89 +484,225 @@ def _handle_state(session: ChatSession, user_input: str) -> tuple[str, dict]:
 
 
 def _handle_situation(session: ChatSession, text: str) -> tuple[str, dict]:
-    """Process the user's situation description."""
+    """Single-shot LLM intake via Groq with keyword fallback."""
+    import asyncio, concurrent.futures
+
     session.extracted.situation_description = text
+    text_lower = text.lower()
+    llm_result: dict | None = None
 
-    # Run NLP pipeline on the full description
-    full_text = " ".join(session.extracted.raw_messages)
-    classification = classify_request(full_text)
+    # Try Groq extraction first
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                llm_result = pool.submit(asyncio.run, _extract_intake_via_llm(text)).result(timeout=10)
+        else:
+            llm_result = loop.run_until_complete(_extract_intake_via_llm(text))
+        logger.info("Groq extraction successful for session %s", session.session_id)
+    except Exception as e:
+        logger.warning("Groq intake extraction failed for session %s: %s — using keyword fallback", session.session_id, e)
+        # Keyword-based fallback
+        detected_disaster, disaster_resources = _detect_disaster_from_text(text_lower)
+        detected_resources = _detect_resources_from_keywords(text_lower)
+        is_trapped = any(word in text_lower for word in TRAPPED_KEYWORDS)
+        
+        if is_trapped and "Evacuation" not in detected_resources:
+            detected_resources = ["Evacuation", "Shelter"]
+        elif not detected_resources and detected_disaster:
+            detected_resources = disaster_resources
+        elif not detected_resources:
+            detected_resources = ["Custom"]
+        
+        llm_result = {
+            "situation_description": text[:200],
+            "resource_types": detected_resources,
+            "quantity": 1,
+            "location": None,
+            "people_count": 1,
+            "has_medical_needs": any(kw in text_lower for kw in ["hurt", "injured", "bleeding", "medical", "doctor"]),
+            "medical_details": "",
+            "disaster_type": detected_disaster,
+            "urgency_level": _determine_urgency(text_lower, is_trapped),
+            "urgency_reason": "Keyword-based detection",
+            "missing_info": ["location", "people_count"],
+            "language_detected": "en",
+            "response_to_user": None
+        }
 
-    # Store results
-    session.extracted.urgency_signals = classification.urgency_signals
-    session.extracted.recommended_priority = classification.recommended_priority
-    session.extracted.priority_escalated = classification.priority_was_escalated
-    session.extracted.confidence = classification.confidence
-    session.extracted.resource_types = classification.resource_types
-    session.extracted.resource_type_scores = classification.resource_type_scores
-    session.extracted.disaster_type = classification.disaster_type
+    # Apply extracted data to session
+    d = session.extracted
+    d.situation_description = llm_result.get("situation_description") or text
+    d.resource_types = llm_result.get("resource_types") or []
+    d.quantity = int(llm_result.get("quantity") or 1)
+    d.location = llm_result.get("location") or ""
+    d.people_count = int(llm_result.get("people_count") or 1)
+    d.has_medical_needs = bool(llm_result.get("has_medical_needs", False))
+    d.medical_details = llm_result.get("medical_details") or ""
+    d.disaster_type = llm_result.get("disaster_type")
+    d.language_detected = llm_result.get("language_detected", "en")
+    d.follow_up_question = llm_result.get("response_to_user")
+    d.recommended_priority = _URGENCY_TO_PRIORITY.get(
+        llm_result.get("urgency_level", "medium"), "medium"
+    )
+    d.confidence = 0.85
 
-    # Try to detect quantity from situation text
-    qty = estimate_quantity(text)
-    if qty > 1:
-        session.extracted.quantity = qty
+    # ── POST-PROCESSING: Enhance detection ──
+    if d.resource_types == ["Custom"] or not d.resource_types:
+        d.resource_types = _detect_resources_from_keywords(text_lower)
 
-    metadata = {
-        "classification": classification.to_dict(),
-    }
+    # Check for disaster types
+    if not d.disaster_type:
+        detected_disaster, disaster_resources = _detect_disaster_from_text(text_lower)
+        if detected_disaster:
+            d.disaster_type = detected_disaster
+            if not d.resource_types or d.resource_types == ["Custom"]:
+                d.resource_types = disaster_resources
 
-    # If resource detected with decent confidence, confirm it
-    if classification.resource_types and classification.resource_types != ["Custom"]:
-        types_str = ", ".join(classification.resource_types[:3])
-        session.state = ConvState.ASK_RESOURCE
-        return RESOURCE_CONFIRM_TEMPLATE.format(types=types_str), metadata
+    # Check for trapped situations
+    is_trapped = any(word in text_lower for word in TRAPPED_KEYWORDS)
+    if is_trapped:
+        if not d.resource_types or d.resource_types == ["Custom"]:
+            d.resource_types = ["Evacuation", "Shelter"]
+        if d.recommended_priority not in ("critical", "high"):
+            d.recommended_priority = "high"
+
+    # Detect specific needs from remaining keywords
+    if not d.resource_types or d.resource_types == ["Custom"]:
+        if any(word in text_lower for word in ["hungry", "starving", "no food", "eat"]):
+            d.resource_types = ["Food"]
+        elif any(word in text_lower for word in ["thirsty", "no water", "dehydrat", "drink"]):
+            d.resource_types = ["Water"]
+        elif any(word in text_lower for word in ["hurt", "bleeding", "injured", "wound", "medical"]):
+            d.resource_types = ["Medical"]
+        elif any(word in text_lower for word in ["homeless", "no shelter", "roof", "house collapse"]):
+            d.resource_types = ["Shelter"]
+
+    if d.resource_types == ["Custom"]:
+        d.resource_types = []
+
+    # Add urgency message if priority is high or critical
+    urgency_prefix = ""
+    if d.recommended_priority in ("critical", "high"):
+        urgency_prefix = URGENT_FOLLOW_UP.format(priority=d.recommended_priority.upper()) + "\n\n"
+
+    missing = llm_result.get("missing_info", [])
+
+    # Check for trapped situation specifically
+    if is_trapped and not d.location:
+        session.state = ConvState.ASK_LOCATION
+        return (
+            f"🚨 I understand you're **trapped and need rescue**. "
+            f"I've marked this as **high priority** for evacuation.\n\n"
+            f"**Where are you located?** Please provide your address, nearby landmark, or click the **Share GPS Location** button below.\n\n"
+            f"_Emergency responders will be dispatched to your location._"
+        ), {"extraction_method": "groq_enhanced", "trapped_detected": True, "gps_requested": True}
+
+    all_present = (
+        d.resource_types
+        and d.location
+        and "location" not in missing
+        and "resource_type" not in missing
+    )
+    if all_present:
+        session.state = ConvState.CONFIRM
+        return urgency_prefix + _build_confirmation(session), {"extraction_method": "groq", "missing_info": missing}
+
+    # Generate contextual response
+    if d.resource_types:
+        resource_str = ", ".join(d.resource_types[:3])
+        if d.disaster_type:
+            disaster_emoji = {
+                "flood": "🌊", "earthquake": "🏚️", "fire": "🔥", "hurricane": "🌀",
+                "cyclone": "🌀", "storm": "⛈️", "tsunami": "🌊", "landslide": "⛰️",
+                "drought": "☀️", "tornado": "🌪️"
+            }
+            emoji = disaster_emoji.get(d.disaster_type, "🌍")
+            response_text = (
+                f"{emoji} I understand you're affected by a **{d.disaster_type}**. "
+                f"I've noted you need **{resource_str}**.\n\n"
+                f"**Where are you located?** This will help responders reach you faster.\n\n"
+                f"Please provide your address, or click the **Share GPS Location** button below.\n\n"
+                f"_Your request will be prioritized based on the {d.disaster_type} situation._"
+            )
+        else:
+            response_text = (
+                f"✅ I understand you need **{resource_str}**.\n\n"
+                f"**Where are you located?** Please provide your address, nearby landmark, or click the **Share GPS Location** button below."
+            )
     else:
-        # Couldn't detect — ask directly
+        response_text = llm_result.get("response_to_user") or RESOURCE_ASK
+
+    # Determine next state based on what's missing
+    if not d.resource_types:
         session.state = ConvState.ASK_RESOURCE
-        return RESOURCE_ASK, metadata
+    elif not d.location:
+        session.state = ConvState.ASK_LOCATION
+    elif d.people_count <= 1:
+        session.state = ConvState.ASK_PEOPLE
+    else:
+        session.state = ConvState.ASK_MEDICAL if not d.has_medical_needs else ConvState.CONFIRM
+
+    return urgency_prefix + response_text, {
+        "extraction_method": "groq_enhanced",
+        "missing_info": missing,
+        "urgency_level": llm_result.get("urgency_level"),
+        "language_detected": d.language_detected,
+        "detected_disaster": d.disaster_type,
+        "gps_requested": session.state == ConvState.ASK_LOCATION,
+    }
 
 
 def _handle_resource(session: ChatSession, text: str) -> tuple[str, dict]:
-    """Handle resource type confirmation or correction."""
+    """Handle resource type confirmation or correction via Groq."""
+    import json, os
+
     if _detect_yes(text) and session.extracted.resource_types:
-        # Confirmed — move to quantity
         primary = session.extracted.resource_types[0]
         session.state = ConvState.ASK_QUANTITY
         return QUANTITY_ASK_TEMPLATE.format(resource=primary), {}
 
-    # User provided a correction or new resource type
-    types, scores = classify_resource_type(text)
-    if types and types != ["Custom"]:
-        session.extracted.resource_types = types
-        session.extracted.resource_type_scores = scores
-        primary = types[0]
-        session.state = ConvState.ASK_QUANTITY
-        return (
-            f"Got it — I've updated your request to **{', '.join(types[:3])}**.\n\n"
-            + QUANTITY_ASK_TEMPLATE.format(resource=primary)
-        ), {"updated_types": types}
-
-    # Still couldn't detect — try mapping free text directly
-    text_lower = text.strip().lower()
-    direct_map = {
-        "food": "Food",
-        "water": "Water",
-        "medical": "Medical",
-        "shelter": "Shelter",
-        "clothing": "Clothing",
-        "clothes": "Clothing",
-        "evacuation": "Evacuation",
-        "volunteers": "Volunteers",
-        "financial": "Financial Aid",
-        "money": "Financial Aid",
-    }
-    for key, rtype in direct_map.items():
-        if key in text_lower:
-            session.extracted.resource_types = [rtype]
-            session.extracted.resource_type_scores = {rtype: 0.8}
+    try:
+        from groq import Groq
+        api_key = os.environ.get("GROQ_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("GROQ_API_KEY not set")
+        client = Groq(api_key=api_key)
+        prompt = (
+            "Classify the following text into one of these resource types: "
+            "Food, Water, Medical, Shelter, Clothing, Evacuation, Volunteers, "
+            "Financial Aid, Custom.\n"
+            'Return ONLY a JSON object: {"resource_types": ["TypeName"], "confidence": 0.0-1.0}\n'
+            f"Text: {text}"
+        )
+        resp = client.chat.completions.create(
+            model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=60,
+            temperature=0.0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        parsed = json.loads(raw)
+        types = parsed.get("resource_types", [])
+        confidence = float(parsed.get("confidence", 0.0))
+        if types and types != ["Custom"] and confidence >= 0.5:
+            session.extracted.resource_types = types
+            session.extracted.resource_type_scores = {t: confidence for t in types}
+            primary = types[0]
             session.state = ConvState.ASK_QUANTITY
-            return (f"Got it — **{rtype}**.\n\n" + QUANTITY_ASK_TEMPLATE.format(resource=rtype)), {
-                "updated_types": [rtype]
-            }
+            return (
+                f"Got it — I've updated your request to **{', '.join(types[:3])}**.\n\n"
+                + QUANTITY_ASK_TEMPLATE.format(resource=primary)
+            ), {"updated_types": types}
+    except Exception as e:
+        logger.error(f"Groq resource classification failed: {e}")
 
-    # Still can't determine
     return (
         "I'm not sure what resource type that is. Could you pick one from this list?\n\n"
-        "- Food\n- Water\n- Medical\n- Shelter\n- Clothing\n- Evacuation\n- Volunteers\n- Financial Aid"
+        "- Food\n- Water\n- Medical\n- Shelter\n- Clothing\n- Evacuation\n"
+        "- Volunteers\n- Financial Aid"
     ), {"retry": True}
 
 
@@ -401,43 +718,46 @@ def _handle_quantity(session: ChatSession, text: str) -> tuple[str, dict]:
         session.extracted.people_count = int(people_match.group(1))
 
     session.state = ConvState.ASK_LOCATION
-    return LOCATION_ASK, {"quantity_detected": session.extracted.quantity}
+    return LOCATION_ASK, {"quantity_detected": session.extracted.quantity, "gps_requested": True}
 
 
 def _handle_location(session: ChatSession, text: str) -> tuple[str, dict]:
-    """Store location information."""
+    """Store location information or request GPS if unknown."""
+    text_lower = text.strip().lower()
+
+    # Check if user doesn't know their location
+    dont_know_patterns = [
+        "don't know", "dont know", "not sure", "unsure", "no idea",
+        "i don't know", "i dont know", "unknown", "can't tell", "cant tell"
+    ]
+
+    if any(pattern in text_lower for pattern in dont_know_patterns):
+        # Request GPS from frontend
+        session.extracted.location = "GPS_PENDING"
+        session.state = ConvState.ASK_PEOPLE
+        return (
+            "📍 **No problem! We can use your GPS location.**\n\n"
+            "Please allow location access on your device, or provide any details you can:\n"
+            "- Nearby landmarks\n"
+            "- Street name\n"
+            "- City or neighborhood\n"
+            "- Any description of your surroundings\n\n"
+            "_If you can't provide any details, we'll use your device's GPS automatically._"
+        ), {"gps_requested": True}
+
+    # Store the location
     session.extracted.location = text.strip()
     session.state = ConvState.ASK_PEOPLE
-    return PEOPLE_ASK, {}
+    return PEOPLE_ASK, {"location_stored": True}
 
 
 def _handle_people(session: ChatSession, text: str) -> tuple[str, dict]:
-    """Extract people count and vulnerabilities."""
+    """Extract people count. Priority/urgency already set by Groq intake."""
     qty = _extract_number(text)
     if qty:
         session.extracted.people_count = qty
 
-    # Check for vulnerabilities (may trigger priority escalation)
-    signals = extract_urgency_signals(text)
-    if signals:
-        new_signals = [{"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost} for s in signals]
-        session.extracted.urgency_signals.extend(new_signals)
-        # Re-escalate priority
-        from app.services.nlp_service import UrgencySignal as US
-        from app.services.nlp_service import escalate_priority
-
-        signal_objects = [
-            US(keyword=s["keyword"], label=s["label"], severity_boost=s["severity_boost"], offset=0)
-            for s in session.extracted.urgency_signals
-        ]
-        new_pri, escalated = escalate_priority("medium", signal_objects)
-        session.extracted.recommended_priority = new_pri
-        session.extracted.priority_escalated = escalated
-
-    # Check if medical info was already mentioned
-    if _detect_medical(text):
-        session.extracted.has_medical_needs = True
-        session.extracted.medical_details = text
+    if session.extracted.has_medical_needs:
         session.state = ConvState.CONFIRM
         return _build_confirmation(session), {"skipped_medical_ask": True}
 
@@ -446,30 +766,15 @@ def _handle_people(session: ChatSession, text: str) -> tuple[str, dict]:
 
 
 def _handle_medical(session: ChatSession, text: str) -> tuple[str, dict]:
-    """Process medical needs response."""
+    """Process medical needs. No local NLP — urgency set by Groq intake."""
     if _detect_no(text):
         session.extracted.has_medical_needs = False
     else:
         session.extracted.has_medical_needs = True
         session.extracted.medical_details = text
-
-        # Check for urgency signals in medical details
-        signals = extract_urgency_signals(text)
-        if signals:
-            new_signals = [
-                {"keyword": s.keyword, "label": s.label, "severity_boost": s.severity_boost} for s in signals
-            ]
-            session.extracted.urgency_signals.extend(new_signals)
-            from app.services.nlp_service import UrgencySignal as US
-            from app.services.nlp_service import escalate_priority
-
-            signal_objects = [
-                US(keyword=s["keyword"], label=s["label"], severity_boost=s["severity_boost"], offset=0)
-                for s in session.extracted.urgency_signals
-            ]
-            new_pri, escalated = escalate_priority("medium", signal_objects)
-            session.extracted.recommended_priority = new_pri
-            session.extracted.priority_escalated = escalated
+        if session.extracted.recommended_priority not in ("critical", "high"):
+            session.extracted.recommended_priority = "high"
+            session.extracted.priority_escalated = True
 
     session.state = ConvState.CONFIRM
     return _build_confirmation(session), {}
@@ -484,12 +789,17 @@ def _build_confirmation(session: ChatSession) -> str:
     if d.priority_escalated:
         priority_str += " (auto-escalated due to urgency signals)"
 
+    # Format location for display
+    location_display = d.location or "Not provided"
+    if location_display == "GPS_PENDING":
+        location_display = "📍 GPS Location (will be captured automatically)"
+
     return CONFIRM_TEMPLATE.format(
         situation=d.situation_description[:200] or "Not provided",
         resource=resource_str,
         quantity=d.quantity,
         people=d.people_count,
-        location=d.location or "Not provided",
+        location=location_display,
         medical=medical_str,
         priority=priority_str,
     )
@@ -506,9 +816,6 @@ def _handle_confirm(session: ChatSession, text: str) -> tuple[str, dict]:
             session.states_visited.append(ConvState.SUBMITTED.value)
 
         # Log the completed session
-        from functools import partial
-
-        # Extract data for logging
         final_resource = session.extracted.resource_types[0] if session.extracted.resource_types else None
         final_priority = session.extracted.recommended_priority
 
@@ -516,7 +823,6 @@ def _handle_confirm(session: ChatSession, text: str) -> tuple[str, dict]:
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # If we're in an async context, create a task
                 asyncio.create_task(
                     log_chatbot_session(
                         session_id=session.session_id,
@@ -547,7 +853,6 @@ def _handle_confirm(session: ChatSession, text: str) -> tuple[str, dict]:
         }
     elif _detect_no(text):
         # Reset to start - log as abandoned
-        # Track the confirm state before resetting
         if ConvState.CONFIRM.value not in session.states_visited:
             session.states_visited.append(ConvState.CONFIRM.value)
 
@@ -631,7 +936,6 @@ async def get_smart_defaults(user_location: tuple[float, float]) -> SmartDefault
 
     try:
         db = _get_db()
-        # Fetch resource requests from last 30 days with location data
         response = await db.table("resource_requests").select(
             "id, resource_type, latitude, longitude, created_at"
         ).gte("created_at", thirty_days_ago).execute()
@@ -710,7 +1014,6 @@ async def get_urgency_context(user_location: tuple[float, float]) -> UrgencyCont
 
     try:
         db = _get_db()
-        # Fetch active disasters
         response = await db.table("disasters").select(
             "id, type, title, status, location_id"
         ).eq("status", "active").execute()

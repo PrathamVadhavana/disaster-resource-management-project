@@ -1394,38 +1394,34 @@ async def export_data(
                 )
 
         elif data_type == "resources":
-            resp = await db_admin.table("available_resources").select("*").limit(5000).async_execute()
+            resp = await db_admin.table("resources").select("*").limit(5000).async_execute()
             rows = resp.data or []
             writer.writerow(
                 [
                     "ID",
-                    "Category",
                     "Type",
-                    "Title",
+                    "Name",
                     "Description",
-                    "Total Qty",
-                    "Claimed Qty",
-                    "Remaining",
+                    "Quantity",
                     "Unit",
-                    "Provider ID",
                     "Status",
+                    "Provider ID",
+                    "Location ID",
                     "Created At",
                 ]
             )
             for r in rows:
                 writer.writerow(
                     [
-                        r.get("resource_id") or r.get("id"),
-                        r.get("category"),
-                        r.get("resource_type"),
-                        r.get("title"),
+                        r.get("id"),
+                        r.get("type"),
+                        r.get("name"),
                         r.get("description", ""),
-                        r.get("total_quantity"),
-                        r.get("claimed_quantity"),
-                        r.get("remaining_quantity"),
+                        r.get("quantity"),
                         r.get("unit"),
-                        r.get("provider_id"),
                         r.get("status"),
+                        r.get("provider_id"),
+                        r.get("location_id"),
                         r.get("created_at"),
                     ]
                 )

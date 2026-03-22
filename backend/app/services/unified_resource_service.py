@@ -1,10 +1,9 @@
 """
 Unified Resource Management Service
 
-This service provides a single source of truth for resource management,
-unifying the resources and available_resources systems. It ensures that
-every resource has a provider_id, location_id, and status, and maintains
-consistency between the two tables via database triggers.
+This service provides a single source of truth for resource management
+using the resources table. It ensures that every resource has a
+provider_id, location_id, and status.
 
 The service provides methods for:
 - Creating resources (both direct and via inventory)
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class UnifiedResourceService:
-    """Service for unified resource management across resources and available_resources tables."""
+    """Service for unified resource management via the resources table."""
 
     def __init__(self):
         pass
@@ -36,7 +35,6 @@ class UnifiedResourceService:
     ) -> dict[str, Any]:
         """
         Create a new resource entry in the resources table.
-        This will automatically trigger the database trigger to update available_resources.
 
         Args:
             resource_data: Resource creation data
@@ -83,16 +81,10 @@ class UnifiedResourceService:
         address_text: str = "",
         location_id: UUID | None = None,
         user_role: str = "ngo",
-        sku: str | None = None,
-        min_stock_level: int = 5,
-        reorder_point: int = 10,
         item_condition: str = "new",
-        storage_requirements: dict | None = None,
-        internal_location: str | None = None,
     ) -> dict[str, Any]:
         """
-        Create an inventory item in available_resources table.
-        This will also create corresponding entries in the resources table.
+        Create an inventory item in the resources table.
 
         Args:
             provider_id: ID of the provider
@@ -105,60 +97,12 @@ class UnifiedResourceService:
             address_text: Address text for the resource
             location_id: Optional location ID
             user_role: Role of the user creating the item
-            sku: Optional barcode/SKU
-            min_stock_level: Threshold for low stock alerts
-            reorder_point: Recommended stock level for reordering
             item_condition: Condition of the item (new, used, etc.)
-            storage_requirements: JSON dict of storage needs
-            internal_location: Shelf/Bin identifier
 
         Returns:
-            Created inventory item data
+            Created resource data
         """
         try:
-            # First create the available_resources entry
-            inventory_data = {
-                "provider_id": str(provider_id),
-                "provider_role": user_role,
-                "category": category,
-                "resource_type": resource_type,
-                "title": title,
-                "description": description,
-                "total_quantity": total_quantity,
-                "claimed_quantity": 0,
-                "unit": unit,
-                "address_text": address_text,
-                "status": "available",
-                "is_active": True,
-                "sku": sku,
-                "min_stock_level": min_stock_level,
-                "reorder_point": reorder_point,
-                "item_condition": item_condition,
-                "storage_requirements": storage_requirements or {},
-                "internal_location": internal_location,
-                "created_at": datetime.now(UTC).isoformat(),
-                "updated_at": datetime.now(UTC).isoformat(),
-            }
-
-            # Filter out keys not supported by database schema to prevent errors
-            # if migrations haven't been run yet.
-            db_cols = [
-                "resource_id", "provider_id", "provider_role", "category",
-                "resource_type", "title", "description", "total_quantity",
-                "claimed_quantity", "is_active", "status", "address_text",
-                "location_lat", "location_long", "expiry_at", "created_at",
-                "updated_at", "unit"
-            ]
-            insert_data = {k: v for k, v in inventory_data.items() if k in db_cols}
-
-            response = await db.table("available_resources").insert(insert_data).async_execute()
-
-            if not response.data:
-                raise Exception("Failed to create inventory item")
-
-            created_item = response.data[0]
-
-            # Create corresponding resource entries
             resource_data = {
                 "provider_id": str(provider_id),
                 "location_id": str(location_id) if location_id else None,
@@ -168,9 +112,6 @@ class UnifiedResourceService:
                 "quantity": total_quantity,
                 "unit": unit,
                 "status": "available",
-                "priority": 5,
-                "quality_status": "good" if item_condition == "new" else "fair",
-                "tags": [category.lower(), item_condition],
                 "created_at": datetime.now(UTC).isoformat(),
                 "updated_at": datetime.now(UTC).isoformat(),
             }
@@ -183,19 +124,13 @@ class UnifiedResourceService:
             ]
             final_res_data = {k: v for k, v in resource_data.items() if k in res_db_cols}
 
-            resource_response = await db.table("resources").insert(final_res_data).async_execute()
+            response = await db.table("resources").insert(final_res_data).async_execute()
 
-            if not resource_response.data:
-                # Rollback the available_resources entry if resource creation fails
-                await (
-                    db.table("available_resources")
-                    .delete()
-                    .eq("resource_id", created_item["resource_id"])
-                    .async_execute()
-                )
-                raise Exception("Failed to create corresponding resource entry")
+            if not response.data:
+                raise Exception("Failed to create inventory item")
 
-            logger.info(f"Inventory item created: {created_item['resource_id']} by {user_role} {provider_id}")
+            created_item = response.data[0]
+            logger.info(f"Inventory item created: {created_item['id']} by {user_role} {provider_id}")
 
             return created_item
 
@@ -208,7 +143,6 @@ class UnifiedResourceService:
     ) -> dict[str, Any]:
         """
         Update the status of a resource and optionally assign it to a disaster.
-        This will trigger the database trigger to update available_resources.
 
         Args:
             resource_id: ID of the resource to update
@@ -244,7 +178,6 @@ class UnifiedResourceService:
     async def deallocate_resource(self, resource_id: str) -> dict[str, Any]:
         """
         Deallocate a resource and make it available again.
-        This will trigger the database trigger to update available_resources.
 
         Args:
             resource_id: ID of the resource to deallocate

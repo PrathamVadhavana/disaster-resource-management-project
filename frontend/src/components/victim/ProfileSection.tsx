@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getVictimProfile, updateVictimProfile, type VictimProfile } from '@/lib/api/victim'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { Loader2, MapPin, Save, CheckCircle2, ArrowRightLeft } from 'lucide-react'
+import { Loader2, MapPin, Save, CheckCircle2, ArrowRightLeft, AlertTriangle, Brain, Shield, TrendingUp, CloudRain, Flame, Wind, Waves } from 'lucide-react'
 
 const STATUS_OPTIONS = [
     { value: 'safe', label: 'Safe', emoji: '✅', color: 'border-emerald-300 bg-emerald-50 text-emerald-700', darkColor: 'dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-400' },
@@ -15,6 +15,14 @@ const STATUS_OPTIONS = [
 ]
 
 const NEEDS_OPTIONS = ['Food', 'Water', 'Medical', 'Shelter', 'Clothing', 'Financial Aid', 'Evacuation', 'Volunteers']
+
+const DISASTER_ICONS: Record<string, typeof CloudRain> = {
+    flood: CloudRain,
+    wildfire: Flame,
+    hurricane: Wind,
+    tornado: Wind,
+    tsunami: Waves,
+}
 
 export function ProfileSection() {
     const queryClient = useQueryClient()
@@ -113,6 +121,10 @@ export function ProfileSection() {
             </div>
         )
     }
+
+    const DisasterIcon = profile?.disaster_type ? (DISASTER_ICONS[profile.disaster_type] || AlertTriangle) : AlertTriangle
+    const riskScore = profile?.ai_risk_score ?? 0
+    const riskLevel = riskScore >= 0.7 ? 'High' : riskScore >= 0.4 ? 'Medium' : 'Low'
 
     return (
         <div className="space-y-6">
@@ -236,6 +248,115 @@ export function ProfileSection() {
                     </div>
                 </div>
 
+                {/* Disaster Info */}
+                {profile?.disaster_id && (
+                    <div className={cn(
+                        "rounded-2xl border overflow-hidden",
+                        profile.disaster_severity === 'critical' ? 'border-red-300 dark:border-red-500/30 bg-red-50 dark:bg-red-500/5' :
+                        profile.disaster_severity === 'high' ? 'border-orange-300 dark:border-orange-500/30 bg-orange-50 dark:bg-orange-500/5' :
+                        'border-amber-300 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/5'
+                    )}>
+                        <div className="px-5 py-4 border-b border-inherit flex items-center gap-2">
+                            <DisasterIcon className={cn(
+                                "w-5 h-5",
+                                profile.disaster_type === 'flood' ? 'text-blue-500' :
+                                profile.disaster_type === 'wildfire' ? 'text-orange-500' :
+                                'text-purple-500'
+                            )} />
+                            <h2 className="font-semibold text-slate-900 dark:text-white">Active Disaster</h2>
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-slate-600 dark:text-slate-400">Name</span>
+                                <span className="text-sm font-medium text-slate-900 dark:text-white">{profile.disaster_name}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-slate-600 dark:text-slate-400">Type</span>
+                                <span className="text-sm font-medium text-slate-900 dark:text-white capitalize">{profile.disaster_type}</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-slate-600 dark:text-slate-400">Severity</span>
+                                <span className={cn(
+                                    "px-2 py-0.5 rounded-full text-xs font-bold uppercase",
+                                    profile.disaster_severity === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400' :
+                                    profile.disaster_severity === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-400' :
+                                    'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400'
+                                )}>
+                                    {profile.disaster_severity}
+                                </span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <span className="text-sm text-slate-600 dark:text-slate-400">Status</span>
+                                <span className="text-sm font-medium text-slate-900 dark:text-white capitalize">{profile.disaster_status}</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* AI Risk Assessment */}
+                {profile?.ai_risk_score !== null && profile?.ai_risk_score !== undefined && (
+                    <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+                        <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center gap-2">
+                            <Brain className="w-5 h-5 text-purple-500" />
+                            <h2 className="font-semibold text-slate-900 dark:text-white">AI Risk Assessment</h2>
+                        </div>
+                        <div className="p-5 space-y-4">
+                            <div className="flex items-center gap-4">
+                                <div className={cn(
+                                    "w-16 h-16 rounded-2xl flex items-center justify-center",
+                                    riskScore >= 0.7 ? 'bg-red-100 dark:bg-red-500/20' :
+                                    riskScore >= 0.4 ? 'bg-amber-100 dark:bg-amber-500/20' :
+                                    'bg-emerald-100 dark:bg-emerald-500/20'
+                                )}>
+                                    <span className={cn(
+                                        "text-2xl font-black",
+                                        riskScore >= 0.7 ? 'text-red-600 dark:text-red-400' :
+                                        riskScore >= 0.4 ? 'text-amber-600 dark:text-amber-400' :
+                                        'text-emerald-600 dark:text-emerald-400'
+                                    )}>
+                                        {Math.round(riskScore * 100)}
+                                    </span>
+                                </div>
+                                <div className="flex-1">
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">Risk Level</span>
+                                        <span className={cn(
+                                            "text-xs font-bold uppercase",
+                                            riskScore >= 0.7 ? 'text-red-600 dark:text-red-400' :
+                                            riskScore >= 0.4 ? 'text-amber-600 dark:text-amber-400' :
+                                            'text-emerald-600 dark:text-emerald-400'
+                                        )}>
+                                            {riskLevel}
+                                        </span>
+                                    </div>
+                                    <div className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                                        <div
+                                            className={cn(
+                                                "h-full rounded-full transition-all",
+                                                riskScore >= 0.7 ? 'bg-red-500' :
+                                                riskScore >= 0.4 ? 'bg-amber-500' :
+                                                'bg-emerald-500'
+                                            )}
+                                            style={{ width: `${riskScore * 100}%` }}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                            {profile.ai_recommendations && profile.ai_recommendations.length > 0 && (
+                                <div className="space-y-2">
+                                    <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Recommendations</p>
+                                    {profile.ai_recommendations.map((rec, idx) => (
+                                        <div key={idx} className="flex items-start gap-2 p-3 rounded-xl bg-purple-50 dark:bg-purple-500/10 border border-purple-100 dark:border-purple-500/20">
+                                            <Shield className="w-4 h-4 text-purple-500 mt-0.5 shrink-0" />
+                                            <p className="text-sm text-purple-700 dark:text-purple-300">{rec}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+
                 {/* Location */}
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
                     <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5">
@@ -294,7 +415,6 @@ export function ProfileSection() {
                     )}
                     <div className="flex gap-3">
                     {(['donor', 'volunteer', 'ngo'] as const).map(role => {
-
                         return (
                             <button key={role} onClick={() => switchRoleMut.mutate(role)}
                                 disabled={updateMut.isPending || switchRoleMut.isPending}

@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
@@ -640,3 +641,353 @@ async def auto_retrain_trigger(admin: dict = Depends(require_admin)):
             "reason": reason,
             "last_training": last_training_time.isoformat() if last_training_time else None,
         }
+
+
+# ── Disaster-Specific Endpoints ─────────────────────────────────────────────
+
+
+@router.get("/anomalies/disaster/{disaster_id}")
+async def get_disaster_anomalies(
+    disaster_id: str,
+    status: str | None = None,
+    severity: str | None = None,
+    limit: int = 30,
+    admin: dict = Depends(require_admin),
+):
+    """Get anomaly alerts for a specific disaster."""
+    from app.services.anomaly_service import AnomalyDetectionService
+
+    svc = AnomalyDetectionService()
+    alerts = await svc.get_disaster_alerts(
+        disaster_id=disaster_id,
+        status=status,
+        severity=severity,
+        limit=limit,
+    )
+    return {"alerts": alerts, "disaster_id": disaster_id}
+
+
+@router.get("/outcomes/disaster/{disaster_id}")
+async def get_disaster_outcomes(
+    disaster_id: str,
+    limit: int = 50,
+    admin: dict = Depends(require_admin),
+):
+    """Get outcome tracking records for a specific disaster."""
+    from app.services.outcome_service import OutcomeTrackingService
+
+    svc = OutcomeTrackingService()
+    return await svc.get_disaster_outcomes(disaster_id=disaster_id, limit=limit)
+
+
+@router.get("/sitreps/disaster/{disaster_id}")
+async def get_disaster_sitreps(
+    disaster_id: str,
+    limit: int = 10,
+    admin: dict = Depends(require_admin),
+):
+    """Get situation reports for a specific disaster."""
+    from app.services.sitrep_service import SitrepService
+
+    svc = SitrepService()
+    return await svc.get_disaster_reports(disaster_id=disaster_id, limit=limit)
+
+
+@router.get("/query-history/disaster/{disaster_id}")
+async def get_disaster_query_history(
+    disaster_id: str,
+    limit: int = 20,
+    admin: dict = Depends(require_admin),
+):
+    """Get query history for a specific disaster."""
+    from app.services.nl_query_service import NLQueryService
+
+    svc = NLQueryService()
+    return await svc.get_disaster_query_history(disaster_id=disaster_id, user_id=admin.get("id"), limit=limit)
+
+
+@router.get("/forecast/disaster/{disaster_id}")
+async def get_disaster_severity_forecast(
+    disaster_id: str,
+    horizon_hours: int = 48,
+    admin: dict = Depends(require_admin),
+):
+    """Get severity forecast for a specific disaster."""
+    from app.services.ml_service import MLService
+
+    ml_service = MLService()
+    forecast = await ml_service.get_disaster_forecast(disaster_id=disaster_id, horizon_hours=horizon_hours)
+    return {"forecast": forecast, "disaster_id": disaster_id}
+
+
+@router.get("/pinn/disaster/{disaster_id}")
+async def get_disaster_spread_prediction(
+    disaster_id: str,
+    time_hours: int = 24,
+    admin: dict = Depends(require_admin),
+):
+    """Get spread prediction for a specific disaster."""
+    from app.services.ml_service import MLService
+
+    ml_service = MLService()
+    prediction = await ml_service.get_disaster_spread(disaster_id=disaster_id, time_hours=time_hours)
+    return {"prediction": prediction, "disaster_id": disaster_id}
+
+
+@router.get("/recommendations/disaster/{disaster_id}")
+async def get_disaster_resource_recommendations(
+    disaster_id: str,
+    admin: dict = Depends(require_admin),
+):
+    """Get AI resource recommendations for a specific disaster."""
+    from app.services.ml_service import MLService
+
+    ml_service = MLService()
+    recommendations = await ml_service.get_disaster_recommendations(disaster_id=disaster_id)
+    return {"recommendations": recommendations, "disaster_id": disaster_id}
+
+
+# ── MoE (Mixture of Experts) Endpoints ──────────────────────────────────────
+
+
+@router.get("/moe/status")
+async def get_moe_status(admin: dict = Depends(require_admin)):
+    """Get MoE model status and expert utilization statistics."""
+    from ml.moe_disaster_model import load_moe_model
+
+    try:
+        moe_engine = load_moe_model()
+        utilization = moe_engine.model.get_expert_utilization()
+        cache_stats = moe_engine.get_cache_stats()
+        
+        return {
+            "model_loaded": True,
+            "n_experts": moe_engine.model.n_experts,
+            "top_k": moe_engine.model.top_k,
+            "expert_utilization": utilization,
+            "cache_stats": cache_stats,
+            "experts": moe_engine.model.expert_names,
+        }
+    except Exception as e:
+        logger.error("Failed to get MoE status: %s", e)
+        return {
+            "model_loaded": False,
+            "error": str(e),
+        }
+
+
+@router.post("/moe/predict")
+async def moe_predict(
+    features: dict[str, Any],
+    disaster_type: str = "other",
+    severity: str = "medium",
+    latitude: float = 0,
+    longitude: float = 0,
+    use_cache: bool = True,
+    admin: dict = Depends(require_admin),
+):
+    """Make predictions using MoE model with expert routing visualization."""
+    from ml.moe_disaster_model import load_moe_model
+
+    try:
+        moe_engine = load_moe_model()
+        
+        # Prepare features
+        feature_dict = {
+            **features,
+            "disaster_type": disaster_type,
+            "severity": severity,
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+        
+        # Make prediction
+        result = moe_engine.predict(feature_dict, use_cache=use_cache)
+        
+        return result
+    except Exception as e:
+        logger.error("MoE prediction failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"MoE prediction failed: {str(e)}")
+
+
+@router.post("/moe/predict-task")
+async def moe_predict_task(
+    features: dict[str, Any],
+    task: str = "all",
+    disaster_type: str = "other",
+    severity: str = "medium",
+    latitude: float = 0,
+    longitude: float = 0,
+    admin: dict = Depends(require_admin),
+):
+    """Make task-specific predictions using MoE model."""
+    import torch
+    from ml.moe_disaster_model import DISASTER_TYPE_TO_IDX, DisasterMoEModel, load_moe_model
+
+    try:
+        moe_engine = load_moe_model()
+        
+        # Validate task
+        valid_tasks = ["severity", "spread", "impact", "resource", "anomaly", "all"]
+        if task not in valid_tasks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid task: {task}. Valid tasks: {valid_tasks}"
+            )
+        
+        # Prepare inputs
+        x = moe_engine._prepare_features(features)
+        disaster_type_tensor = moe_engine._encode_disaster_type(disaster_type)
+        severity_tensor = moe_engine._encode_severity(severity)
+        location_tensor = moe_engine._encode_location(latitude, longitude)
+        
+        # Forward pass with specific task
+        with torch.no_grad():
+            outputs = moe_engine.model(
+                x, disaster_type_tensor, severity_tensor, location_tensor, task=task
+            )
+        
+        # Process outputs based on task
+        result = {"task": task}
+        
+        if task in ("severity", "all"):
+            result["severity"] = moe_engine._process_severity(outputs["severity"])
+        
+        if task in ("spread", "all"):
+            result["spread"] = moe_engine._process_spread(outputs["spread"])
+        
+        if task in ("impact", "all"):
+            result["impact"] = moe_engine._process_impact(outputs["impact"])
+        
+        if task in ("resource", "all"):
+            result["resource"] = moe_engine._process_resource(outputs["resource"])
+        
+        if task in ("anomaly", "all"):
+            result["anomaly"] = moe_engine._process_anomaly(outputs["anomaly"])
+        
+        # Add expert routing info
+        result["expert_routing"] = {
+            "gate_probs": outputs["gate_probs"].cpu().numpy().tolist(),
+            "expert_usage": outputs["expert_usage"].cpu().numpy().tolist(),
+            "load_balance_loss": outputs["load_balance_loss"].item(),
+        }
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("MoE task prediction failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"MoE task prediction failed: {str(e)}")
+
+
+@router.post("/moe/train")
+async def train_moe_endpoint(
+    epochs: int = 50,
+    batch_size: int = 32,
+    learning_rate: float = 1e-3,
+    admin: dict = Depends(require_admin),
+):
+    """Train MoE model on disaster data."""
+    from ml.moe_disaster_model import MOE_CHECKPOINT, train_moe_model
+
+    try:
+        # Fetch training data from Supabase
+        from app.database import db_admin
+        
+        resp = await db_admin.table("disasters").select("*").limit(1000).async_execute()
+        disasters = resp.data or []
+        
+        if len(disasters) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail="Insufficient data for MoE training. Need at least 10 disasters."
+            )
+        
+        # Prepare training data (simplified - would need proper feature extraction)
+        train_data = []
+        val_data = []
+        
+        for i, disaster in enumerate(disasters):
+            features = {
+                "disaster_type": disaster.get("type", "other"),
+                "severity": disaster.get("severity", "medium"),
+                "latitude": disaster.get("latitude", 0),
+                "longitude": disaster.get("longitude", 0),
+                "affected_population": disaster.get("affected_population", 0),
+                "temperature": 25,
+                "humidity": 60,
+                "wind_speed": 10,
+                "pressure": 1013,
+                "precipitation": 0,
+                "population_density": 100,
+                "current_area": disaster.get("estimated_damage", 0) / 1000,
+            }
+            
+            if i < len(disasters) * 0.8:
+                train_data.append(features)
+            else:
+                val_data.append(features)
+        
+        # Train model
+        history = train_moe_model(
+            train_data=train_data,
+            val_data=val_data,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            save_path=MOE_CHECKPOINT,
+        )
+        
+        return {
+            "message": "MoE training complete",
+            "epochs": epochs,
+            "train_samples": len(train_data),
+            "val_samples": len(val_data),
+            "final_utilization": history["expert_utilization"][-1] if history["expert_utilization"] else {},
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("MoE training failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"MoE training failed: {str(e)}")
+
+
+@router.get("/moe/cache-stats")
+async def get_moe_cache_stats(admin: dict = Depends(require_admin)):
+    """Get MoE inference cache statistics."""
+    from ml.moe_disaster_model import load_moe_model
+
+    try:
+        moe_engine = load_moe_model()
+        return moe_engine.get_cache_stats()
+    except Exception as e:
+        logger.error("Failed to get MoE cache stats: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
+
+
+@router.post("/moe/clear-cache")
+async def clear_moe_cache(admin: dict = Depends(require_admin)):
+    """Clear MoE inference cache."""
+    from ml.moe_disaster_model import load_moe_model
+
+    try:
+        moe_engine = load_moe_model()
+        moe_engine.clear_cache()
+        return {"message": "MoE cache cleared"}
+    except Exception as e:
+        logger.error("Failed to clear MoE cache: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
+
+
+@router.post("/moe/reset-stats")
+async def reset_moe_stats(admin: dict = Depends(require_admin)):
+    """Reset MoE expert utilization statistics."""
+    from ml.moe_disaster_model import load_moe_model
+
+    try:
+        moe_engine = load_moe_model()
+        moe_engine.model.reset_usage_stats()
+        return {"message": "MoE statistics reset"}
+    except Exception as e:
+        logger.error("Failed to reset MoE stats: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to reset stats: {str(e)}")

@@ -1,14 +1,19 @@
 """
-DisasterGPT — LLM Query API Router
-====================================
+DisasterGPT — LLM Query API Router (Enhanced)
+===============================================
 Exposes the RAG-powered LLM assistant as a FastAPI endpoint.
 
-Endpoints
-─────────
-POST /api/llm/query     – Submit a query and receive a full response
-POST /api/llm/stream    – Submit a query and receive a streaming SSE response
-POST /api/llm/index     – Trigger knowledge base re-indexing (admin only)
-GET  /api/llm/stats     – Knowledge base statistics
+Enhancements (V2):
+  1. Persist Chat Sessions to DB (Supabase)
+  2. Stream the Chat Endpoint (SSE)
+  3. Prune Context by Intent
+  4. Semantic Intent Classification (sentence-transformers)
+  5. Conversation Memory with Summarization
+  6. Follow-Up Suggestion Chips
+  7. Action Execution — "Do it, don't just tell me"
+  8. Scheduled Auto-Digests — Autopilot briefings at 8 AM daily
+  9. Proactive Anomaly Analysis — Auto-push insights when anomalies are detected
+  10. ReAct-Style Tool Calling — Turn DisasterGPT into a true autonomous agent
 """
 
 from __future__ import annotations
@@ -22,7 +27,8 @@ import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Path
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -102,6 +108,8 @@ class ChatResponse(BaseModel):
     session_id: str  # Session ID (new or existing)
     intent: str  # Detected intent category
     context_data: dict | None = None  # Optional context data used for answering
+    follow_up_suggestions: list[str] | None = None  # Follow-up question chips
+    action_cards: list[dict] | None = None  # Actionable cards with confirm buttons
 
 
 class SessionHistoryResponse(BaseModel):
@@ -111,9 +119,34 @@ class SessionHistoryResponse(BaseModel):
     message_count: int
 
 
+class ActionExecuteRequest(BaseModel):
+    action_type: str = Field(..., description="Type of action to execute")
+    action_payload: dict = Field(..., description="Action parameters")
+    session_id: str | None = Field(None, description="Optional session ID for context")
+
+
+class ActionExecuteResponse(BaseModel):
+    success: bool
+    action_type: str
+    result: dict
+    message: str
+
+
+class DigestSubscribeRequest(BaseModel):
+    digest_time: str = Field("08:00", description="Time for daily digest (HH:MM)")
+    timezone: str = Field("UTC", description="User timezone")
+
+
+class DigestSubscribeResponse(BaseModel):
+    success: bool
+    message: str
+    next_digest_at: str | None = None
+
+
 # ── Lazy singleton ──────────────────────────────────────────────────────────────
 
 _rag_instance = None
+_semantic_classifier = None
 
 
 def _get_rag():
@@ -126,6 +159,174 @@ def _get_rag():
     return _rag_instance
 
 
+def _get_semantic_classifier():
+    """Lazy-load semantic intent classifier using sentence-transformers."""
+    global _semantic_classifier
+    if _semantic_classifier is None:
+        try:
+            from sentence_transformers import SentenceTransformer, util
+            import numpy as np
+
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+
+            # Intent exemplars — representative phrases for each intent
+            intent_exemplars = {
+                "resource_requests": [
+                    "how many requests are there",
+                    "show me pending requests",
+                    "what requests are open",
+                    "request count status",
+                ],
+                "available_resources": [
+                    "what resources do we have",
+                    "show inventory",
+                    "available supplies stock",
+                    "what's in our warehouse",
+                ],
+                "disaster_status": [
+                    "what disasters are active",
+                    "current emergency status",
+                    "which disasters are happening",
+                    "show active disasters",
+                ],
+                "low_stock": [
+                    "running low on supplies",
+                    "shortage of resources",
+                    "what's depleted",
+                    "items almost out of stock",
+                ],
+                "briefing": [
+                    "give me a briefing",
+                    "what needs attention",
+                    "daily admin brief",
+                    "critical issues today",
+                ],
+                "supply_demand_gap": [
+                    "resource gap analysis",
+                    "supply vs demand",
+                    "what are we short on",
+                    "biggest supply deficit",
+                ],
+                "request_lifecycle": [
+                    "how fast are requests fulfilled",
+                    "stale stuck requests",
+                    "fulfillment time bottleneck",
+                    "request processing speed",
+                ],
+                "chatbot_activity": [
+                    "chatbot intake activity",
+                    "what are victims requesting",
+                    "chatbot abandonment rate",
+                    "victim chatbot sessions",
+                ],
+                "activity_heatmap": [
+                    "when do we get most requests",
+                    "peak hours for requests",
+                    "busiest time of day",
+                    "request patterns temporal",
+                ],
+                "engagement": [
+                    "user engagement active users",
+                    "who is active on platform",
+                    "volunteer donor activity",
+                    "idle inactive users",
+                ],
+                "registration_trends": [
+                    "new user signups",
+                    "registration growth",
+                    "who registered recently",
+                    "incomplete profiles onboarding",
+                ],
+                "request_pipeline": [
+                    "request pipeline funnel",
+                    "completion rate rejection rate",
+                    "request journey workflow",
+                    "status breakdown funnel",
+                ],
+                "trends": [
+                    "are things getting better",
+                    "week over week trends",
+                    "improving or declining",
+                    "trajectory compared to last week",
+                ],
+                "geographic": [
+                    "which areas have most requests",
+                    "geographic distribution location",
+                    "underserved regions",
+                    "where should we focus resources",
+                ],
+                "disaster_comparison": [
+                    "compare disasters scorecard",
+                    "which disaster is worst",
+                    "disaster performance health",
+                    "disaster comparison ranking",
+                ],
+                "responder_performance": [
+                    "ngo volunteer performance",
+                    "who is fastest responder",
+                    "best worst ngo",
+                    "responder turnaround time",
+                ],
+                "digest": [
+                    "comprehensive daily digest",
+                    "full summary everything",
+                    "complete overview report",
+                    "weekly digest full report",
+                ],
+                "user_requests": [
+                    "my request status",
+                    "track my submissions",
+                    "did i request anything",
+                    "status of my orders",
+                ],
+                "user_profile": [
+                    "my profile account details",
+                    "about me my status",
+                    "my account information",
+                ],
+                "allocate_resources": [
+                    "allocate send resources",
+                    "distribute dispatch resources",
+                    "assign resources to zone",
+                    "send supplies to location",
+                ],
+                "generate_report": [
+                    "generate situation report",
+                    "create sitrep",
+                    "daily status report",
+                    "generate report for disaster",
+                ],
+                "anomalies": [
+                    "any anomaly alerts",
+                    "unusual patterns detected",
+                    "warning alerts active",
+                    "irregularities in data",
+                ],
+                "users_overview": [
+                    "how many users total",
+                    "user count by role",
+                    "registered accounts overview",
+                    "platform user statistics",
+                ],
+            }
+
+            # Pre-encode all exemplars
+            exemplar_embeddings = {}
+            for intent, phrases in intent_exemplars.items():
+                exemplar_embeddings[intent] = model.encode(phrases, convert_to_tensor=True)
+
+            _semantic_classifier = {
+                "model": model,
+                "exemplar_embeddings": exemplar_embeddings,
+                "util": util,
+            }
+            logger.info("Semantic intent classifier loaded successfully")
+        except Exception as exc:
+            logger.warning("Failed to load semantic classifier: %s — falling back to regex", exc)
+            _semantic_classifier = None
+    return _semantic_classifier
+
+
 # ── Endpoints ───────────────────────────────────────────────────────────────────
 
 
@@ -134,20 +335,8 @@ async def llm_query(
     body: LLMQueryRequest,
     user: dict = Depends(get_current_user),
 ):
-    """
-    Submit a query to DisasterGPT and receive a full response.
-
-    The pipeline:
-      1. Embeds the query and retrieves relevant historical documents
-      2. Fetches live disaster state from the database
-      3. Generates a context-augmented response via the LLM
-      4. Returns the response, sources, and a confidence score
-    """
-    logger.info(
-        "LLM query from user=%s: %.80s...",
-        user.get("id", "?"),
-        body.query,
-    )
+    """Submit a query to DisasterGPT and receive a full response."""
+    logger.info("LLM query from user=%s: %.80s...", user.get("id", "?"), body.query)
 
     try:
         rag = _get_rag()
@@ -158,7 +347,6 @@ async def llm_query(
             max_tokens=body.max_tokens,
             temperature=body.temperature,
         )
-
         return LLMQueryResponse(
             response=result["response"],
             sources=[LLMSource(**s) for s in result["sources"]],
@@ -166,13 +354,9 @@ async def llm_query(
             disaster_id=result.get("disaster_id"),
             documents_retrieved=result.get("documents_retrieved", 0),
         )
-
     except RuntimeError as exc:
         logger.error("LLM backend error: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail=f"LLM service unavailable: {exc}",
-        )
+        raise HTTPException(status_code=503, detail=f"LLM service unavailable: {exc}")
     except Exception as exc:
         logger.error("LLM query failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="LLM query failed")
@@ -183,19 +367,8 @@ async def llm_stream(
     body: LLMQueryRequest,
     user: dict = Depends(get_current_user),
 ):
-    """
-    Streaming version — returns server-sent events (SSE).
-
-    Event types:
-      - sources: JSON array of retrieved source documents
-      - token:   Single generated token
-      - done:    Final event with confidence score
-    """
-    logger.info(
-        "LLM stream from user=%s: %.80s...",
-        user.get("id", "?"),
-        body.query,
-    )
+    """Streaming version — returns server-sent events (SSE)."""
+    logger.info("LLM stream from user=%s: %.80s...", user.get("id", "?"), body.query)
 
     async def event_generator():
         try:
@@ -219,7 +392,7 @@ async def llm_stream(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -228,43 +401,34 @@ async def llm_stream(
 async def llm_index(
     user: dict = Depends(require_role("admin")),
 ):
-    """
-    Re-index the knowledge base from the database and training data.
-    Admin-only endpoint.
-    """
+    """Re-index the knowledge base. Admin-only."""
     logger.info("Knowledge base re-index triggered by user=%s", user.get("id", "?"))
 
     try:
         rag = _get_rag()
         kb = rag.knowledge_base
-
         total_indexed = 0
 
-        # Index disasters from DB
         try:
             resp = await db.table("disasters").select("*").async_execute()
             if resp.data:
                 count = kb.index_disasters_from_db(resp.data)
                 total_indexed += count
-                logger.info("Indexed %d disaster records from DB", count)
         except Exception as exc:
             logger.warning("DB disaster indexing failed: %s", exc)
 
-        # Index situation reports from training data
         from pathlib import Path
 
         reports_path = Path("training_data/disaster_instructions.jsonl")
         if reports_path.exists():
             count = kb.index_situation_reports(reports_path)
             total_indexed += count
-            logger.info("Indexed %d situation reports", count)
 
         return LLMIndexResponse(
             indexed=total_indexed,
             total=kb.count,
             message=f"Indexed {total_indexed} documents. Total in knowledge base: {kb.count}",
         )
-
     except Exception as exc:
         logger.error("Indexing failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}")
@@ -277,26 +441,21 @@ async def llm_stats(
     """Get knowledge base statistics."""
     try:
         rag = _get_rag()
-        return LLMStatsResponse(
-            total_documents=rag.knowledge_base.count,
-            status="operational",
-        )
+        return LLMStatsResponse(total_documents=rag.knowledge_base.count, status="operational")
     except Exception as exc:
         logger.warning("Stats retrieval failed: %s", exc)
-        return LLMStatsResponse(
-            total_documents=0,
-            status=f"degraded: {exc}",
-        )
+        return LLMStatsResponse(total_documents=0, status=f"degraded: {exc}")
 
 
-# ── Intent classification ───────────────────────────────────────────────────
+# ── Enhanced Intent Classification ─────────────────────────────────────────────
 
-import re
 
 _CAUSAL_PATTERNS = re.compile(
     r"\b(what.?if|counterfactual|causal|root.?cause|intervene|intervention|"
     r"would.?have|effect.?of|impact.?of.+on|treatment.?effect|"
-    r"reduce.?casualties|reduce.?damage|why.?did|cause.?of)\b",
+    r"reduce.?casualties|reduce.?damage|why.?did|cause.?of|"
+    r"explain.?why|explain.?priority|explain.?decision|"
+    r"how.?did.?you|reasoning.?behind|justify|rationale)\b",
     re.IGNORECASE,
 )
 
@@ -310,10 +469,36 @@ _MULTI_AGENT_PATTERNS = re.compile(
 
 
 def _classify_intent(query: str) -> str:
-    """Classify query intent into one of: 'causal', 'multi_agent', 'rag'.
+    """Classify query intent using semantic similarity (with regex fallback)."""
+    # Try semantic classification first
+    classifier = _get_semantic_classifier()
+    if classifier:
+        try:
+            model = classifier["model"]
+            exemplar_embeddings = classifier["exemplar_embeddings"]
+            util = classifier["util"]
+            import numpy as np
 
-    Uses lightweight regex pattern matching on the query text.
-    """
+            query_embedding = model.encode(query, convert_to_tensor=True)
+
+            best_intent = "general"
+            best_score = 0.0
+
+            for intent, embeddings in exemplar_embeddings.items():
+                scores = util.cos_sim(query_embedding, embeddings)
+                max_score = float(scores.max())
+                if max_score > best_score:
+                    best_score = max_score
+                    best_intent = intent
+
+            # Threshold: if similarity is too low, fall back to general
+            if best_score >= 0.35:
+                logger.info("Semantic intent: %s (score=%.3f)", best_intent, best_score)
+                return best_intent
+        except Exception as exc:
+            logger.debug("Semantic classification failed: %s — using regex fallback", exc)
+
+    # Regex fallback
     causal_score = len(_CAUSAL_PATTERNS.findall(query))
     agent_score = len(_MULTI_AGENT_PATTERNS.findall(query))
 
@@ -321,426 +506,536 @@ def _classify_intent(query: str) -> str:
         return "causal"
     if agent_score > 0:
         return "multi_agent"
-    return "rag"
+    return _detect_intent_fallback(query)
 
 
-# ── Unified DisasterGPT endpoint ────────────────────────────────────────────
+def _detect_intent_fallback(message: str) -> str:
+    """Detect intent category from user message using keyword matching."""
+    msg = message.lower()
+
+    if any(p in msg for p in ["my request", "my orders", "my submission", "did i request", "status of my", "track my"]):
+        return "user_requests"
+    if any(p in msg for p in ["my profile", "my account", "my details", "about me", "my status"]):
+        return "user_profile"
+    if any(p in msg for p in ["running low", "low stock", "shortage", "almost out", "depleted", "need more"]):
+        return "low_stock"
+    if any(p in msg for p in ["allocate", "send resources", "distribute resources", "dispatch resources", "assign resources"]):
+        return "allocate_resources"
+    if any(p in msg for p in ["generate report", "create report", "sitrep", "situation report", "status report", "daily report"]):
+        return "generate_report"
+    if any(p in msg for p in ["how many request", "number of request", "request count", "pending request", "open request", "total request"]):
+        return "resource_requests"
+    if any(p in msg for p in ["how many users", "number of users", "total users", "user count", "registered users", "all users", "list users", "user accounts", "total accounts"]):
+        return "users_overview"
+    if any(p in msg for p in ["what resources are available", "available resources", "inventory", "stock", "supply", "resources we have"]):
+        return "available_resources"
+    if any(p in msg for p in ["disaster status", "active disaster", "current disaster", "emergency status", "which disaster", "what disaster"]):
+        return "disaster_status"
+    if any(p in msg for p in ["anomal", "alert", "warning", "unusual", "irregularit"]):
+        return "anomalies"
+    if any(p in msg for p in ["briefing", "brief me", "daily brief", "admin brief", "morning brief", "what needs attention", "what should i know", "critical issues"]):
+        return "briefing"
+    if any(p in msg for p in ["resource gap", "supply gap", "demand gap", "deficit", "supply vs demand", "supply and demand", "what are we short on", "biggest gap", "coverage"]):
+        return "supply_demand_gap"
+    if any(p in msg for p in ["stale request", "stuck request", "old request", "pending too long", "overdue request", "how fast", "fulfillment time", "how long does it take", "lifecycle", "bottleneck"]):
+        return "request_lifecycle"
+    if any(p in msg for p in ["chatbot activity", "chatbot intake", "victim chatbot", "what are victims requesting", "chatbot abandon", "intake activity", "chatbot session"]):
+        return "chatbot_activity"
+    if any(p in msg for p in ["when do we get", "peak hour", "peak time", "busiest time", "busiest day", "request pattern", "activity pattern", "heatmap", "temporal"]):
+        return "activity_heatmap"
+    if any(p in msg for p in ["engag", "active user", "idle volunteer", "inactive", "who is active", "volunteer activity", "donor activity", "user activity"]):
+        return "engagement"
+    if any(p in msg for p in ["new user", "signup", "sign up", "registration", "who registered", "new account", "onboarding", "incomplete profile", "growth"]):
+        return "registration_trends"
+    if any(p in msg for p in ["pipeline", "funnel", "request journey", "completion rate", "rejection rate", "workflow", "request flow", "how many completed", "request status breakdown"]):
+        return "request_pipeline"
+    if any(p in msg for p in ["trend", "getting better", "getting worse", "week over week", "improving", "declining", "compared to last", "going up", "going down", "trajectory"]):
+        return "trends"
+    if any(p in msg for p in ["which area", "location", "where are request", "geographic", "region", "underserved", "which city", "which place", "spatial", "where should we"]):
+        return "geographic"
+    if any(p in msg for p in ["compare disaster", "disaster scorecard", "disaster performance", "which disaster is", "worst disaster", "best disaster", "health score", "disaster comparison"]):
+        return "disaster_comparison"
+    if any(p in msg for p in ["ngo performance", "volunteer performance", "responder", "who is fastest", "which ngo", "ngo completion", "best ngo", "worst ngo", "turnaround", "ngo workload"]):
+        return "responder_performance"
+    if any(p in msg for p in ["daily digest", "weekly digest", "full summary", "comprehensive report", "everything", "full report", "daily report", "weekly report", "complete overview"]):
+        return "digest"
+    return "general"
 
 
-class UnifiedQueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=4000, description="Natural-language question")
-    disaster_id: str | None = Field(None, description="Optional disaster ID for focused context")
-    mode: str | None = Field(None, description="Force a mode: 'rag', 'multi_agent', 'causal', or None for auto")
-    top_k: int = Field(5, ge=1, le=20)
-    max_tokens: int = Field(1024, ge=64, le=4096)
-    temperature: float = Field(0.7, ge=0.0, le=2.0)
+# ── Follow-Up Suggestion Generator ─────────────────────────────────────────────
 
 
-@router.post("/unified")
-async def unified_stream(
-    body: UnifiedQueryRequest,
-    user: dict = Depends(get_current_user),
-):
-    """Unified DisasterGPT endpoint — auto-classifies intent and routes to
-    the appropriate AI system (RAG, Multi-Agent, or Causal AI).
+def _generate_follow_up_suggestions(intent: str, context_data: dict | None, user_role: str) -> list[str]:
+    """Generate contextual follow-up question suggestions based on intent and context."""
+    suggestions_map = {
+        "briefing": [
+            "Tell me more about the stale requests",
+            "Which disasters need immediate attention?",
+            "Show me the supply-demand gaps",
+        ],
+        "supply_demand_gap": [
+            "Which resource type has the worst deficit?",
+            "Can you allocate resources to fix the gaps?",
+            "Show me who can fulfill these shortages",
+        ],
+        "request_lifecycle": [
+            "Which priority level is slowest?",
+            "Show me the stale requests in detail",
+            "Compare fulfillment across disasters",
+        ],
+        "trends": [
+            "Why is this metric declining?",
+            "Show me the geographic breakdown",
+            "Compare performance scorecards",
+        ],
+        "geographic": [
+            "Which underserved area needs help most?",
+            "Show me resources available near these locations",
+            "Allocate resources to underserved areas",
+        ],
+        "disaster_comparison": [
+            "What's causing the worst disaster's low health score?",
+            "Show me responder performance for each disaster",
+            "Generate a situation report for the worst disaster",
+        ],
+        "responder_performance": [
+            "Which NGO has the best turnaround time?",
+            "Show me overloaded responders",
+            "How can we improve completion rates?",
+        ],
+        "digest": [
+            "Drill down into the trends section",
+            "Show me the supply-demand gaps in detail",
+            "Give me a briefing on what needs attention now",
+        ],
+        "resource_requests": [
+            "Show me only critical priority requests",
+            "Which resource type has most requests?",
+            "How many requests are stale?",
+        ],
+        "available_resources": [
+            "Which resources are running low?",
+            "Show me supply vs demand gaps",
+            "Where should we reallocate from?",
+        ],
+        "disaster_status": [
+            "Compare disaster scorecards",
+            "Show me resources for the worst disaster",
+            "Generate a situation report",
+        ],
+        "low_stock": [
+            "Which locations have these items?",
+            "Show me supply-demand gaps",
+            "Can you help me allocate more resources?",
+        ],
+        "chatbot_activity": [
+            "What are victims requesting most?",
+            "Why is the abandonment rate high?",
+            "Show me priority distribution",
+        ],
+        "activity_heatmap": [
+            "What causes the peak hours?",
+            "Show me trends over time",
+            "Compare this week vs last week",
+        ],
+        "engagement": [
+            "How can we increase volunteer activity?",
+            "Show me registration trends",
+            "Which role has lowest engagement?",
+        ],
+        "registration_trends": [
+            "How can we reduce incomplete profiles?",
+            "Show me user engagement",
+            "What's the growth trajectory?",
+        ],
+        "request_pipeline": [
+            "Where are requests getting stuck?",
+            "Show me the bottleneck",
+            "Compare pipeline by priority",
+        ],
+        "anomalies": [
+            "Give me details on the critical alerts",
+            "Show me the affected resources",
+            "What's the recommended action?",
+        ],
+    }
 
-    Always streams SSE events. Event types:
-      - meta:         Classification info & mode
-      - sources:      Retrieved documents (RAG mode)
-      - token:        Generated text token
-      - causal_data:  Causal analysis results (inline data)
-      - agent_start:  Agent starting work
-      - agent_result: Agent completed
-      - done:         Stream complete
-      - error:        Something went wrong
-    """
-    mode = body.mode or _classify_intent(body.query)
-    logger.info(
-        "Unified query mode=%s user=%s: %.80s...",
-        mode,
-        user.get("id", "?"),
-        body.query,
+    # Role-specific suggestions
+    role_suggestions = {
+        "admin": [
+            "Give me a comprehensive daily digest",
+            "Show me what needs attention right now",
+            "Compare disaster performance scorecards",
+        ],
+        "coordinator": [
+            "Where should we deploy resources?",
+            "Show me responder performance",
+            "Which area is most underserved?",
+        ],
+        "ngo": [
+            "Show me my assigned requests",
+            "What's our current inventory status?",
+            "Which requests are highest priority?",
+        ],
+        "victim": [
+            "What's the status of my requests?",
+            "What resources are available near me?",
+            "How do I request help?",
+        ],
+    }
+
+    suggestions = suggestions_map.get(intent, [])
+
+    # Add role-specific suggestions if we don't have enough
+    if len(suggestions) < 3 and user_role in role_suggestions:
+        for s in role_suggestions[user_role]:
+            if s not in suggestions:
+                suggestions.append(s)
+            if len(suggestions) >= 3:
+                break
+
+    return suggestions[:3]
+
+
+# ── Action Card Generator ──────────────────────────────────────────────────────
+
+
+def _generate_action_cards(intent: str, context_data: dict | None, user_role: str) -> list[dict]:
+    """Generate actionable cards based on the response context."""
+    cards = []
+
+    # Only generate action cards for elevated roles
+    if user_role not in ("admin", "coordinator", "super_admin"):
+        return cards
+
+    if intent == "supply_demand_gap" and context_data:
+        gaps = context_data.get("data", {}).get("critical_shortages", [])
+        for gap in gaps[:3]:
+            cards.append({
+                "type": "allocate_resources",
+                "title": f"Allocate {gap.get('type', 'resources')}",
+                "description": f"Only {gap.get('coverage_pct', 0)}% coverage — {gap.get('demand', 0)} units demanded, {gap.get('supply', 0)} available",
+                "action": {
+                    "endpoint": "/api/resources/allocate",
+                    "method": "POST",
+                    "payload": {
+                        "resource_type": gap.get("type"),
+                        "quantity_needed": gap.get("demand", 0) - gap.get("supply", 0),
+                    },
+                },
+                "confirm_label": "Allocate Now",
+                "style": "destructive",
+            })
+
+    elif intent == "briefing" and context_data:
+        alert_count = context_data.get("alert_count", 0)
+        if alert_count > 0:
+            cards.append({
+                "type": "view_alerts",
+                "title": f"View {alert_count} Active Alerts",
+                "description": "There are items requiring your immediate attention",
+                "action": {
+                    "endpoint": "/api/llm/chat",
+                    "method": "POST",
+                    "payload": {"message": "Show me the active alerts in detail"},
+                },
+                "confirm_label": "View Alerts",
+                "style": "warning",
+            })
+
+    elif intent == "generate_report":
+        cards.append({
+            "type": "generate_sitrep",
+            "title": "Generate Situation Report",
+            "description": "Create a formal SITREP document from current data",
+            "action": {
+                "endpoint": "/api/nlp/sitrep/generate",
+                "method": "POST",
+                "payload": {},
+            },
+            "confirm_label": "Generate Report",
+            "style": "primary",
+        })
+
+    elif intent == "disaster_comparison" and context_data:
+        scorecards = context_data.get("data", [])
+        if scorecards:
+            worst = scorecards[0]
+            if worst.get("health_score", 10) <= 5:
+                cards.append({
+                    "type": "allocate_to_disaster",
+                    "title": f"Boost Resources for {worst.get('title', 'Disaster')}",
+                    "description": f"Health score: {worst['health_score']}/10, {worst.get('pending', 0)} pending requests",
+                    "action": {
+                        "endpoint": "/api/resources/allocate",
+                        "method": "POST",
+                        "payload": {"disaster_id": worst.get("disaster_id")},
+                    },
+                    "confirm_label": "Allocate Resources",
+                    "style": "destructive",
+                })
+
+    elif intent == "request_lifecycle" and context_data:
+        lifecycle = context_data.get("data", {})
+        stale_count = lifecycle.get("stale_count", 0)
+        if stale_count > 0:
+            cards.append({
+                "type": "review_stale",
+                "title": f"Review {stale_count} Stale Requests",
+                "description": "Requests pending > 48 hours need attention",
+                "action": {
+                    "endpoint": "/api/llm/chat",
+                    "method": "POST",
+                    "payload": {"message": "Show me the stale requests in detail and suggest actions"},
+                },
+                "confirm_label": "Review Stale",
+                "style": "warning",
+            })
+
+    return cards[:3]  # Max 3 action cards
+
+
+# ── Conversation Memory with Summarization ─────────────────────────────────────
+
+
+async def _summarize_conversation(messages: list[dict], max_summary_tokens: int = 200) -> str:
+    """Use the LLM to summarize older conversation messages into a compact prefix."""
+    if len(messages) <= 4:
+        return ""
+
+    # Take messages older than the last 4
+    older_messages = messages[:-4]
+    conversation_text = "\n".join(
+        f"{m.get('role', 'user')}: {m.get('content', '')[:300]}" for m in older_messages
     )
 
-    async def event_generator():
-        # Emit classification metadata
-        yield f"data: {json.dumps({'type': 'meta', 'mode': mode, 'query': body.query})}\n\n"
-
-        try:
-            if mode == "causal":
-                async for chunk in _handle_causal_stream(body):
-                    yield f"data: {chunk}\n\n"
-            elif mode == "multi_agent":
-                async for chunk in _handle_multi_agent_stream(body):
-                    yield f"data: {chunk}\n\n"
-            else:
-                async for chunk in _handle_rag_stream(body):
-                    yield f"data: {chunk}\n\n"
-        except Exception as exc:
-            logger.error("Unified stream error (%s): %s", mode, exc, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)})}\n\n"
-
-        yield f"data: {json.dumps({'type': 'done', 'mode': mode})}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-async def _handle_rag_stream(body: UnifiedQueryRequest):
-    """Stream RAG response tokens."""
     try:
-        rag = _get_rag()
+        from groq import Groq
+
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            return ""
+
+        client = Groq(api_key=api_key)
+        loop = asyncio.get_event_loop()
+
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.chat.completions.create(
+                model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Summarize the following conversation in 2-3 sentences. "
+                            "Focus on key topics discussed, decisions made, and any data mentioned. "
+                            "Be concise and factual."
+                        ),
+                    },
+                    {"role": "user", "content": conversation_text},
+                ],
+                max_tokens=max_summary_tokens,
+                temperature=0.3,
+            ),
+        )
+        summary = (response.choices[0].message.content or "").strip()
+        return summary
     except Exception as exc:
-        logger.warning("RAG init failed, falling back to DB-only response: %s", exc)
-        async for chunk in _fallback_db_response(body):
-            yield chunk
+        logger.debug("Conversation summarization failed: %s", exc)
+        return ""
+
+
+# ── Context Pruning by Intent ──────────────────────────────────────────────────
+
+# Map intents to the context keys they need
+_INTENT_CONTEXT_MAP = {
+    "resource_requests": ["resource_requests_summary", "global_resource_requests"],
+    "available_resources": ["inventory_summary"],
+    "disaster_status": ["active_disasters", "focused_disaster"],
+    "low_stock": ["inventory_summary"],
+    "briefing": [
+        "active_disasters", "resource_requests_summary", "inventory_summary",
+        "active_alerts", "request_lifecycle", "supply_demand_gaps",
+    ],
+    "supply_demand_gap": ["supply_demand_gaps", "inventory_summary"],
+    "request_lifecycle": ["request_lifecycle"],
+    "chatbot_activity": ["chatbot_intake_activity"],
+    "activity_heatmap": ["activity_heatmap"],
+    "engagement": ["engagement_summary", "platform_users"],
+    "registration_trends": ["registration_insights", "platform_users"],
+    "request_pipeline": ["request_pipeline"],
+    "trends": ["trend_analysis"],
+    "geographic": ["geographic_insights"],
+    "disaster_comparison": ["disaster_scorecards"],
+    "responder_performance": ["responder_performance"],
+    "digest": None,  # Keep all context
+    "user_requests": ["user_requests"],
+    "user_profile": ["current_user"],
+    "allocate_resources": ["active_disasters", "supply_demand_gaps", "inventory_summary"],
+    "generate_report": ["active_disasters", "resource_requests_summary", "inventory_summary", "active_alerts"],
+    "anomalies": ["active_alerts"],
+    "users_overview": ["platform_users"],
+    "general": None,  # Keep all context for general queries
+    "causal": ["active_disasters"],
+    "multi_agent": ["active_disasters", "supply_demand_gaps"],
+}
+
+
+def _prune_context_by_intent(context: dict, intent: str) -> dict:
+    """Prune context to only include data relevant to the detected intent."""
+    allowed_keys = _INTENT_CONTEXT_MAP.get(intent)
+
+    # None means keep everything
+    if allowed_keys is None:
+        return context
+
+    # Always include these baseline keys
+    always_include = {"current_user", "focused_disaster"}
+
+    pruned = {}
+    for key in set(allowed_keys) | always_include:
+        if key in context:
+            pruned[key] = context[key]
+
+    return pruned
+
+
+# ── Session Persistence (DB-backed) ────────────────────────────────────────────
+
+
+async def _persist_session(session_id: str, user: dict) -> None:
+    """Create or update a session record in the database."""
+    try:
+        user_id = user.get("id", "unknown")
+        user_role = user.get("role", "unknown")
+        user_name = user.get("name", "unknown")
+
+        # Upsert session
+        existing = (
+            await db_admin.table("disastergpt_sessions")
+            .select("session_id")
+            .eq("session_id", session_id)
+            .maybe_single()
+            .async_execute()
+        )
+
+        if existing.data:
+            await db_admin.table("disastergpt_sessions").update({
+                "updated_at": datetime.now(UTC).isoformat(),
+                "last_message_at": datetime.now(UTC).isoformat(),
+            }).eq("session_id", session_id).async_execute()
+        else:
+            await db_admin.table("disastergpt_sessions").insert({
+                "session_id": session_id,
+                "user_id": user_id,
+                "user_role": user_role,
+                "user_name": user_name,
+                "message_count": 0,
+            }).async_execute()
+    except Exception as exc:
+        logger.warning("Failed to persist session %s: %s", session_id, exc)
+
+
+async def _persist_message(
+    session_id: str,
+    role: str,
+    content: str,
+    intent: str | None = None,
+    context_data: dict | None = None,
+    follow_up_suggestions: list[str] | None = None,
+    action_cards: list[dict] | None = None,
+) -> None:
+    """Persist a message to the database."""
+    try:
+        await db_admin.table("disastergpt_messages").insert({
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "intent": intent,
+            "context_data": context_data,
+            "follow_up_suggestions": follow_up_suggestions,
+            "action_cards": action_cards,
+        }).async_execute()
+
+        # Update session message count
+        await db_admin.table("disastergpt_sessions").update({
+            "last_message_at": datetime.now(UTC).isoformat(),
+            "message_count": db_admin.rpc("increment", {"x": 1}),  # May need manual SQL
+            "updated_at": datetime.now(UTC).isoformat(),
+        }).eq("session_id", session_id).async_execute()
+    except Exception as exc:
+        logger.warning("Failed to persist message for session %s: %s", session_id, exc)
+
+
+async def _get_session_history_from_db(session_id: str, limit: int = 20) -> list[dict]:
+    """Retrieve message history from the database."""
+    try:
+        resp = (
+            await db_admin.table("disastergpt_messages")
+            .select("role, content, intent, created_at")
+            .eq("session_id", session_id)
+            .order("created_at", desc=False)
+            .limit(limit)
+            .async_execute()
+        )
+        return [
+            {
+                "role": m.get("role", "user"),
+                "content": m.get("content", ""),
+                "intent": m.get("intent"),
+                "timestamp": m.get("created_at", ""),
+            }
+            for m in (resp.data or [])
+        ]
+    except Exception as exc:
+        logger.warning("Failed to load session history from DB: %s", exc)
+        return []
+
+
+async def _get_conversation_summary_from_db(session_id: str) -> str:
+    """Get the stored conversation summary for a session."""
+    try:
+        resp = (
+            await db_admin.table("disastergpt_sessions")
+            .select("conversation_summary")
+            .eq("session_id", session_id)
+            .maybe_single()
+            .async_execute()
+        )
+        if resp.data:
+            return resp.data.get("conversation_summary") or ""
+    except Exception:
+        pass
+    return ""
+
+
+async def _update_conversation_summary(session_id: str, messages: list[dict]) -> None:
+    """Generate and store a conversation summary if there are enough messages."""
+    if len(messages) < 6:
         return
 
-    try:
-        async for chunk in rag.query_stream(
-            question=body.query,
-            disaster_id=body.disaster_id,
-            top_k=body.top_k,
-            max_tokens=body.max_tokens,
-            temperature=body.temperature,
-        ):
-            yield chunk
-    except Exception as exc:
-        logger.warning("RAG stream failed, falling back to DB-only: %s", exc)
-        async for chunk in _fallback_db_response(body):
-            yield chunk
-
-
-async def _handle_multi_agent_stream(body: UnifiedQueryRequest):
-    """Stream multi-agent coordination results, then synthesise via RAG."""
-    from ml.multi_agent import get_multi_agent_system
-
-    system = get_multi_agent_system()
-    agent_results: list[dict] = []
-
-    async for chunk in system.process_query_stream(
-        query=body.query,
-        disaster_id=body.disaster_id,
-    ):
-        yield chunk
+    summary = await _summarize_conversation(messages)
+    if summary:
         try:
-            parsed = json.loads(chunk)
-            if parsed.get("type") == "agent_result":
-                agent_results.append(parsed)
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # After agents complete, synthesise a unified narrative via RAG
-    try:
-        agent_summary = _summarise_agent_results(body.query, agent_results)
-        rag = _get_rag()
-        async for chunk in rag.query_stream(
-            question=agent_summary,
-            disaster_id=body.disaster_id,
-            top_k=body.top_k,
-            max_tokens=body.max_tokens,
-            temperature=body.temperature,
-        ):
-            yield chunk
-    except Exception as exc:
-        logger.warning("RAG synthesis after agents failed: %s", exc)
-        # Emit agent results as formatted text
-        _summarise_agent_results(body.query, agent_results)
-        yield json.dumps({"type": "token", "data": _format_agent_fallback(agent_results)})
+            await db_admin.table("disastergpt_sessions").update({
+                "conversation_summary": summary,
+            }).eq("session_id", session_id).async_execute()
+        except Exception as exc:
+            logger.warning("Failed to update conversation summary: %s", exc)
 
 
-async def _handle_causal_stream(body: UnifiedQueryRequest):
-    """Run causal analysis and stream results, then explain via RAG."""
-    # Gather causal data
-    causal_context_parts: list[str] = []
+# ── In-memory fallback (kept for backward compat) ──────────────────────────────
 
-    try:
-        # Get or create causal model
-        from app.routers.causal import _get_causal_model
-        from ml.causal_model import CAUSAL_EDGES, CAUSAL_NODES, DisasterCausalModel
+MAX_HISTORY = 10
 
-        cm = await _get_causal_model()
-
-        # 1. Causal effects
-        try:
-            rt_cas = cm.estimate_response_time_on_casualties()
-            ra_dmg = cm.estimate_resource_availability_on_damage()
-            effects_data = {
-                "type": "causal_data",
-                "subtype": "effects",
-                "data": [rt_cas.to_dict(), ra_dmg.to_dict()],
-            }
-            yield json.dumps(effects_data)
-
-            def _fmt_p(p):
-                return f"{p:.4f}" if p is not None else "N/A"
-
-            causal_context_parts.append(
-                f"Causal Effects:\n"
-                f"- Response time -> casualties: ATE={rt_cas.ate:.4f} (p={_fmt_p(rt_cas.p_value)})\n"
-                f"- Resource availability -> damage: ATE={ra_dmg.ate:.4f} (p={_fmt_p(ra_dmg.p_value)})"
-            )
-        except Exception as e:
-            logger.warning("Causal effects estimation failed: %s", e)
-
-        # 2. Root causes
-        try:
-            root_causes = cm.rank_root_causes("casualties")
-            causes_data = {
-                "type": "causal_data",
-                "subtype": "root_causes",
-                "data": [
-                    {"treatment": rc.treatment, "outcome": rc.outcome, "ate": rc.ate, "p_value": rc.p_value}
-                    for rc in root_causes[:5]
-                ],
-            }
-            yield json.dumps(causes_data)
-            causal_context_parts.append(
-                "Root causes of casualties (ranked by |ATE|):\n"
-                + "\n".join(f"- {rc.treatment}: ATE={rc.ate:.4f}" for rc in root_causes[:5])
-            )
-        except Exception as e:
-            logger.warning("Root cause ranking failed: %s", e)
-
-        # 3. If a disaster_id is provided, run counterfactual + top interventions
-        if body.disaster_id:
-            try:
-                result = (
-                    await db.table("disasters").select("*").eq("id", body.disaster_id).maybe_single().async_execute()
-                )
-                disaster = result.data
-                if disaster:
-                    from app.routers.causal import _disaster_to_observation
-
-                    obs = _disaster_to_observation(disaster)
-
-                    interventions = cm.top_counterfactual_interventions(obs, "casualties", k=3)
-                    interventions_data = {
-                        "type": "causal_data",
-                        "subtype": "interventions",
-                        "data": interventions,
-                    }
-                    yield json.dumps(interventions_data)
-                    causal_context_parts.append(
-                        f"Top interventions for disaster {body.disaster_id}:\n"
-                        + "\n".join(
-                            f"- Change {iv['variable']} from {iv['current_value']} to "
-                            f"{iv['proposed_value']} → reduces casualties by ~{iv['estimated_reduction']}"
-                            for iv in interventions
-                        )
-                    )
-            except Exception as e:
-                logger.warning("Counterfactual analysis failed: %s", e)
-
-        # 4. Graph data
-        graph_data = {
-            "type": "causal_data",
-            "subtype": "graph",
-            "data": {
-                "nodes": CAUSAL_NODES,
-                "edges": [{"source": s, "target": t} for s, t in CAUSAL_EDGES],
-            },
-        }
-        yield json.dumps(graph_data)
-
-    except ImportError:
-        causal_context_parts.append("Causal model is not available (missing dependencies).")
-    except Exception as e:
-        logger.error("Causal stream error: %s", e, exc_info=True)
-        causal_context_parts.append(f"Causal analysis encountered an error: {e}")
-
-    # 5. Generate narrative explanation using RAG with causal context injected
-    causal_context = "\n\n".join(causal_context_parts)
-    augmented_query = (
-        f"The user asked: {body.query}\n\n"
-        f"=== CAUSAL ANALYSIS RESULTS ===\n{causal_context}\n\n"
-        f"Using the causal analysis results above, provide a comprehensive answer to the user's question. "
-        f"Explain the causal relationships, effect sizes, and any recommended interventions in clear language."
-    )
-
-    try:
-        rag = _get_rag()
-        async for chunk in rag.query_stream(
-            question=augmented_query,
-            disaster_id=body.disaster_id,
-            top_k=body.top_k,
-            max_tokens=body.max_tokens,
-            temperature=body.temperature,
-        ):
-            yield chunk
-    except Exception as exc:
-        logger.warning("RAG synthesis for causal failed: %s", exc)
-        # Fallback: emit causal analysis as formatted text
-        yield json.dumps(
-            {
-                "type": "token",
-                "data": f"\n\n## Causal Analysis Results\n\n{causal_context}\n",
-            }
-        )
-
-
-async def _fallback_db_response(body: UnifiedQueryRequest):
-    """Fallback when RAG is unavailable — query the database directly and
-    return a formatted summary."""
-    parts: list[str] = []
-    parts.append(f"## Analysis: {body.query}\n")
-
-    try:
-        # Fetch active disasters
-        resp = (
-            await db.table("disasters").select("id,title,type,severity_score,status,location").limit(20).async_execute()
-        )
-        disasters = resp.data or []
-        if disasters:
-            parts.append("### Active Disasters\n")
-            parts.append("| # | Title | Type | Severity | Status | Location |")
-            parts.append("|---|-------|------|----------|--------|----------|")
-            for i, d in enumerate(disasters, 1):
-                parts.append(
-                    f"| {i} | {d.get('title', 'N/A')} | {d.get('type', 'N/A')} | "
-                    f"{d.get('severity_score', 'N/A')} | {d.get('status', 'N/A')} | "
-                    f"{d.get('location', 'N/A')} |"
-                )
-            parts.append("")
-
-            # Basic analysis
-            critical = [d for d in disasters if (d.get("severity_score") or 0) >= 7]
-            if critical:
-                parts.append(f"**{len(critical)} disaster(s) have severity >= 7 and need immediate attention.**\n")
-                for d in critical[:5]:
-                    parts.append(
-                        f"- **{d.get('title', 'Unknown')}** (Severity: {d.get('severity_score', '?')}, Location: {d.get('location', '?')})"
-                    )
-                parts.append("")
-        else:
-            parts.append("*No active disasters found in the database.*\n")
-
-        # Fetch open resource requests
-        try:
-            req_resp = (
-                await db.table("resource_requests")
-                .select("id,title,status,priority,disaster_id")
-                .eq("status", "pending")
-                .limit(10)
-                .async_execute()
-            )
-            requests = req_resp.data or []
-            if requests:
-                parts.append(f"### Pending Resource Requests: {len(requests)}\n")
-                for r in requests[:5]:
-                    parts.append(f"- {r.get('title', 'Untitled')} (Priority: {r.get('priority', '?')})")
-                parts.append("")
-        except Exception:
-            pass
-
-    except Exception as e:
-        parts.append(f"\n*Database query error: {e}*\n")
-
-    parts.append(
-        "\n---\n*Note: Running in database-only mode. RAG pipeline is initializing — responses will be richer once ready.*"
-    )
-
-    full_text = "\n".join(parts)
-    # Stream it as tokens
-    for token in full_text.split(" "):
-        yield json.dumps({"type": "token", "data": token + " "})
-
-
-def _format_agent_fallback(agent_results: list[dict]) -> str:
-    """Format agent results as markdown when RAG synthesis is unavailable."""
-    parts = ["## Multi-Agent Analysis Results\n"]
-    agent_icons = {
-        "predictor": "🔮",
-        "allocator": "📦",
-        "analyst": "🔬",
-        "responder": "💬",
-    }
-    for ar in agent_results:
-        name = ar.get("agent", "unknown")
-        icon = agent_icons.get(name, "🤖")
-        data = ar.get("data", {})
-        summary = _extract_agent_summary(name, data)
-        parts.append(f"### {icon} {name.title()} Agent\n{summary}\n")
-    return "\n".join(parts)
-
-
-def _extract_agent_summary(agent_name: str, data: dict) -> str:
-    """Extract a human-readable summary from agent result data."""
-    if not isinstance(data, dict):
-        return str(data)[:500]
-    # Prefer explicit summary/response fields
-    if data.get("summary"):
-        return data["summary"]
-    if data.get("response"):
-        return data["response"]
-    # Agent-specific formatting
-    if agent_name == "predictor":
-        sev = data.get("predicted_severity", "unknown")
-        conf = data.get("confidence", 0)
-        return (
-            f"Severity: **{sev}** (confidence: {conf:.0%}). "
-            f"Timeline: {data.get('timeline_hours', 'N/A')}h. "
-            f"Method: {data.get('method', 'N/A')}."
-        )
-    if agent_name == "allocator":
-        if data.get("allocations"):
-            return f"{len(data['allocations'])} resources allocated with {data.get('coverage_pct', 0)}% coverage."
-        if data.get("recommended_resources"):
-            recs = data["recommended_resources"]
-            rec_str = ", ".join(f"{r['type']} (priority {r['priority']})" for r in recs[:4])
-            return f"Urgency: {data.get('recommended_urgency', '?')}/10. Resources: {rec_str}."
-    if agent_name == "analyst":
-        analyses = data.get("analyses", {})
-        parts = []
-        nlp = analyses.get("nlp", {})
-        if nlp:
-            parts.append(f"Intent: {nlp.get('query_intent', 'unknown')}.")
-            urg = nlp.get("urgency_signals", {})
-            if urg.get("is_urgent"):
-                parts.append(f"⚠️ Urgent: {', '.join(urg.get('signals', []))}.")
-        causal = analyses.get("causal", {})
-        if causal.get("insight"):
-            parts.append(causal["insight"])
-        return " ".join(parts) if parts else "Analysis completed."
-    return json.dumps(data, default=str)[:500]
-
-
-def _summarise_agent_results(query: str, agent_results: list[dict]) -> str:
-    """Build an augmented prompt from multi-agent results for RAG synthesis."""
-    parts = [f"The user asked: {query}\n\n=== MULTI-AGENT ANALYSIS RESULTS ==="]
-    for ar in agent_results:
-        agent_name = ar.get("agent", "unknown")
-        data = ar.get("data", {})
-        summary = _extract_agent_summary(agent_name, data) if isinstance(data, dict) else str(data)[:500]
-        parts.append(f"\n[{agent_name.upper()} AGENT]:\n{summary}")
-
-    parts.append(
-        "\n\nUsing the multi-agent analysis above, synthesise a comprehensive, "
-        "actionable response to the user's question. Include specific recommendations "
-        "from each agent's analysis."
-    )
-    return "\n".join(parts)
-
-
-# ── Chat Session Management ─────────────────────────────────────────────────────
-
-MAX_HISTORY = 10  # Keep last 10 messages
-
-_chat_sessions: dict[str, dict] = {}  # session_id -> {messages: [], created_at: str}
+_chat_sessions: dict[str, dict] = {}
 
 
 def _get_or_create_session(session_id: str | None) -> tuple[str, dict]:
-    """Get existing session or create new one."""
+    """Get existing session or create new one (in-memory fallback)."""
     if session_id and session_id in _chat_sessions:
         return session_id, _chat_sessions[session_id]
-    
+
     new_id = session_id or str(uuid.uuid4())
     _chat_sessions[new_id] = {
         "messages": [],
@@ -750,21 +1045,20 @@ def _get_or_create_session(session_id: str | None) -> tuple[str, dict]:
 
 
 def _add_message_to_session(session_id: str, role: str, content: str) -> None:
-    """Add a message to session history, keeping only last MAX_HISTORY messages."""
+    """Add a message to session history (in-memory fallback)."""
     if session_id not in _chat_sessions:
         _chat_sessions[session_id] = {
             "messages": [],
             "created_at": datetime.now(UTC).isoformat(),
         }
-    
+
     session = _chat_sessions[session_id]
     session["messages"].append({
         "role": role,
         "content": content,
         "timestamp": datetime.now(UTC).isoformat(),
     })
-    
-    # Keep only last MAX_HISTORY messages
+
     if len(session["messages"]) > MAX_HISTORY:
         session["messages"] = session["messages"][-MAX_HISTORY:]
 
@@ -785,7 +1079,7 @@ async def _get_active_disasters(limit: int = 10) -> list[dict]:
 
 
 async def _get_resource_requests_summary() -> dict:
-    """Get resource request summary from live Supabase data (global + last24h)."""
+    """Get resource request summary from live Supabase data."""
     try:
         yesterday = (datetime.now(UTC) - timedelta(days=1)).isoformat()
 
@@ -829,7 +1123,7 @@ async def _get_resource_requests_summary() -> dict:
 
 
 async def _get_global_resource_requests(limit: int = 300) -> list[dict]:
-    """Get recent individual resource requests across all users (admin/coordinator context)."""
+    """Get recent individual resource requests across all users."""
     try:
         rows_resp = (
             await db_admin.table("resource_requests")
@@ -860,14 +1154,12 @@ async def _get_global_resource_requests(limit: int = 300) -> list[dict]:
         enriched = []
         for req in rows:
             victim = users_map.get(str(req.get("victim_id")), {})
-            enriched.append(
-                {
-                    **req,
-                    "victim_name": victim.get("full_name"),
-                    "victim_email": victim.get("email"),
-                    "victim_role": victim.get("role"),
-                }
-            )
+            enriched.append({
+                **req,
+                "victim_name": victim.get("full_name"),
+                "victim_email": victim.get("email"),
+                "victim_role": victim.get("role"),
+            })
         return enriched
     except Exception as e:
         logger.warning(f"Failed to fetch global individual resource requests: {e}")
@@ -875,24 +1167,18 @@ async def _get_global_resource_requests(limit: int = 300) -> list[dict]:
 
 
 async def _get_inventory_summary() -> dict:
-    """Get current resource inventory summary, with fallback to resources table."""
+    """Get current resource inventory summary."""
     resources = []
     try:
-        resp = await db.table("available_resources").select(
-            "id,resource_type,quantity,location,status"
-        ).async_execute()
+        resp = await db.table("resources").select(
+            "id,type,quantity,status"
+        ).eq("status", "available").async_execute()
+        for item in (resp.data or []):
+            item["resource_type"] = item.pop("type", "unknown")
         resources = resp.data or []
-    except Exception:
-        try:
-            resp = await db.table("resources").select(
-                "id,type,quantity,status"
-            ).eq("status", "available").async_execute()
-            for item in (resp.data or []):
-                item["resource_type"] = item.pop("type", "unknown")
-            resources = resp.data or []
-        except Exception as e:
-            logger.warning(f"Failed to fetch inventory: {e}")
-            return {"total_resources": 0, "by_type": {}, "low_stock": []}
+    except Exception as e:
+        logger.warning(f"Failed to fetch inventory: {e}")
+        return {"total_resources": 0, "by_type": {}, "low_stock": []}
 
     by_type: dict[str, dict] = defaultdict(lambda: {"count": 0, "total_quantity": 0})
     for res in resources:
@@ -922,8 +1208,604 @@ async def _get_active_alerts() -> list[dict]:
         return []
 
 
+async def _get_chatbot_intake_activity(hours: int = 24) -> dict:
+    """Get recent victim chatbot intake activity."""
+    try:
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+        resp = await db_admin.table("chatbot_sessions").select(
+            "id,session_id,final_resource_type,final_priority,completion_status,created_at"
+        ).gte("created_at", cutoff).order("created_at", desc=True).limit(100).async_execute()
+
+        sessions = resp.data or []
+        completed = [s for s in sessions if s.get("completion_status") == "completed"]
+        abandoned = [s for s in sessions if s.get("completion_status") == "abandoned"]
+
+        resource_demand: dict[str, int] = {}
+        priority_dist: dict[str, int] = {}
+        for s in completed:
+            rt = s.get("final_resource_type")
+            if rt:
+                resource_demand[rt] = resource_demand.get(rt, 0) + 1
+            pri = s.get("final_priority")
+            if pri:
+                priority_dist[pri] = priority_dist.get(pri, 0) + 1
+
+        return {
+            "total_sessions": len(sessions),
+            "completed": len(completed),
+            "abandoned": len(abandoned),
+            "abandonment_rate": round(len(abandoned) / max(len(sessions), 1) * 100, 1),
+            "resource_demand": resource_demand,
+            "priority_distribution": priority_dist,
+            "time_range_hours": hours,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to fetch chatbot intake activity: {e}")
+        return {}
+
+
+async def _get_request_lifecycle_metrics() -> dict:
+    """Compute request processing speed and stale request metrics."""
+    try:
+        resp = await db_admin.table("resource_requests").select(
+            "id,status,priority,resource_type,created_at,updated_at"
+        ).in_("status", ["completed", "delivered"]).order(
+            "updated_at", desc=True
+        ).limit(200).async_execute()
+
+        completed = resp.data or []
+        durations: list[float] = []
+        by_priority: dict[str, list[float]] = {}
+        for req in completed:
+            created = req.get("created_at")
+            updated = req.get("updated_at")
+            if created and updated:
+                from datetime import datetime as _dt
+                try:
+                    c = _dt.fromisoformat(created.replace("Z", "+00:00"))
+                    u = _dt.fromisoformat(updated.replace("Z", "+00:00"))
+                    hours = (u - c).total_seconds() / 3600
+                    if hours >= 0:
+                        durations.append(hours)
+                        pri = req.get("priority", "medium")
+                        by_priority.setdefault(pri, []).append(hours)
+                except (ValueError, TypeError):
+                    pass
+
+        result: dict = {"sample_size": len(durations)}
+        if durations:
+            durations.sort()
+            result["median_fulfillment_hours"] = round(durations[len(durations) // 2], 1)
+            result["avg_fulfillment_hours"] = round(sum(durations) / len(durations), 1)
+            result["by_priority"] = {
+                k: round(sum(v) / len(v), 1) for k, v in by_priority.items()
+            }
+
+        pending_resp = await db_admin.table("resource_requests").select(
+            "id,created_at,priority"
+        ).eq("status", "pending").async_execute()
+
+        stale_requests: list[dict] = []
+        now = datetime.now(UTC)
+        for p in (pending_resp.data or []):
+            created = p.get("created_at")
+            if created:
+                from datetime import datetime as _dt
+                try:
+                    c = _dt.fromisoformat(created.replace("Z", "+00:00"))
+                    age_hours = (now - c).total_seconds() / 3600
+                    if age_hours > 48:
+                        stale_requests.append({
+                            "id": p["id"],
+                            "age_hours": round(age_hours, 1),
+                            "priority": p.get("priority"),
+                        })
+                except (ValueError, TypeError):
+                    pass
+
+        result["stale_pending_requests"] = stale_requests[:10]
+        result["stale_count"] = len(stale_requests)
+        return result
+    except Exception as e:
+        logger.warning(f"Request lifecycle metrics failed: {e}")
+        return {}
+
+
+async def _get_activity_heatmap(days: int = 7) -> dict:
+    """Aggregate request creation times into hourly/daily buckets."""
+    try:
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        resp = await db_admin.table("resource_requests").select(
+            "created_at"
+        ).gte("created_at", cutoff).async_execute()
+
+        rows = resp.data or []
+        hourly: dict[int, int] = {h: 0 for h in range(24)}
+        daily: dict[str, int] = {}
+
+        for r in rows:
+            ca = r.get("created_at")
+            if not ca:
+                continue
+            from datetime import datetime as _dt
+            try:
+                dt = _dt.fromisoformat(ca.replace("Z", "+00:00"))
+                hourly[dt.hour] = hourly.get(dt.hour, 0) + 1
+                day_key = dt.strftime("%A")
+                daily[day_key] = daily.get(day_key, 0) + 1
+            except (ValueError, TypeError):
+                pass
+
+        peak_hour = max(hourly, key=lambda k: hourly[k]) if rows else None
+        peak_day = max(daily, key=lambda k: daily[k]) if daily else None
+
+        return {
+            "hourly_distribution": hourly,
+            "daily_distribution": daily,
+            "peak_hour": peak_hour,
+            "peak_day": peak_day,
+            "total_requests": len(rows),
+            "days_analyzed": days,
+        }
+    except Exception as e:
+        logger.warning(f"Activity heatmap failed: {e}")
+        return {}
+
+
+async def _get_supply_demand_gap() -> dict:
+    """Compare pending demand against donor/NGO supply by resource type.
+    
+    New model: Victims create demands, donors/NGOs supply directly via pledges and availability.
+    """
+    try:
+        # Get demand from pending requests
+        demand_resp = await db_admin.table("resource_requests").select(
+            "resource_type,quantity"
+        ).in_("status", ["pending", "approved", "assigned"]).async_execute()
+
+        demand_by_type: dict[str, int] = {}
+        for r in (demand_resp.data or []):
+            rt = r.get("resource_type", "unknown")
+            qty = r.get("quantity", 1) or 1
+            demand_by_type[rt] = demand_by_type.get(rt, 0) + qty
+
+        # Get supply from donor pledges (committed resources)
+        supply_by_type: dict[str, int] = {}
+        try:
+            # Check donor_pledges for committed supply
+            pledge_resp = await db_admin.table("donor_pledges").select(
+                "resource_type,quantity_pledged,status"
+            ).in_("status", ["pending", "confirmed"]).async_execute()
+            for r in (pledge_resp.data or []):
+                rt = r.get("resource_type", "unknown")
+                qty = r.get("quantity_pledged", 0) or 0
+                supply_by_type[rt] = supply_by_type.get(rt, 0) + qty
+        except Exception as e:
+            logger.debug(f"Failed to fetch donor pledges: {e}")
+
+        try:
+            # Also check available_resources for NGO/donor inventory
+            avail_resp = await db_admin.table("available_resources").select(
+                "resource_type,total_quantity,claimed_quantity,is_active"
+            ).eq("is_active", True).async_execute()
+            for r in (avail_resp.data or []):
+                rt = r.get("resource_type", "unknown")
+                total = r.get("total_quantity", 0) or 0
+                claimed = r.get("claimed_quantity", 0) or 0
+                available = total - claimed
+                if available > 0:
+                    supply_by_type[rt] = supply_by_type.get(rt, 0) + available
+        except Exception as e:
+            logger.debug(f"Failed to fetch available resources: {e}")
+
+        # Calculate fulfilled supply from completed requests
+        try:
+            fulfilled_resp = await db_admin.table("resource_requests").select(
+                "resource_type,quantity"
+            ).in_("status", ["completed", "delivered"]).async_execute()
+            for r in (fulfilled_resp.data or []):
+                rt = r.get("resource_type", "unknown")
+                qty = r.get("quantity", 0) or 0
+                # Add fulfilled to supply (represents capacity that has been delivered)
+                supply_by_type[rt] = supply_by_type.get(rt, 0) + qty
+        except Exception as e:
+            logger.debug(f"Failed to fetch fulfilled requests: {e}")
+
+        all_types = set(demand_by_type) | set(supply_by_type)
+        gaps = []
+        for rt in sorted(all_types):
+            demand = demand_by_type.get(rt, 0)
+            supply = supply_by_type.get(rt, 0)
+            gap = supply - demand
+            coverage = round(supply / max(demand, 1) * 100, 1)
+            gaps.append({
+                "type": rt,
+                "demand": demand,
+                "supply": supply,
+                "gap": gap,
+                "coverage_pct": coverage,
+                "status": "surplus" if gap > 0 else "deficit" if gap < 0 else "matched",
+            })
+
+        gaps.sort(key=lambda g: g["gap"])
+        critical_shortages = [g for g in gaps if g["coverage_pct"] < 50 and g["demand"] > 0]
+
+        return {
+            "gaps": gaps,
+            "critical_shortages": critical_shortages,
+            "total_demand": sum(demand_by_type.values()),
+            "total_supply": sum(supply_by_type.values()),
+            "model": "victim_demand_donor_supply",
+        }
+    except Exception as e:
+        logger.warning(f"Supply-demand gap analysis failed: {e}")
+        return {"gaps": [], "critical_shortages": [], "total_demand": 0, "total_supply": 0, "model": "victim_demand_donor_supply"}
+
+
+async def _get_engagement_summary() -> dict:
+    """Summarize user engagement across roles."""
+    try:
+        cutoff_7d = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        cutoff_30d = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+
+        victim_resp = await db_admin.table("resource_requests").select(
+            "victim_id"
+        ).gte("created_at", cutoff_7d).async_execute()
+        active_victims = len(set(
+            r["victim_id"] for r in (victim_resp.data or []) if r.get("victim_id")
+        ))
+
+        active_volunteers = 0
+        try:
+            vol_resp = await db_admin.table("volunteer_assignments").select(
+                "volunteer_id"
+            ).gte("assigned_at", cutoff_30d).async_execute()
+            active_volunteers = len(set(
+                r["volunteer_id"] for r in (vol_resp.data or []) if r.get("volunteer_id")
+            ))
+        except Exception:
+            pass
+
+        active_donors = 0
+        try:
+            donor_resp = await db_admin.table("donations").select(
+                "user_id"
+            ).gte("created_at", cutoff_30d).async_execute()
+            active_donors = len(set(
+                r["user_id"] for r in (donor_resp.data or []) if r.get("user_id")
+            ))
+        except Exception:
+            pass
+
+        return {
+            "active_victims_7d": active_victims,
+            "active_volunteers_30d": active_volunteers,
+            "active_donors_30d": active_donors,
+        }
+    except Exception as e:
+        logger.warning(f"Engagement summary failed: {e}")
+        return {}
+
+
+async def _get_user_registration_insights() -> dict:
+    """Track user registration trends."""
+    try:
+        cutoff_7d = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        cutoff_30d = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+
+        week_resp = await db_admin.table("users").select(
+            "id,role,created_at"
+        ).gte("created_at", cutoff_7d).async_execute()
+        new_this_week = week_resp.data or []
+
+        month_resp = await db_admin.table("users").select(
+            "id,role,created_at"
+        ).gte("created_at", cutoff_30d).async_execute()
+        new_this_month = month_resp.data or []
+
+        week_by_role: dict[str, int] = {}
+        for u in new_this_week:
+            role = u.get("role", "unknown") or "unknown"
+            week_by_role[role] = week_by_role.get(role, 0) + 1
+
+        month_by_role: dict[str, int] = {}
+        for u in new_this_month:
+            role = u.get("role", "unknown") or "unknown"
+            month_by_role[role] = month_by_role.get(role, 0) + 1
+
+        incomplete_resp = await db_admin.table("users").select(
+            "id", count="exact"
+        ).eq("is_profile_completed", False).limit(1).async_execute()
+        incomplete_profiles = int(incomplete_resp.count or 0)
+
+        return {
+            "new_users_7d": len(new_this_week),
+            "new_users_30d": len(new_this_month),
+            "week_by_role": week_by_role,
+            "month_by_role": month_by_role,
+            "incomplete_profiles": incomplete_profiles,
+        }
+    except Exception as e:
+        logger.warning(f"User registration insights failed: {e}")
+        return {}
+
+
+async def _get_request_pipeline_funnel() -> dict:
+    """Show request journey funnel."""
+    try:
+        resp = await db_admin.table("resource_requests").select(
+            "id,status,priority,resource_type,created_at"
+        ).async_execute()
+        rows = resp.data or []
+
+        if not rows:
+            return {"total": 0, "funnel": {}, "by_priority": {}}
+
+        funnel: dict[str, int] = {}
+        by_priority: dict[str, dict[str, int]] = {}
+        for r in rows:
+            status = r.get("status", "unknown")
+            priority = r.get("priority", "medium")
+            funnel[status] = funnel.get(status, 0) + 1
+            if priority not in by_priority:
+                by_priority[priority] = {}
+            by_priority[priority][status] = by_priority[priority].get(status, 0) + 1
+
+        total = len(rows)
+        completed = funnel.get("completed", 0) + funnel.get("delivered", 0)
+        rejected = funnel.get("rejected", 0)
+        in_progress = funnel.get("in_progress", 0)
+        assigned = funnel.get("assigned", 0)
+        pending = funnel.get("pending", 0)
+
+        completion_rate = round(completed / max(total, 1) * 100, 1)
+        rejection_rate = round(rejected / max(total, 1) * 100, 1)
+        active_pct = round((in_progress + assigned) / max(total, 1) * 100, 1)
+
+        return {
+            "total": total,
+            "funnel": funnel,
+            "by_priority": by_priority,
+            "completion_rate": completion_rate,
+            "rejection_rate": rejection_rate,
+            "active_processing_pct": active_pct,
+            "pending_count": pending,
+            "completed_count": completed,
+        }
+    except Exception as e:
+        logger.warning(f"Request pipeline funnel failed: {e}")
+        return {}
+
+
+async def _get_trend_analysis() -> dict:
+    """Compare current week metrics against previous week."""
+    try:
+        now = datetime.now(UTC)
+        tw_start = (now - timedelta(days=7)).isoformat()
+        lw_start = (now - timedelta(days=14)).isoformat()
+
+        results = await asyncio.gather(
+            db_admin.table("resource_requests").select("id", count="exact").gte("created_at", tw_start).limit(1).async_execute(),
+            db_admin.table("resource_requests").select("id", count="exact").gte("created_at", lw_start).lt("created_at", tw_start).limit(1).async_execute(),
+            db_admin.table("users").select("id", count="exact").gte("created_at", tw_start).limit(1).async_execute(),
+            db_admin.table("users").select("id", count="exact").gte("created_at", lw_start).lt("created_at", tw_start).limit(1).async_execute(),
+            db_admin.table("resource_requests").select("id", count="exact").gte("updated_at", tw_start).in_("status", ["completed", "delivered"]).limit(1).async_execute(),
+            db_admin.table("resource_requests").select("id", count="exact").gte("updated_at", lw_start).lt("updated_at", tw_start).in_("status", ["completed", "delivered"]).limit(1).async_execute(),
+            return_exceptions=True,
+        )
+
+        def _safe_count(r, idx):
+            v = results[idx]
+            return int(v.count or 0) if not isinstance(v, Exception) else 0
+
+        def _trend(cur: int, prev: int) -> dict:
+            chg = cur - prev
+            pct = round(chg / max(prev, 1) * 100, 1)
+            return {"this_week": cur, "last_week": prev, "change": chg, "change_pct": pct,
+                    "trend": "↑" if chg > 0 else ("↓" if chg < 0 else "→")}
+
+        return {
+            "request_volume": _trend(_safe_count(results, 0), _safe_count(results, 1)),
+            "user_signups": _trend(_safe_count(results, 2), _safe_count(results, 3)),
+            "completions": _trend(_safe_count(results, 4), _safe_count(results, 5)),
+        }
+    except Exception as e:
+        logger.warning(f"Trend analysis failed: {e}")
+        return {}
+
+
+async def _get_geographic_insights() -> dict:
+    """Aggregate requests and disasters by location."""
+    try:
+        req_resp = await db_admin.table("resource_requests").select(
+            "address_text,status,priority"
+        ).limit(500).async_execute()
+
+        location_stats: dict[str, dict] = {}
+        for r in (req_resp.data or []):
+            addr = str(r.get("address_text") or "").strip()
+            if not addr:
+                continue
+            loc_key = addr.split(",")[0].strip() if "," in addr else addr
+            if loc_key not in location_stats:
+                location_stats[loc_key] = {"total": 0, "pending": 0, "completed": 0, "high_priority": 0}
+            location_stats[loc_key]["total"] += 1
+            status = r.get("status", "")
+            if status == "pending":
+                location_stats[loc_key]["pending"] += 1
+            elif status in ("completed", "delivered"):
+                location_stats[loc_key]["completed"] += 1
+            if r.get("priority") in ("critical", "high"):
+                location_stats[loc_key]["high_priority"] += 1
+
+        sorted_locs = sorted(location_stats.items(), key=lambda x: x[1]["total"], reverse=True)
+
+        disaster_resp = await db_admin.table("disasters").select(
+            "location,title,severity,status"
+        ).eq("status", "active").async_execute()
+        disaster_locations = [
+            {"location": d.get("location"), "disaster": d.get("title", "Unknown"), "severity": d.get("severity")}
+            for d in (disaster_resp.data or []) if d.get("location")
+        ]
+
+        resource_resp = await db_admin.table("resources").select(
+            "name,type,quantity"
+        ).eq("status", "available").limit(500).async_execute()
+        resource_locs: dict[str, int] = {}
+        for r in (resource_resp.data or []):
+            rtype = str(r.get("type") or "unknown").strip()
+            if rtype:
+                resource_locs[rtype] = resource_locs.get(rtype, 0) + (r.get("quantity", 0) or 0)
+
+        underserved = []
+        for loc, stats in sorted_locs[:20]:
+            res_avail = resource_locs.get(loc, 0)
+            if stats["pending"] > 0 and res_avail < stats["total"]:
+                underserved.append({"location": loc, "pending_requests": stats["pending"],
+                                    "available_resources": res_avail, "high_priority": stats["high_priority"]})
+
+        return {
+            "top_locations": [{"location": loc, **stats} for loc, stats in sorted_locs[:15]],
+            "disaster_locations": disaster_locations,
+            "resource_coverage": dict(sorted(resource_locs.items(), key=lambda x: x[1], reverse=True)[:15]),
+            "underserved_areas": underserved[:10],
+            "total_locations": len(location_stats),
+        }
+    except Exception as e:
+        logger.warning(f"Geographic insights failed: {e}")
+        return {}
+
+
+async def _get_disaster_scorecards() -> list[dict]:
+    """Generate performance scorecards for each active disaster."""
+    try:
+        disasters_resp = await db_admin.table("disasters").select(
+            "id,title,type,severity,status,affected_population,casualties,created_at"
+        ).eq("status", "active").async_execute()
+        disasters = disasters_resp.data or []
+        if not disasters:
+            return []
+
+        scorecards = []
+        for d in disasters:
+            did = d.get("id")
+            if not did:
+                continue
+            req_resp = await db_admin.table("resource_requests").select(
+                "id,status,priority,created_at,updated_at"
+            ).eq("disaster_id", did).async_execute()
+            reqs = req_resp.data or []
+            total_reqs = len(reqs)
+            completed = sum(1 for r in reqs if r.get("status") in ("completed", "delivered"))
+            pending = sum(1 for r in reqs if r.get("status") == "pending")
+            in_prog = sum(1 for r in reqs if r.get("status") in ("assigned", "in_progress"))
+            comp_rate = round(completed / max(total_reqs, 1) * 100, 1)
+
+            durations = []
+            for r in reqs:
+                if r.get("status") in ("completed", "delivered") and r.get("created_at") and r.get("updated_at"):
+                    try:
+                        c = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                        u = datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
+                        hrs = (u - c).total_seconds() / 3600
+                        if hrs >= 0:
+                            durations.append(hrs)
+                    except (ValueError, TypeError):
+                        pass
+            avg_ff = round(sum(durations) / len(durations), 1) if durations else None
+
+            health = 10.0
+            if comp_rate < 50: health -= 3
+            elif comp_rate < 75: health -= 1
+            if pending > 10: health -= 2
+            elif pending > 5: health -= 1
+            if avg_ff and avg_ff > 72: health -= 2
+            elif avg_ff and avg_ff > 24: health -= 1
+            health = max(1, min(10, round(health)))
+
+            scorecards.append({
+                "disaster_id": did, "title": d.get("title", "Unknown"), "type": d.get("type"),
+                "severity": d.get("severity"), "total_requests": total_reqs, "completed": completed,
+                "pending": pending, "in_progress": in_prog, "completion_rate": comp_rate,
+                "avg_fulfillment_hours": avg_ff, "health_score": health,
+                "affected_population": d.get("affected_population"), "casualties": d.get("casualties"),
+            })
+
+        scorecards.sort(key=lambda s: s["health_score"])
+        return scorecards
+    except Exception as e:
+        logger.warning(f"Disaster scorecards failed: {e}")
+        return []
+
+
+async def _get_responder_performance() -> dict:
+    """Track NGO and volunteer performance metrics."""
+    try:
+        assigned_resp = await db_admin.table("resource_requests").select(
+            "assigned_to,status,created_at,updated_at"
+        ).limit(500).async_execute()
+
+        ngo_stats: dict[str, dict] = {}
+        for r in (assigned_resp.data or []):
+            ngo_id = r.get("assigned_to")
+            if not ngo_id:
+                continue
+            if ngo_id not in ngo_stats:
+                ngo_stats[ngo_id] = {"assigned": 0, "completed": 0, "in_progress": 0, "durations": []}
+            ngo_stats[ngo_id]["assigned"] += 1
+            status = r.get("status", "")
+            if status in ("completed", "delivered"):
+                ngo_stats[ngo_id]["completed"] += 1
+                if r.get("created_at") and r.get("updated_at"):
+                    try:
+                        c = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                        u = datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
+                        hrs = (u - c).total_seconds() / 3600
+                        if hrs >= 0:
+                            ngo_stats[ngo_id]["durations"].append(hrs)
+                    except (ValueError, TypeError):
+                        pass
+            elif status in ("assigned", "in_progress"):
+                ngo_stats[ngo_id]["in_progress"] += 1
+
+        ngo_ids = list(ngo_stats.keys())
+        ngo_names: dict[str, str] = {}
+        if ngo_ids:
+            try:
+                names_resp = await db_admin.table("users").select("id,full_name").in_("id", ngo_ids[:50]).async_execute()
+                ngo_names = {str(u["id"]): u.get("full_name", "Unknown") for u in (names_resp.data or [])}
+            except Exception:
+                pass
+
+        ngo_perf = []
+        for ngo_id, stats in ngo_stats.items():
+            avg_t = round(sum(stats["durations"]) / len(stats["durations"]), 1) if stats["durations"] else None
+            ngo_perf.append({
+                "id": ngo_id, "name": ngo_names.get(ngo_id, "Unknown"),
+                "assigned": stats["assigned"], "completed": stats["completed"],
+                "in_progress": stats["in_progress"],
+                "completion_rate": round(stats["completed"] / max(stats["assigned"], 1) * 100, 1),
+                "avg_fulfillment_hours": avg_t,
+            })
+        ngo_perf.sort(key=lambda x: x["completion_rate"], reverse=True)
+
+        vol_count = 0
+        try:
+            vol_resp = await db_admin.table("volunteer_assignments").select(
+                "volunteer_id", count="exact"
+            ).limit(1).async_execute()
+            vol_count = int(vol_resp.count or 0)
+        except Exception:
+            pass
+
+        return {"ngo_performance": ngo_perf[:20], "total_ngos_active": len(ngo_perf), "total_volunteer_assignments": vol_count}
+    except Exception as e:
+        logger.warning(f"Responder performance failed: {e}")
+        return {}
+
+
 async def _get_user_account_snapshot(user_id: str) -> dict:
-    """Get core user account data from Supabase users table."""
+    """Get core user account data."""
     try:
         resp = (
             await db_admin.table("users")
@@ -939,43 +1821,25 @@ async def _get_user_account_snapshot(user_id: str) -> dict:
 
 
 async def _get_global_users_snapshot(include_pii: bool = False, limit: int = 200) -> dict:
-    """Get live platform-wide users snapshot from Supabase users table."""
+    """Get live platform-wide users snapshot."""
     try:
-        count_resp = await db_admin.table("users").select("id", count="exact").limit(1).async_execute()
-        total_users = int(count_resp.count or 0)
-
         list_limit = min(max(limit, 1), 1000)
-        list_fields = "id,full_name,role,created_at"
-        if include_pii:
-            list_fields = "id,full_name,email,role,created_at"
+        list_fields = "id,full_name,email,role,created_at,is_profile_completed" if include_pii else "id,full_name,role,created_at"
 
         users_resp = (
             await db_admin.table("users")
-            .select(list_fields)
+            .select(list_fields, count="exact")
             .order("created_at", desc=True)
             .limit(list_limit)
             .async_execute()
         )
         users = users_resp.data or []
+        total_users = int(users_resp.count or len(users))
 
         by_role: dict[str, int] = {}
-        known_roles = ["admin", "victim", "ngo", "donor", "volunteer", "coordinator", "super_admin"]
-        for role in known_roles:
-            role_resp = (
-                await db_admin.table("users")
-                .select("id", count="exact")
-                .eq("role", role)
-                .limit(1)
-                .async_execute()
-            )
-            role_count = int(role_resp.count or 0)
-            if role_count > 0:
-                by_role[role] = role_count
-
-        # Unknown / null roles
-        known_total = sum(by_role.values())
-        if total_users > known_total:
-            by_role["unknown"] = total_users - known_total
+        for u in users:
+            role = u.get("role") or "unknown"
+            by_role[role] = by_role.get(role, 0) + 1
 
         return {
             "total": total_users,
@@ -990,7 +1854,7 @@ async def _get_global_users_snapshot(include_pii: bool = False, limit: int = 200
 
 
 async def _get_focused_disaster(disaster_id: str) -> dict:
-    """Get detailed snapshot for a specific disaster when provided."""
+    """Get detailed snapshot for a specific disaster."""
     try:
         resp = (
             await db.table("disasters")
@@ -1005,24 +1869,62 @@ async def _get_focused_disaster(disaster_id: str) -> dict:
         return {}
 
 
-async def _get_full_context(user: dict, disaster_id: str | None = None) -> dict:
-    """Pull all relevant context from Supabase, including user-specific data."""
+async def _get_full_context(user: dict, disaster_id: str | None = None, intent: str = "general") -> dict:
+    """Pull relevant context from Supabase, pruned by intent."""
     context: dict = {}
     user_id = user.get("id")
     user_role = user.get("role", "")
 
-    # ── System-wide data ──────────────────────────────────────────────────────
-    context["active_disasters"] = await _get_active_disasters()
-    context["resource_requests_summary"] = await _get_resource_requests_summary()
-    context["inventory_summary"] = await _get_inventory_summary()
-    context["active_alerts"] = await _get_active_alerts()
-
     elevated_roles = {"admin", "coordinator", "super_admin"}
     user_role_normalized = str(user_role or "").lower()
     include_pii = user_role_normalized in elevated_roles
-    context["platform_users"] = await _get_global_users_snapshot(include_pii=include_pii, limit=250)
+
+    # ── Parallel fetch: system-wide data ──────────────────────────────────────
+    base_tasks = [
+        _get_active_disasters(),
+        _get_resource_requests_summary(),
+        _get_inventory_summary(),
+        _get_active_alerts(),
+        _get_global_users_snapshot(include_pii=include_pii, limit=250),
+    ]
+    base_results = await asyncio.gather(*base_tasks, return_exceptions=True)
+
+    context["active_disasters"] = base_results[0] if not isinstance(base_results[0], Exception) else []
+    context["resource_requests_summary"] = base_results[1] if not isinstance(base_results[1], Exception) else {}
+    context["inventory_summary"] = base_results[2] if not isinstance(base_results[2], Exception) else {}
+    context["active_alerts"] = base_results[3] if not isinstance(base_results[3], Exception) else []
+    context["platform_users"] = base_results[4] if not isinstance(base_results[4], Exception) else {}
+
+    # ── Parallel fetch: admin-only insights ────────────────────────────────────
     if include_pii:
-        context["global_resource_requests"] = await _get_global_resource_requests(limit=300)
+        admin_tasks = [
+            _get_global_resource_requests(limit=300),
+            _get_chatbot_intake_activity(),
+            _get_request_lifecycle_metrics(),
+            _get_activity_heatmap(),
+            _get_supply_demand_gap(),
+            _get_engagement_summary(),
+            _get_user_registration_insights(),
+            _get_request_pipeline_funnel(),
+            _get_trend_analysis(),
+            _get_geographic_insights(),
+            _get_disaster_scorecards(),
+            _get_responder_performance(),
+        ]
+        admin_results = await asyncio.gather(*admin_tasks, return_exceptions=True)
+
+        context["global_resource_requests"] = admin_results[0] if not isinstance(admin_results[0], Exception) else []
+        context["chatbot_intake_activity"] = admin_results[1] if not isinstance(admin_results[1], Exception) else {}
+        context["request_lifecycle"] = admin_results[2] if not isinstance(admin_results[2], Exception) else {}
+        context["activity_heatmap"] = admin_results[3] if not isinstance(admin_results[3], Exception) else {}
+        context["supply_demand_gaps"] = admin_results[4] if not isinstance(admin_results[4], Exception) else {}
+        context["engagement_summary"] = admin_results[5] if not isinstance(admin_results[5], Exception) else {}
+        context["registration_insights"] = admin_results[6] if not isinstance(admin_results[6], Exception) else {}
+        context["request_pipeline"] = admin_results[7] if not isinstance(admin_results[7], Exception) else {}
+        context["trend_analysis"] = admin_results[8] if not isinstance(admin_results[8], Exception) else {}
+        context["geographic_insights"] = admin_results[9] if not isinstance(admin_results[9], Exception) else {}
+        context["disaster_scorecards"] = admin_results[10] if not isinstance(admin_results[10], Exception) else []
+        context["responder_performance"] = admin_results[11] if not isinstance(admin_results[11], Exception) else {}
 
     if disaster_id:
         context["focused_disaster"] = await _get_focused_disaster(disaster_id)
@@ -1042,14 +1944,6 @@ async def _get_full_context(user: dict, disaster_id: str | None = None) -> dict:
         except Exception as e:
             logger.warning(f"victim resource_requests fetch failed: {e}")
 
-        try:
-            vd = await db.table("victim_details").select(
-                "current_status,needs,medical_needs"
-            ).eq("id", user_id).maybe_single().async_execute()
-            context["victim_profile"] = vd.data or {}
-        except Exception as e:
-            logger.warning(f"victim_details fetch failed: {e}")
-
     elif user_role == "ngo":
         try:
             ar = await db.table("resource_requests").select(
@@ -1060,9 +1954,9 @@ async def _get_full_context(user: dict, disaster_id: str | None = None) -> dict:
             logger.warning(f"NGO assigned_requests fetch failed: {e}")
 
         try:
-            inv = await db.table("available_resources").select(
-                "resource_type,quantity,status"
-            ).eq("provider_id", user_id).async_execute()
+            inv = await db.table("resources").select(
+                "type,quantity,status"
+            ).eq("provider_id", user_id).eq("status", "available").async_execute()
             context["ngo_inventory"] = inv.data or []
         except Exception as e:
             logger.warning(f"NGO inventory fetch failed: {e}")
@@ -1076,14 +1970,6 @@ async def _get_full_context(user: dict, disaster_id: str | None = None) -> dict:
         except Exception as e:
             logger.warning(f"volunteer_assignments fetch failed: {e}")
 
-        try:
-            vp = await db.table("volunteer_details").select(
-                "skills,availability_status,certifications"
-            ).eq("id", user_id).maybe_single().async_execute()
-            context["volunteer_profile"] = vp.data or {}
-        except Exception as e:
-            logger.warning(f"volunteer_details fetch failed: {e}")
-
     elif user_role == "donor":
         try:
             dp = await db.table("donor_pledges").select(
@@ -1092,6 +1978,9 @@ async def _get_full_context(user: dict, disaster_id: str | None = None) -> dict:
             context["donor_pledges"] = dp.data or []
         except Exception as e:
             logger.warning(f"donor_pledges fetch failed: {e}")
+
+    # ── Prune context by intent ───────────────────────────────────────────────
+    context = _prune_context_by_intent(context, intent)
 
     return context
 
@@ -1158,10 +2047,7 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
             f"Type: {focused.get('type', '?')} | Severity: {focused.get('severity', '?')} | "
             f"Status: {focused.get('status', '?')} | Location: {focused.get('location', '?')}"
         )
-        if focused.get("description"):
-            parts.append(f"- Description: {str(focused.get('description'))[:500]}")
 
-    # Active disasters
     disasters = context.get("active_disasters", [])
     if disasters:
         parts.append(f"\n## Active Disasters ({len(disasters)}):")
@@ -1174,7 +2060,6 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
     else:
         parts.append("\n## Active Disasters: None currently active")
 
-    # Resource requests summary
     req = context.get("resource_requests_summary", {})
     parts.append(f"\n## Resource Requests (all-time): {req.get('total', 0)} total")
     parts.append(f"  Created in last 24h: {req.get('recent_24h_total', 0)}")
@@ -1194,7 +2079,6 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
                 + (f" ({row.get('victim_email')})" if row.get('victim_email') else "")
             )
 
-    # Inventory
     inv = context.get("inventory_summary", {})
     parts.append(f"\n## Resource Inventory: {inv.get('total_resources', 0)} total entries")
     for rtype, data in (inv.get("by_type") or {}).items():
@@ -1202,7 +2086,6 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
         flag = " ⚠️ LOW STOCK" if qty < 50 else ""
         parts.append(f"  - {rtype}: {qty} units{flag}")
 
-    # Alerts
     alerts = context.get("active_alerts", [])
     if alerts:
         parts.append(f"\n## Active Anomaly Alerts ({len(alerts)}):")
@@ -1211,7 +2094,24 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
     else:
         parts.append("\n## Active Anomaly Alerts: None")
 
-    # ── Personal user data ─────────────────────────────────────────────────
+    # Admin-only sections (only included if pruned context still has them)
+    for key, label in [
+        ("chatbot_intake_activity", "Chatbot Intake Activity"),
+        ("request_lifecycle", "Request Lifecycle Metrics"),
+        ("activity_heatmap", "Request Activity Pattern"),
+        ("supply_demand_gaps", "Supply vs Demand Gap Analysis"),
+        ("engagement_summary", "User Engagement Summary"),
+        ("registration_insights", "User Registration Trends"),
+        ("request_pipeline", "Request Pipeline Funnel"),
+        ("trend_analysis", "Week-over-Week Trends"),
+        ("geographic_insights", "Geographic Insights"),
+        ("disaster_scorecards", "Disaster Scorecards"),
+        ("responder_performance", "Responder Performance"),
+    ]:
+        data = context.get(key)
+        if data:
+            parts.append(f"\n## {label}: {json.dumps(data, default=str)[:2000]}")
+
     if context.get("user_requests"):
         reqs = context["user_requests"]
         parts.append(f"\n## THIS USER'S Requests ({len(reqs)}):")
@@ -1226,89 +2126,33 @@ def _format_context_as_system_prompt(context: dict, user_info: dict | None = Non
         for r in context["assigned_requests"][:5]:
             parts.append(f"  - [{r.get('status','?').upper()}] {r.get('resource_type','?')} at {r.get('address_text','?')}")
 
-    if context.get("ngo_inventory"):
-        parts.append(f"\n## This NGO's Inventory ({len(context['ngo_inventory'])} items)")
-
-    if context.get("volunteer_assignments"):
-        parts.append(f"\n## This Volunteer's Active Assignments: {len(context['volunteer_assignments'])}")
-
-    if context.get("volunteer_profile"):
-        vp = context["volunteer_profile"]
-        parts.append(f"  Skills: {', '.join(vp.get('skills') or [])} | Status: {vp.get('availability_status','?')}")
-
-    if context.get("donor_pledges"):
-        parts.append(f"\n## This Donor's Recent Pledges ({len(context['donor_pledges'])}):")
-        for p in context["donor_pledges"][:3]:
-            parts.append(f"  - {p.get('resource_type','?')}: {p.get('quantity_pledged','?')} units ({p.get('status','?')})")
-
     parts.append("\n=== END OF LIVE DATA ===")
     parts.append("If data is missing or incomplete, say so clearly. Do not invent numbers.")
 
     return "\n".join(parts)
 
 
-# ── Intent Detection ───────────────────────────────────────────────────────────
-
-
-def _detect_intent(message: str) -> str:
-    """Detect intent category from user message."""
-    msg = message.lower()
-
-    if any(p in msg for p in ["my request", "my orders", "my submission", "did i request", "status of my", "track my"]):
-        return "user_requests"
-
-    if any(p in msg for p in ["my profile", "my account", "my details", "about me", "my status"]):
-        return "user_profile"
-
-    if any(p in msg for p in ["running low", "low stock", "shortage", "almost out", "depleted", "need more"]):
-        return "low_stock"
-
-    if any(p in msg for p in ["allocate", "send resources", "distribute resources", "dispatch resources", "assign resources"]):
-        return "allocate_resources"
-
-    if any(p in msg for p in ["generate report", "create report", "sitrep", "situation report", "status report", "daily report"]):
-        return "generate_report"
-
-    if any(p in msg for p in ["how many request", "number of request", "request count", "pending request", "open request", "total request"]):
-        return "resource_requests"
-
-    if any(p in msg for p in ["how many users", "number of users", "total users", "user count", "registered users", "all users", "list users", "user accounts", "total accounts"]):
-        return "users_overview"
-
-    if any(p in msg for p in ["what resources are available", "available resources", "inventory", "stock", "supply", "resources we have"]):
-        return "available_resources"
-
-    if any(p in msg for p in ["disaster status", "active disaster", "current disaster", "emergency status", "which disaster", "what disaster"]):
-        return "disaster_status"
-
-    if any(p in msg for p in ["anomal", "alert", "warning", "unusual", "irregularit"]):
-        return "anomalies"
-
-    return "general"
-
-
-# ── Intent Handlers ───────────────────────────────────────────────────────────
+# ── Intent Handlers (same as original, with minor enhancements) ────────────────
 
 
 async def _handle_resource_requests_intent(context: dict) -> tuple[str, dict]:
-    """Handle 'how many requests' intent."""
     summary = context.get("resource_requests_summary", {})
     total = summary.get("total", 0)
     recent_24h_total = summary.get("recent_24h_total", 0)
     by_status = summary.get("by_status", {})
     by_type = summary.get("by_type", {})
     global_requests = context.get("global_resource_requests", [])
-    
+
     parts = ["## Resource Requests Summary\n"]
     parts.append(f"**Total Requests (All Time):** {total}\n")
     parts.append(f"**Created in Last 24h:** {recent_24h_total}\n\n")
-    
+
     if by_status:
         parts.append("### By Status\n")
         for status, count in by_status.items():
             parts.append(f"- {status}: {count}\n")
         parts.append("\n")
-    
+
     if by_type:
         parts.append("### By Type (Last 24h)\n")
         for req_type, count in by_type.items():
@@ -1319,26 +2163,21 @@ async def _handle_resource_requests_intent(context: dict) -> tuple[str, dict]:
         for req in global_requests[:30]:
             parts.append(
                 f"- [{str(req.get('status', '?')).upper()}] {req.get('resource_type', '?')} "
-                f"x{req.get('quantity', 1)} | "
-                f"Priority: {req.get('priority', '?')} | "
-                f"Victim: {req.get('victim_name') or req.get('victim_id', '?')}"
-                + (f" ({req.get('victim_email')})" if req.get('victim_email') else "")
-                + (f" | Address: {req.get('address_text')}" if req.get('address_text') else "")
-                + "\n"
+                f"x{req.get('quantity', 1)} | Priority: {req.get('priority', '?')} | "
+                f"Victim: {req.get('victim_name') or req.get('victim_id', '?')}\n"
             )
-    
+
     return "".join(parts), {"type": "resource_requests", "data": summary, "individual_count": len(global_requests)}
 
 
 async def _handle_available_resources_intent(context: dict) -> tuple[str, dict]:
-    """Handle 'what resources are available' intent."""
     summary = context.get("inventory_summary", {})
     total = summary.get("total_resources", 0)
     by_type = summary.get("by_type", {})
-    
+
     parts = [f"## Available Resources Inventory\n"]
     parts.append(f"**Total Resource Entries:** {total}\n\n")
-    
+
     if by_type:
         for res_type, data in by_type.items():
             parts.append(f"### {res_type}\n")
@@ -1346,16 +2185,15 @@ async def _handle_available_resources_intent(context: dict) -> tuple[str, dict]:
             parts.append(f"- Total Units: {data['total_quantity']}\n\n")
     else:
         parts.append("No resources in inventory.\n")
-    
+
     return "".join(parts), {"type": "available_resources", "data": summary}
 
 
 async def _handle_disaster_status_intent(context: dict) -> tuple[str, dict]:
-    """Handle 'disaster status' intent."""
     disasters = context.get("active_disasters", [])
-    
+
     parts = [f"## Active Disasters\n"]
-    
+
     if disasters:
         parts.append(f"**Total Active:** {len(disasters)}\n\n")
         for d in disasters:
@@ -1367,25 +2205,22 @@ async def _handle_disaster_status_intent(context: dict) -> tuple[str, dict]:
             parts.append(f"- **ID:** {d.get('id', 'N/A')}\n\n")
     else:
         parts.append("No active disasters.\n")
-    
+
     return "".join(parts), {"type": "disaster_status", "data": {"disasters": disasters}}
 
 
 async def _handle_allocate_resources_intent(message: str, context: dict) -> tuple[str, dict]:
-    """Handle 'allocate resources' intent - call the allocation endpoint."""
-    # Parse potential resource allocation from message
-    # For now, return a message that describes how to use the allocation endpoint
     disasters = context.get("active_disasters", [])
-    
+
     parts = ["## Resource Allocation\n"]
     parts.append("To allocate resources, you can use the `/api/resources/allocate` endpoint.\n\n")
-    
+
     if disasters:
         parts.append("### Available Disasters for Allocation\n")
         for d in disasters[:5]:
             parts.append(f"- {d.get('title', 'Unknown')} (ID: {d.get('id', 'N/A')})\n")
         parts.append("\n")
-    
+
     parts.append("### Example Request\n")
     parts.append("""```json
 POST /api/resources/allocate
@@ -1397,30 +2232,28 @@ POST /api/resources/allocate
   ]
 }
 ```""")
-    
+
     return "".join(parts), {"type": "allocate_resources", "note": "User should use /api/resources/allocate endpoint"}
 
 
 async def _handle_generate_report_intent(context: dict) -> tuple[str, dict]:
-    """Handle 'generate report' intent - call the sitrep generation endpoint."""
     disasters = context.get("active_disasters", [])
-    
+
     parts = ["## Situation Report (SITREP)\n"]
     parts.append("To generate a full situation report, use the `/api/nlp/sitrep/generate` endpoint.\n\n")
-    
-    # Provide a quick summary
+
     parts.append("### Current Summary\n")
     parts.append(f"- Active Disasters: {len(disasters)}\n")
-    
+
     req_summary = context.get("resource_requests_summary", {})
     parts.append(f"- Resource Requests (24h): {req_summary.get('total', 0)}\n")
-    
+
     inv_summary = context.get("inventory_summary", {})
     parts.append(f"- Available Resources: {inv_summary.get('total_resources', 0)}\n")
-    
+
     alerts = context.get("active_alerts", [])
     parts.append(f"- Active Alerts: {len(alerts)}\n\n")
-    
+
     parts.append("### Example Request\n")
     parts.append("""```json
 POST /api/nlp/sitrep/generate
@@ -1428,55 +2261,33 @@ POST /api/nlp/sitrep/generate
   "disaster_id": "<optional-disaster-id>"
 }
 ```""")
-    
+
     return "".join(parts), {"type": "generate_report", "note": "User should use /api/nlp/sitrep/generate"}
 
 
 async def _handle_anomalies_intent(context: dict) -> tuple[str, dict]:
-    """Handle 'anomalies' intent."""
     alerts = context.get("active_alerts", [])
-    
+
     parts = ["## Active Anomaly Alerts\n"]
-    
+
     if alerts:
         parts.append(f"**Total Active Alerts:** {len(alerts)}\n\n")
-        
-        # Group by severity
-        critical = [a for a in alerts if a.get("severity") == "critical"]
-        high = [a for a in alerts if a.get("severity") == "high"]
-        medium = [a for a in alerts if a.get("severity") == "medium"]
-        low = [a for a in alerts if a.get("severity") == "low"]
-        
-        if critical:
-            parts.append("### 🔴 Critical\n")
-            for a in critical:
-                parts.append(f"- **{a.get('alert_type', 'Unknown')}**: {a.get('description', 'No description')}\n")
-            parts.append("\n")
-        
-        if high:
-            parts.append("### 🟠 High\n")
-            for a in high:
-                parts.append(f"- **{a.get('alert_type', 'Unknown')}**: {a.get('description', 'No description')}\n")
-            parts.append("\n")
-        
-        if medium:
-            parts.append("### 🟡 Medium\n")
-            for a in medium:
-                parts.append(f"- **{a.get('alert_type', 'Unknown')}**: {a.get('description', 'No description')}\n")
-            parts.append("\n")
-        
-        if low:
-            parts.append("### 🟢 Low\n")
-            for a in low:
-                parts.append(f"- **{a.get('alert_type', 'Unknown')}**: {a.get('description', 'No description')}\n")
+
+        for severity in ["critical", "high", "medium", "low"]:
+            sev_alerts = [a for a in alerts if a.get("severity") == severity]
+            if sev_alerts:
+                emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+                parts.append(f"### {emoji} {severity.title()}\n")
+                for a in sev_alerts:
+                    parts.append(f"- **{a.get('alert_type', 'Unknown')}**: {a.get('description', 'No description')}\n")
+                parts.append("\n")
     else:
         parts.append("No active anomaly alerts.\n")
-    
+
     return "".join(parts), {"type": "anomalies", "data": {"alerts": alerts}}
 
 
 async def _handle_users_overview_intent(context: dict, user: dict) -> tuple[str, dict]:
-    """Handle user/account overview queries using live Supabase users table snapshot."""
     users_ctx = context.get("platform_users") or {}
     total = int(users_ctx.get("total") or 0)
     by_role = users_ctx.get("by_role") or {}
@@ -1501,34 +2312,19 @@ async def _handle_users_overview_intent(context: dict, user: dict) -> tuple[str,
             parts.append(line + "\n")
 
     if not pii_included:
-        parts.append("\n_PII is hidden for your role; showing aggregate and non-sensitive account data only._\n")
+        parts.append("\n_PII is hidden for your role._\n")
 
-    return "".join(parts), {
-        "type": "users_overview",
-        "data": {
-            "total": total,
-            "by_role": by_role,
-            "returned": len(users),
-            "pii_included": pii_included,
-            "requester_role": user.get("role"),
-        },
-    }
+    return "".join(parts), {"type": "users_overview", "data": {"total": total, "by_role": by_role}}
 
 
 async def _handle_user_requests_intent(context: dict) -> tuple[str, dict]:
-    """Show the current user's own resource requests."""
     requests = context.get("user_requests", [])
     if not requests:
         return (
-            "You have no resource requests on file in the system. "
-            "You can submit a new request from the Requests section of your dashboard.",
+            "You have no resource requests on file. You can submit a new request from the Requests section.",
             {"type": "user_requests", "count": 0},
         )
-    STATUS_EMOJI = {
-        "pending": "⏳", "approved": "✅", "assigned": "👷",
-        "in_progress": "🔄", "delivered": "📦", "completed": "✅",
-        "rejected": "❌", "closed": "🔒",
-    }
+    STATUS_EMOJI = {"pending": "⏳", "approved": "✅", "assigned": "👷", "in_progress": "🔄", "delivered": "📦", "completed": "✅", "rejected": "❌"}
     parts = [f"## Your Requests ({len(requests)} found)\n"]
     for r in requests:
         emoji = STATUS_EMOJI.get(r.get("status", ""), "📋")
@@ -1543,16 +2339,12 @@ async def _handle_user_requests_intent(context: dict) -> tuple[str, dict]:
 
 
 async def _handle_low_stock_intent(context: dict) -> tuple[str, dict]:
-    """Report on resources that are running low."""
     inv = context.get("inventory_summary", {})
     low_types = inv.get("low_stock", [])
     by_type = inv.get("by_type", {})
 
     if not low_types:
-        return (
-            "✅ All tracked resource types currently have adequate stock levels (≥ 50 units each).",
-            {"type": "low_stock", "count": 0},
-        )
+        return ("✅ All tracked resource types currently have adequate stock levels (≥ 50 units each).", {"type": "low_stock", "count": 0})
     parts = [f"## ⚠️ Low Stock Alert — {len(low_types)} resource type(s) below threshold\n"]
     for rtype in sorted(low_types, key=lambda r: by_type.get(r, {}).get("total_quantity", 0)):
         qty = by_type.get(rtype, {}).get("total_quantity", 0)
@@ -1562,11 +2354,522 @@ async def _handle_low_stock_intent(context: dict) -> tuple[str, dict]:
     return "\n".join(parts), {"type": "low_stock", "items": low_types}
 
 
+async def _handle_briefing_intent(context: dict) -> tuple[str, dict]:
+    alerts_list: list[str] = []
+
+    lifecycle = context.get("request_lifecycle") or {}
+    stale_count = lifecycle.get("stale_count", 0)
+    if stale_count > 0:
+        alerts_list.append(f"🚨 **{stale_count} request(s)** pending for over 48 hours")
+
+    gaps = context.get("supply_demand_gaps") or {}
+    critical = gaps.get("critical_shortages", [])
+    if critical:
+        types = ", ".join(g["type"] for g in critical[:3])
+        alerts_list.append(f"⚠️ **Critical shortages** in: {types}")
+
+    chatbot = context.get("chatbot_intake_activity") or {}
+    abandon_rate = chatbot.get("abandonment_rate", 0)
+    if abandon_rate > 30:
+        alerts_list.append(f"📉 **High chatbot abandonment** ({abandon_rate}%) — victims may be frustrated")
+
+    anomalies = context.get("active_alerts") or []
+    critical_anomalies = [a for a in anomalies if a.get("severity") == "critical"]
+    if critical_anomalies:
+        alerts_list.append(f"🔴 **{len(critical_anomalies)} critical anomaly alert(s)** active")
+
+    disasters = context.get("active_disasters") or []
+    if disasters:
+        alerts_list.append(f"🌍 **{len(disasters)} active disaster(s)** being tracked")
+
+    req = context.get("resource_requests_summary") or {}
+    pending = req.get("by_status", {}).get("pending", 0)
+    if pending > 10:
+        alerts_list.append(f"📋 **{pending} pending requests** awaiting action")
+
+    if alerts_list:
+        parts = ["## ⚡ Admin Briefing — Items Requiring Attention\n"]
+        for alert in alerts_list:
+            parts.append(f"- {alert}\n")
+        parts.append("\n*Ask me about any of these for more details.*")
+        return "\n".join(parts), {"type": "briefing", "alert_count": len(alerts_list)}
+
+    return ("✅ **All clear.** No critical issues detected. System is operating within normal parameters.", {"type": "briefing", "alert_count": 0})
+
+
+async def _handle_supply_demand_gap_intent(context: dict) -> tuple[str, dict]:
+    gaps_data = context.get("supply_demand_gaps") or {}
+    gap_list = gaps_data.get("gaps", [])
+
+    parts = ["## Supply vs Demand Gap Analysis\n"]
+    parts.append(
+        f"**Total Active Demand:** {gaps_data.get('total_demand', 0)} units | "
+        f"**Total Available Supply:** {gaps_data.get('total_supply', 0)} units\n"
+    )
+
+    if gap_list:
+        parts.append("\n| Resource Type | Demand | Supply | Gap | Coverage | Status |")
+        parts.append("|---|---|---|---|---|---|")
+        for g in gap_list:
+            flag = " ⚠️" if g["coverage_pct"] < 50 else ""
+            parts.append(
+                f"| {g['type']} | {g['demand']} | {g['supply']} | "
+                f"{g['gap']} | {g['coverage_pct']}% | {g['status'].upper()}{flag} |"
+            )
+        parts.append("")
+
+        critical = gaps_data.get("critical_shortages", [])
+        if critical:
+            parts.append(f"\n### 🚨 Critical Shortages ({len(critical)} types below 50% coverage)\n")
+            for c in critical:
+                parts.append(
+                    f"- **{c['type']}**: only {c['supply']} available "
+                    f"against {c['demand']} demanded ({c['coverage_pct']}% coverage)"
+                )
+    else:
+        parts.append("\n*No active demand or supply data available.*")
+
+    return "\n".join(parts), {"type": "supply_demand_gap", "data": gaps_data}
+
+
+async def _handle_request_lifecycle_intent(context: dict) -> tuple[str, dict]:
+    lifecycle = context.get("request_lifecycle") or {}
+
+    parts = ["## Request Lifecycle & Fulfillment Metrics\n"]
+
+    if lifecycle.get("sample_size", 0) > 0:
+        parts.append(f"**Median Fulfillment Time:** {lifecycle.get('median_fulfillment_hours', '?')} hours\n")
+        parts.append(f"**Average Fulfillment Time:** {lifecycle.get('avg_fulfillment_hours', '?')} hours\n")
+        parts.append(f"**Sample Size:** {lifecycle.get('sample_size', 0)} completed requests\n")
+
+        by_priority = lifecycle.get("by_priority", {})
+        if by_priority:
+            parts.append("\n### Average Fulfillment by Priority\n")
+            for pri, hrs in sorted(by_priority.items()):
+                parts.append(f"- **{pri}**: {hrs} hours\n")
+    else:
+        parts.append("*No completed request data available for lifecycle analysis.*\n")
+
+    stale_count = lifecycle.get("stale_count", 0)
+    if stale_count > 0:
+        parts.append(f"\n### ⚠️ Stale Requests ({stale_count} pending > 48 hours)\n")
+        for sr in lifecycle.get("stale_pending_requests", []):
+            parts.append(f"- **ID:** {sr['id']} | **Age:** {sr['age_hours']}h | **Priority:** {sr.get('priority', '?')}\n")
+    else:
+        parts.append("\n### ✅ No stale requests — all pending requests are less than 48 hours old.\n")
+
+    return "\n".join(parts), {"type": "request_lifecycle", "data": lifecycle}
+
+
+async def _handle_chatbot_activity_intent(context: dict) -> tuple[str, dict]:
+    chatbot = context.get("chatbot_intake_activity") or {}
+
+    parts = [f"## Victim Chatbot Intake Activity (Last {chatbot.get('time_range_hours', 24)}h)\n"]
+
+    total = chatbot.get("total_sessions", 0)
+    completed = chatbot.get("completed", 0)
+    abandoned = chatbot.get("abandoned", 0)
+    abandon_rate = chatbot.get("abandonment_rate", 0)
+
+    parts.append(f"**Total Sessions:** {total}\n")
+    parts.append(f"**Completed:** {completed} | **Abandoned:** {abandoned}\n")
+    parts.append(f"**Abandonment Rate:** {abandon_rate}%\n")
+
+    demand = chatbot.get("resource_demand", {})
+    if demand:
+        parts.append("\n### Resource Demand from Chatbot\n")
+        for rt, count in sorted(demand.items(), key=lambda x: x[1], reverse=True):
+            parts.append(f"- **{rt}**: {count} requests\n")
+
+    if total == 0:
+        parts.append("\n*No chatbot sessions recorded in this time period.*\n")
+
+    return "\n".join(parts), {"type": "chatbot_activity", "data": chatbot}
+
+
+async def _handle_activity_heatmap_intent(context: dict) -> tuple[str, dict]:
+    heatmap = context.get("activity_heatmap") or {}
+
+    parts = [f"## Request Activity Patterns (Last {heatmap.get('days_analyzed', 7)} days)\n"]
+
+    total = heatmap.get("total_requests", 0)
+    parts.append(f"**Total Requests Analyzed:** {total}\n")
+
+    if total > 0:
+        if heatmap.get("peak_hour") is not None:
+            parts.append(f"**Peak Hour:** {heatmap['peak_hour']}:00 UTC\n")
+        if heatmap.get("peak_day"):
+            parts.append(f"**Peak Day:** {heatmap['peak_day']}\n")
+
+        daily = heatmap.get("daily_distribution", {})
+        if daily:
+            parts.append("\n### Daily Distribution\n")
+            for day, count in sorted(daily.items(), key=lambda x: x[1], reverse=True):
+                bar = "█" * min(count, 30)
+                parts.append(f"- **{day}**: {count} requests {bar}\n")
+    else:
+        parts.append("\n*No request data available for the selected period.*\n")
+
+    return "\n".join(parts), {"type": "activity_heatmap", "data": heatmap}
+
+
+async def _handle_engagement_intent(context: dict) -> tuple[str, dict]:
+    engagement = context.get("engagement_summary") or {}
+    users_ctx = context.get("platform_users") or {}
+    by_role = users_ctx.get("by_role", {})
+
+    parts = ["## User Engagement Summary\n"]
+
+    active_victims = engagement.get("active_victims_7d", 0)
+    active_volunteers = engagement.get("active_volunteers_30d", 0)
+    active_donors = engagement.get("active_donors_30d", 0)
+    total_victims = by_role.get("victim", 0)
+    total_volunteers = by_role.get("volunteer", 0)
+    total_donors = by_role.get("donor", 0)
+
+    parts.append("### Victims (7-day window)\n")
+    pct_v = round(active_victims / max(total_victims, 1) * 100, 1)
+    parts.append(f"- **Active:** {active_victims} / {total_victims} ({pct_v}%)\n")
+
+    parts.append("\n### Volunteers (30-day window)\n")
+    pct_vol = round(active_volunteers / max(total_volunteers, 1) * 100, 1)
+    parts.append(f"- **Active:** {active_volunteers} / {total_volunteers} ({pct_vol}%)\n")
+
+    parts.append("\n### Donors (30-day window)\n")
+    pct_d = round(active_donors / max(total_donors, 1) * 100, 1)
+    parts.append(f"- **Active:** {active_donors} / {total_donors} ({pct_d}%)\n")
+
+    return "\n".join(parts), {"type": "engagement", "data": engagement}
+
+
+async def _handle_registration_trends_intent(context: dict) -> tuple[str, dict]:
+    reg = context.get("registration_insights") or {}
+    users_ctx = context.get("platform_users") or {}
+
+    parts = ["## 📊 User Registration & Growth\n"]
+    parts.append(f"**Total Platform Users:** {users_ctx.get('total', 0)}\n")
+
+    by_role = users_ctx.get("by_role", {})
+    if by_role:
+        parts.append("### Role Distribution\n")
+        for role, count in sorted(by_role.items(), key=lambda x: x[1], reverse=True):
+            parts.append(f"- **{role.title()}**: {count}\n")
+
+    new_7d = reg.get("new_users_7d", 0)
+    new_30d = reg.get("new_users_30d", 0)
+    parts.append(f"\n### Recent Signups\n")
+    parts.append(f"- **This week:** {new_7d} new users\n")
+    parts.append(f"- **This month:** {new_30d} new users\n")
+
+    incomplete = reg.get("incomplete_profiles", 0)
+    if incomplete > 0:
+        parts.append(f"\n### ⚠️ Incomplete Profiles\n")
+        parts.append(f"**{incomplete} users** have not completed their profile setup.\n")
+
+    return "\n".join(parts), {"type": "registration_trends", "data": reg}
+
+
+async def _handle_request_pipeline_intent(context: dict) -> tuple[str, dict]:
+    pipeline = context.get("request_pipeline") or {}
+
+    parts = ["## 🔄 Request Pipeline Funnel\n"]
+
+    total = pipeline.get("total", 0)
+    if total == 0:
+        parts.append("*No resource requests in the system yet.*\n")
+        return "\n".join(parts), {"type": "request_pipeline", "data": pipeline}
+
+    parts.append(f"**Total Requests:** {total}\n")
+    parts.append(
+        f"**Completion Rate:** {pipeline.get('completion_rate', 0)}% | "
+        f"**Rejection Rate:** {pipeline.get('rejection_rate', 0)}% | "
+        f"**Actively Processing:** {pipeline.get('active_processing_pct', 0)}%\n"
+    )
+
+    funnel = pipeline.get("funnel", {})
+    if funnel:
+        stages = ["pending", "approved", "assigned", "in_progress", "delivered", "completed", "rejected"]
+        parts.append("\n### Status Breakdown\n")
+        parts.append("| Stage | Count | % of Total |")
+        parts.append("|---|---|---|")
+        for s in stages:
+            count = funnel.get(s, 0)
+            if count > 0:
+                pct = round(count / max(total, 1) * 100, 1)
+                parts.append(f"| {s.replace('_', ' ').title()} | {count} | {pct}% |")
+        parts.append("")
+
+    pending = pipeline.get("pending_count", 0)
+    if pending > 0:
+        parts.append(f"\n### ⏳ Action Needed\n")
+        parts.append(f"**{pending} requests** are still pending and awaiting processing.\n")
+
+    return "\n".join(parts), {"type": "request_pipeline", "data": pipeline}
+
+
+async def _handle_trends_intent(context: dict) -> tuple[str, dict]:
+    trends = context.get("trend_analysis") or {}
+
+    parts = ["## 📈 Week-over-Week Trend Analysis\n"]
+
+    if not trends:
+        parts.append("*No trend data available.*\n")
+        return "\n".join(parts), {"type": "trends", "data": {}}
+
+    for metric_key, data in trends.items():
+        if not isinstance(data, dict):
+            continue
+        label = metric_key.replace("_", " ").title()
+        trend = data.get("trend", "→")
+        tw = data.get("this_week", 0)
+        lw = data.get("last_week", 0)
+        pct = data.get("change_pct", 0)
+        emoji = "🟢" if trend == "↑" else ("🔴" if trend == "↓" else "⚪")
+        parts.append(f"### {emoji} {label}\n")
+        parts.append(f"- **This week:** {tw} | **Last week:** {lw}\n")
+        parts.append(f"- **Change:** {data.get('change', 0):+} ({pct:+}%) {trend}\n")
+
+    return "\n".join(parts), {"type": "trends", "data": trends}
+
+
+async def _handle_geographic_intent(context: dict) -> tuple[str, dict]:
+    geo = context.get("geographic_insights") or {}
+
+    parts = [f"## 🌍 Geographic Insights ({geo.get('total_locations', 0)} locations)\n"]
+
+    top_locs = geo.get("top_locations", [])
+    if top_locs:
+        parts.append("### Top Locations by Request Volume\n")
+        parts.append("| Location | Total | Pending | Completed | High Priority |")
+        parts.append("|---|---|---|---|---|")
+        for loc in top_locs[:12]:
+            parts.append(
+                f"| {loc['location']} | {loc['total']} | {loc['pending']} | "
+                f"{loc['completed']} | {loc['high_priority']} |"
+            )
+        parts.append("")
+
+    underserved = geo.get("underserved_areas", [])
+    if underserved:
+        parts.append(f"\n### ⚠️ Underserved Areas ({len(underserved)} detected)\n")
+        for u in underserved:
+            parts.append(f"- **{u['location']}**: {u['pending_requests']} pending requests, only {u['available_resources']} resources available\n")
+
+    return "\n".join(parts), {"type": "geographic", "data": geo}
+
+
+async def _handle_disaster_comparison_intent(context: dict) -> tuple[str, dict]:
+    scorecards = context.get("disaster_scorecards") or []
+
+    parts = ["## 🏆 Disaster Performance Scorecards\n"]
+
+    if not scorecards:
+        parts.append("*No active disasters to compare.*\n")
+        return "\n".join(parts), {"type": "disaster_comparison", "data": []}
+
+    parts.append("| Disaster | Health | Completion | Pending | In Progress | Avg Fulfillment |")
+    parts.append("|---|---|---|---|---|---|")
+    for sc in scorecards:
+        health_emoji = "🟢" if sc["health_score"] >= 8 else ("🟡" if sc["health_score"] >= 5 else "🔴")
+        parts.append(
+            f"| {sc['title']} | {health_emoji} {sc['health_score']}/10 | "
+            f"{sc['completion_rate']}% | {sc['pending']} | {sc['in_progress']} | "
+            f"{sc.get('avg_fulfillment_hours', 'N/A')}h |"
+        )
+    parts.append("")
+
+    return "\n".join(parts), {"type": "disaster_comparison", "data": scorecards}
+
+
+async def _handle_responder_performance_intent(context: dict) -> tuple[str, dict]:
+    resp_data = context.get("responder_performance") or {}
+
+    parts = ["## 👥 Responder Performance\n"]
+
+    ngo_perf = resp_data.get("ngo_performance", [])
+    if ngo_perf:
+        parts.append(f"### NGO Performance ({resp_data.get('total_ngos_active', 0)} active)\n")
+        parts.append("| NGO | Assigned | Completed | Rate | Avg Time | In Progress |")
+        parts.append("|---|---|---|---|---|---|")
+        for ngo in ngo_perf[:15]:
+            parts.append(
+                f"| {ngo['name']} | {ngo['assigned']} | {ngo['completed']} | "
+                f"{ngo['completion_rate']}% | {ngo.get('avg_fulfillment_hours', 'N/A')}h | "
+                f"{ngo['in_progress']} |"
+            )
+        parts.append("")
+    else:
+        parts.append("*No NGO assignment data available.*\n")
+
+    return "\n".join(parts), {"type": "responder_performance", "data": resp_data}
+
+
+async def _handle_causal_intent(message: str, context: dict) -> tuple[str, dict]:
+    """Handle causal reasoning and explainability questions."""
+    from ml.causal_model import DisasterCausalModel
+    from app.services.explainability_service import ExplainabilityService
+
+    explainability = ExplainabilityService()
+    parts = ["## 🔬 Causal Analysis\n"]
+
+    try:
+        causal_model = await DisasterCausalModel.from_database()
+
+        # Check if asking about root causes
+        msg_lower = message.lower()
+        if any(kw in msg_lower for kw in ["root cause", "why did", "cause of", "what caused"]):
+            outcome_var = "casualties"
+            if "damage" in msg_lower or "economic" in msg_lower:
+                outcome_var = "economic_damage_usd"
+
+            root_causes = causal_model.rank_root_causes(outcome_var)
+            if root_causes:
+                parts.append(f"### Top Root Causes of {outcome_var.replace('_', ' ').title()}\n")
+                for i, cause in enumerate(root_causes[:5], 1):
+                    explanation = await explainability.explain_causal_insight(
+                        treatment=cause.treatment,
+                        outcome=outcome_var,
+                        ate=cause.ate,
+                        confidence_interval=cause.confidence_interval,
+                        refutation_passed=cause.refutation_passed,
+                    )
+                    parts.append(f"**{i}. {cause.treatment.replace('_', ' ').title()}**\n")
+                    parts.append(f"- ATE: {cause.ate:.4f}")
+                    if cause.refutation_passed:
+                        parts.append(f"- ✅ Causal (refutation passed)")
+                    elif cause.refutation_passed is False:
+                        parts.append(f"- ⚠️ May be confounded")
+                    parts.append("")
+
+        # Check if asking about counterfactuals
+        elif any(kw in msg_lower for kw in ["what if", "counterfactual", "would have", "if we had"]):
+            observation = {
+                "weather_severity": 7.0,
+                "disaster_type": 6.0,
+                "response_time_hours": 12.0,
+                "resource_availability": 5.0,
+                "ngo_proximity_km": 50.0,
+                "resource_quality_score": 5.0,
+                "casualties": 20.0,
+                "economic_damage_usd": 500000.0,
+            }
+
+            interventions = causal_model.top_counterfactual_interventions(observation, outcome_var="casualties", k=3)
+            if interventions:
+                parts.append("### Top Interventions to Reduce Casualties\n")
+                for i, intervention in enumerate(interventions, 1):
+                    parts.append(f"**{i}. Change {intervention['variable'].replace('_', ' ').title()}**\n")
+                    parts.append(f"- Current: {intervention['current_value']}")
+                    parts.append(f"- Proposed: {intervention['proposed_value']}")
+                    parts.append(f"- Estimated reduction: {intervention['estimated_reduction']:.1f} casualties")
+                    parts.append(f"- {intervention['explanation']}")
+                    parts.append("")
+
+        # Check if asking to explain priority/decision
+        elif any(kw in msg_lower for kw in ["explain why", "explain priority", "reasoning behind", "justify"]):
+            parts.append("### Priority Explanation Framework\n")
+            parts.append("Our AI explains priority assignments using these factors:\n")
+            for factor_key, factor_info in explainability.PRIORITY_FACTORS.items():
+                parts.append(f"- **{factor_info['label']}**: {factor_info['impact']}")
+                parts.append(f"  _{factor_info['description']}_")
+            parts.append("")
+            parts.append("*Ask me to explain a specific request's priority for detailed reasoning.*")
+
+        # Default: show ATE estimates
+        else:
+            parts.append("### Causal Effect Estimates\n")
+            parts.append("Key causal relationships in disaster outcomes:\n")
+
+            estimates = [
+                ("response_time_hours", "casualties"),
+                ("resource_availability", "casualties"),
+                ("resource_availability", "economic_damage_usd"),
+                ("ngo_proximity_km", "response_time_hours"),
+            ]
+
+            for treatment, outcome in estimates:
+                try:
+                    est = causal_model.estimate_ate(treatment, outcome, compute_ci=False)
+                    explanation = await explainability.explain_causal_insight(
+                        treatment=treatment,
+                        outcome=outcome,
+                        ate=est.ate,
+                        confidence_interval=est.confidence_interval,
+                        refutation_passed=est.refutation_passed,
+                    )
+                    parts.append(f"#### {treatment.replace('_', ' ').title()} → {outcome.replace('_', ' ').title()}")
+                    parts.append(f"- Effect: {est.ate:+.4f} per unit change")
+                    if est.refutation_passed:
+                        parts.append(f"- ✅ Causal relationship validated")
+                    elif est.refutation_passed is False:
+                        parts.append(f"- ⚠️ May involve confounding")
+                    parts.append("")
+                except Exception:
+                    continue
+
+            parts.append("*Ask 'what if we reduced response time?' for counterfactual analysis.*")
+
+        return "\n".join(parts), {"type": "causal", "data": {"analysis_complete": True}}
+
+    except Exception as e:
+        logger.error(f"Causal analysis failed: {e}")
+        return (
+            f"## Causal Analysis Unavailable\n\n"
+            f"The causal model requires more disaster data to produce reliable estimates. "
+            f"Currently using synthetic data for demonstration.\n\n"
+            f"*Error: {str(e)[:200]}*"
+        ), {"type": "causal", "error": str(e)}
+
+
+async def _handle_digest_intent(context: dict) -> tuple[str, dict]:
+    parts = ["## 📋 Comprehensive Operations Digest\n"]
+    parts.append(f"*Generated at {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*\n")
+
+    trends = context.get("trend_analysis") or {}
+    if trends:
+        parts.append("### 📈 Trends (Week-over-Week)\n")
+        for key, data in trends.items():
+            if isinstance(data, dict):
+                parts.append(f"- {key.replace('_', ' ').title()}: {data.get('this_week', 0)} {data.get('trend', '→')} ({data.get('change_pct', 0):+}%)\n")
+
+    disasters = context.get("active_disasters") or []
+    parts.append(f"\n### 🌍 Active Disasters: {len(disasters)}\n")
+    for d in disasters[:5]:
+        parts.append(f"- {d.get('title', '?')} (severity: {d.get('severity', '?')})\n")
+
+    req = context.get("resource_requests_summary") or {}
+    parts.append(f"\n### 📦 Requests\n")
+    parts.append(f"- Total: {req.get('total', 0)} | Last 24h: {req.get('recent_24h_total', 0)}\n")
+
+    gaps = context.get("supply_demand_gaps") or {}
+    critical = gaps.get("critical_shortages", [])
+    if critical:
+        parts.append(f"\n### ⚠️ Critical Shortages ({len(critical)})\n")
+        for c in critical[:5]:
+            parts.append(f"- **{c['type']}**: {c['coverage_pct']}% coverage\n")
+
+    scorecards = context.get("disaster_scorecards") or []
+    if scorecards:
+        parts.append("\n### 🏆 Disaster Scorecards\n")
+        for sc in scorecards[:5]:
+            emoji = "🟢" if sc["health_score"] >= 8 else ("🟡" if sc["health_score"] >= 5 else "🔴")
+            parts.append(f"- {emoji} {sc['title']}: health {sc['health_score']}/10, {sc['completion_rate']}% complete\n")
+
+    alerts = context.get("active_alerts") or []
+    if alerts:
+        critical_alerts = [a for a in alerts if a.get("severity") == "critical"]
+        parts.append(f"\n### 🚨 Alerts: {len(alerts)} active ({len(critical_alerts)} critical)\n")
+
+    parts.append("\n---\n*Ask about any section for more details.*")
+    return "\n".join(parts), {"type": "digest", "sections": 9}
+
+
 async def _handle_general_intent(
     message: str,
     context: dict,
     history: list[dict],
     user_info: dict | None = None,
+    conversation_summary: str | None = None,
 ) -> tuple[str, dict]:
     """Handle general questions using Groq with injected live Supabase context."""
     try:
@@ -1578,7 +2881,15 @@ async def _handle_general_intent(
     system_prompt = _format_context_as_system_prompt(context, user_info)
 
     messages = []
-    for msg in history[-6:]:  # last 3 turns of conversation
+
+    # Add conversation summary if available
+    if conversation_summary:
+        messages.append({
+            "role": "system",
+            "content": f"[Previous conversation summary]: {conversation_summary}",
+        })
+
+    for msg in history[-6:]:
         role = msg.get("role")
         content = msg.get("content", "")
         if role in ("user", "assistant") and content:
@@ -1590,8 +2901,7 @@ async def _handle_general_intent(
     if not api_key:
         logger.error("GROQ_API_KEY env var not set")
         return (
-            "I can see the live disaster data but my AI response engine is not configured "
-            "(GROQ_API_KEY missing). Please contact your administrator.",
+            "I can see the live disaster data but my AI response engine is not configured (GROQ_API_KEY missing).",
             {"fallback": "no_api_key"},
         )
 
@@ -1616,7 +2926,6 @@ async def _handle_general_intent(
         return answer, {"type": "general", "llm": "groq", "model": model}
     except Exception as e:
         logger.error(f"Groq API call failed: {e}")
-        # Graceful degradation: show a useful plain-text summary
         disasters = context.get("active_disasters", [])
         req = context.get("resource_requests_summary", {})
         inv = context.get("inventory_summary", {})
@@ -1632,8 +2941,6 @@ async def _handle_general_intent(
         )
         if low:
             fallback_msg += f"**⚠️ Low stock items:** {', '.join(low)}\n"
-        if context.get("user_requests"):
-            fallback_msg += f"\n**Your requests:** {len(context['user_requests'])} on file\n"
         fallback_msg += "\n*AI response engine temporarily unavailable. Showing raw data summary.*"
         return fallback_msg, {"type": "general", "fallback": "api_error", "error": str(e)}
 
@@ -1644,12 +2951,16 @@ async def _handle_general_intent(
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     body: ChatRequest,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
     """
-    Chat with DisasterGPT.
-    Pulls real-time data from Supabase, detects user intent, and responds
-    using role-specific context + Groq for general questions.
+    Chat with DisasterGPT (Enhanced V2).
+    - Persists sessions and messages to DB
+    - Uses semantic intent classification
+    - Prunes context by intent for faster responses
+    - Includes conversation memory with summarization
+    - Returns follow-up suggestion chips and action cards
     """
     logger.info(
         "Chat request user=%s role=%s session=%s: %.80s...",
@@ -1659,7 +2970,7 @@ async def chat(
         body.message,
     )
 
-    # Merge JWT user with any frontend-provided hints (role may be missing from JWT)
+    # Merge JWT user with frontend hints
     if body.user_context:
         if body.user_context.role and not user.get("role"):
             user["role"] = body.user_context.role
@@ -1668,19 +2979,33 @@ async def chat(
         if body.user_context.user_id and not user.get("id"):
             user["id"] = body.user_context.user_id
 
-    # Session management
-    session_id, session_data = _get_or_create_session(body.session_id)
-    history = session_data.get("messages", [])
+    # Session management — prefer DB, fall back to in-memory
+    session_id = body.session_id or str(uuid.uuid4())
+
+    # Persist session to DB (background)
+    background_tasks.add_task(_persist_session, session_id, user)
+
+    # Load history from DB first, fall back to in-memory
+    history = await _get_session_history_from_db(session_id)
+    if not history:
+        _, session_data = _get_or_create_session(session_id)
+        history = session_data.get("messages", [])
+
+    # Get conversation summary from DB
+    conversation_summary = await _get_conversation_summary_from_db(session_id)
+
+    # Add user message to in-memory session
     _add_message_to_session(session_id, "user", body.message)
 
-    # Pull live Supabase context
-    disaster_id = body.context.disaster_id if body.context else None
-    context = await _get_full_context(user, disaster_id)
-
-    # Detect intent and route
-    intent = _detect_intent(body.message)
+    # Classify intent FIRST (before pulling context, so we can prune)
+    intent = _classify_intent(body.message)
     logger.info("Detected intent=%s for user=%s role=%s", intent, user.get("id", "?"), user.get("role", "?"))
 
+    # Pull live context (pruned by intent)
+    disaster_id = body.context.disaster_id if body.context else None
+    context = await _get_full_context(user, disaster_id, intent=intent)
+
+    # Detect intent and route
     response_text = ""
     context_data: dict | None = None
 
@@ -1707,6 +3032,34 @@ async def chat(
             response_text, context_data = await _handle_generate_report_intent(context)
         elif intent == "anomalies":
             response_text, context_data = await _handle_anomalies_intent(context)
+        elif intent == "briefing":
+            response_text, context_data = await _handle_briefing_intent(context)
+        elif intent == "supply_demand_gap":
+            response_text, context_data = await _handle_supply_demand_gap_intent(context)
+        elif intent == "request_lifecycle":
+            response_text, context_data = await _handle_request_lifecycle_intent(context)
+        elif intent == "chatbot_activity":
+            response_text, context_data = await _handle_chatbot_activity_intent(context)
+        elif intent == "activity_heatmap":
+            response_text, context_data = await _handle_activity_heatmap_intent(context)
+        elif intent == "engagement":
+            response_text, context_data = await _handle_engagement_intent(context)
+        elif intent == "registration_trends":
+            response_text, context_data = await _handle_registration_trends_intent(context)
+        elif intent == "request_pipeline":
+            response_text, context_data = await _handle_request_pipeline_intent(context)
+        elif intent == "trends":
+            response_text, context_data = await _handle_trends_intent(context)
+        elif intent == "geographic":
+            response_text, context_data = await _handle_geographic_intent(context)
+        elif intent == "disaster_comparison":
+            response_text, context_data = await _handle_disaster_comparison_intent(context)
+        elif intent == "responder_performance":
+            response_text, context_data = await _handle_responder_performance_intent(context)
+        elif intent == "causal":
+            response_text, context_data = await _handle_causal_intent(body.message, context)
+        elif intent == "digest":
+            response_text, context_data = await _handle_digest_intent(context)
         else:
             user_info = {
                 "role": user.get("role"),
@@ -1714,37 +3067,680 @@ async def chat(
                 "user_requests": context.get("user_requests", []),
             }
             response_text, context_data = await _handle_general_intent(
-                body.message, context, history, user_info
+                body.message, context, history, user_info, conversation_summary
             )
 
-        if force_live_llm and intent != "general":
+        # Force live LLM for admin/coordinator on non-structured intents
+        structured_insight_intents = {
+            "briefing", "supply_demand_gap", "request_lifecycle",
+            "chatbot_activity", "activity_heatmap", "engagement",
+            "registration_trends", "request_pipeline",
+            "trends", "geographic", "disaster_comparison",
+            "responder_performance", "digest",
+        }
+        if force_live_llm and intent != "general" and intent not in structured_insight_intents:
             user_info = {
                 "role": user.get("role"),
                 "name": user.get("name"),
                 "user_requests": context.get("user_requests", []),
             }
             response_text, context_data = await _handle_general_intent(
-                body.message, context, history, user_info
+                body.message, context, history, user_info, conversation_summary
             )
             if isinstance(context_data, dict):
                 context_data["intent_routed"] = intent
                 context_data["mode"] = "forced_live_llm"
     except Exception as e:
         logger.error(f"Error handling intent {intent}: {e}", exc_info=True)
-        response_text = (
-            f"I encountered an error while processing your request. "
-            f"Error: {str(e)[:200]}"
-        )
+        response_text = f"I encountered an error while processing your request. Error: {str(e)[:200]}"
         context_data = {"error": str(e), "intent": intent}
 
+    # Add assistant message to in-memory session
     _add_message_to_session(session_id, "assistant", response_text)
+
+    # Generate follow-up suggestions and action cards
+    user_role = user.get("role", "user")
+    follow_up_suggestions = _generate_follow_up_suggestions(intent, context_data, user_role)
+    action_cards = _generate_action_cards(intent, context_data, user_role)
+
+    # Persist messages and update summary in background
+    background_tasks.add_task(
+        _persist_message,
+        session_id,
+        "user",
+        body.message,
+        intent=intent,
+    )
+    background_tasks.add_task(
+        _persist_message,
+        session_id,
+        "assistant",
+        response_text,
+        intent=intent,
+        context_data=context_data,
+        follow_up_suggestions=follow_up_suggestions,
+        action_cards=action_cards,
+    )
+
+    # Update conversation summary in background if enough messages
+    if len(history) >= 6:
+        background_tasks.add_task(_update_conversation_summary, session_id, history)
 
     return ChatResponse(
         message=response_text,
         session_id=session_id,
         intent=intent,
         context_data=context_data,
+        follow_up_suggestions=follow_up_suggestions,
+        action_cards=action_cards,
     )
+
+
+# ── Streaming Chat Endpoint ────────────────────────────────────────────────────
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    body: ChatRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Streaming chat endpoint — returns SSE events for real-time responses.
+
+    Event types:
+      - meta: Intent classification and session info
+      - token: Individual response tokens (for LLM-generated responses)
+      - context_data: Structured data used for the response
+      - follow_up: Follow-up suggestion chips
+      - action_cards: Actionable cards with confirm buttons
+      - done: Stream complete with final metadata
+    """
+    logger.info(
+        "Chat stream request user=%s session=%s: %.80s...",
+        user.get("id", "?"),
+        body.session_id or "new",
+        body.message,
+    )
+
+    # Merge frontend hints
+    if body.user_context:
+        if body.user_context.role and not user.get("role"):
+            user["role"] = body.user_context.role
+        if body.user_context.name:
+            user["name"] = body.user_context.name
+
+    session_id = body.session_id or str(uuid.uuid4())
+
+    async def event_generator():
+        try:
+            # Persist session
+            await _persist_session(session_id, user)
+
+            # Load history
+            history = await _get_session_history_from_db(session_id)
+            if not history:
+                _, session_data = _get_or_create_session(session_id)
+                history = session_data.get("messages", [])
+
+            conversation_summary = await _get_conversation_summary_from_db(session_id)
+
+            _add_message_to_session(session_id, "user", body.message)
+
+            # Classify intent
+            intent = _classify_intent(body.message)
+
+            # Emit metadata
+            yield f"data: {json.dumps({'type': 'meta', 'intent': intent, 'session_id': session_id})}\n\n"
+
+            # Pull context
+            disaster_id = body.context.disaster_id if body.context else None
+            context = await _get_full_context(user, disaster_id, intent=intent)
+
+            # Route to handler
+            response_text = ""
+            context_data: dict | None = None
+
+            # Check if this intent should use streaming LLM
+            general_intents = {"general", "causal", "multi_agent"}
+            if intent in general_intents:
+                # Stream the LLM response
+                user_info = {
+                    "role": user.get("role"),
+                    "name": user.get("name"),
+                    "user_requests": context.get("user_requests", []),
+                }
+                system_prompt = _format_context_as_system_prompt(context, user_info)
+
+                try:
+                    from groq import Groq
+
+                    api_key = os.environ.get("GROQ_API_KEY")
+                    model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+                    if api_key:
+                        client = Groq(api_key=api_key)
+
+                        messages = []
+                        if conversation_summary:
+                            messages.append({"role": "system", "content": f"[Previous conversation summary]: {conversation_summary}"})
+                        for msg in history[-6:]:
+                            if msg.get("role") in ("user", "assistant") and msg.get("content"):
+                                messages.append({"role": msg["role"], "content": msg["content"]})
+                        messages.append({"role": "user", "content": body.message})
+
+                        def _stream():
+                            return client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    *messages,
+                                ],
+                                max_tokens=1024,
+                                temperature=0.35,
+                                stream=True,
+                            )
+
+                        loop = asyncio.get_event_loop()
+                        stream = await loop.run_in_executor(None, _stream)
+
+                        import queue
+                        import threading
+
+                        q: queue.Queue = queue.Queue()
+                        sentinel = object()
+
+                        def _run():
+                            try:
+                                for chunk in stream:
+                                    if chunk.choices and chunk.choices[0].delta.content:
+                                        q.put(chunk.choices[0].delta.content)
+                            except Exception as exc:
+                                q.put(exc)
+                            finally:
+                                q.put(sentinel)
+
+                        thread = threading.Thread(target=_run, daemon=True)
+                        thread.start()
+
+                        while True:
+                            item = await loop.run_in_executor(None, q.get)
+                            if item is sentinel:
+                                break
+                            if isinstance(item, Exception):
+                                raise item
+                            response_text += item
+                            yield f"data: {json.dumps({'type': 'token', 'data': item})}\n\n"
+
+                        context_data = {"type": "general", "llm": "groq", "model": model}
+                    else:
+                        # Fallback to non-streaming
+                        response_text, context_data = await _handle_general_intent(
+                            body.message, context, history, user_info, conversation_summary
+                        )
+                        # Stream word by word
+                        for word in response_text.split(" "):
+                            yield f"data: {json.dumps({'type': 'token', 'data': word + ' '})}\n\n"
+                            await asyncio.sleep(0.02)
+                except Exception as exc:
+                    logger.error("Streaming LLM failed: %s", exc)
+                    response_text, context_data = await _handle_general_intent(
+                        body.message, context, history, user_info, conversation_summary
+                    )
+                    for word in response_text.split(" "):
+                        yield f"data: {json.dumps({'type': 'token', 'data': word + ' '})}\n\n"
+                        await asyncio.sleep(0.02)
+            else:
+                # Use structured handler (non-streaming, but fast)
+                handler_map = {
+                    "user_requests": _handle_user_requests_intent,
+                    "low_stock": _handle_low_stock_intent,
+                    "resource_requests": _handle_resource_requests_intent,
+                    "available_resources": _handle_available_resources_intent,
+                    "disaster_status": _handle_disaster_status_intent,
+                    "anomalies": _handle_anomalies_intent,
+                    "briefing": _handle_briefing_intent,
+                    "supply_demand_gap": _handle_supply_demand_gap_intent,
+                    "request_lifecycle": _handle_request_lifecycle_intent,
+                    "chatbot_activity": _handle_chatbot_activity_intent,
+                    "activity_heatmap": _handle_activity_heatmap_intent,
+                    "engagement": _handle_engagement_intent,
+                    "registration_trends": _handle_registration_trends_intent,
+                    "request_pipeline": _handle_request_pipeline_intent,
+                    "trends": _handle_trends_intent,
+                    "geographic": _handle_geographic_intent,
+                    "disaster_comparison": _handle_disaster_comparison_intent,
+                    "responder_performance": _handle_responder_performance_intent,
+                    "digest": _handle_digest_intent,
+                    "users_overview": lambda ctx: _handle_users_overview_intent(ctx, user),
+                }
+                
+                # Causal handler for streaming
+                async def _handle_causal_stream(ctx):
+                    return await _handle_causal_intent(body.message, ctx)
+                
+                handler_map["causal"] = _handle_causal_stream
+
+                if intent in handler_map:
+                    handler = handler_map[intent]
+                    if intent == "users_overview":
+                        response_text, context_data = handler(context)
+                    else:
+                        response_text, context_data = await handler(context)
+                elif intent == "allocate_resources":
+                    response_text, context_data = await _handle_allocate_resources_intent(body.message, context)
+                elif intent == "generate_report":
+                    response_text, context_data = await _handle_generate_report_intent(context)
+                else:
+                    response_text, context_data = await _handle_general_intent(
+                        body.message, context, history,
+                        {"role": user.get("role"), "name": user.get("name")},
+                        conversation_summary,
+                    )
+
+                # Stream word by word
+                for word in response_text.split(" "):
+                    yield f"data: {json.dumps({'type': 'token', 'data': word + ' '})}\n\n"
+                    await asyncio.sleep(0.015)
+
+            _add_message_to_session(session_id, "assistant", response_text)
+
+            # Emit context data
+            if context_data:
+                yield f"data: {json.dumps({'type': 'context_data', 'data': context_data})}\n\n"
+
+            # Generate and emit follow-up suggestions
+            user_role = user.get("role", "user")
+            follow_up_suggestions = _generate_follow_up_suggestions(intent, context_data, user_role)
+            if follow_up_suggestions:
+                yield f"data: {json.dumps({'type': 'follow_up', 'suggestions': follow_up_suggestions})}\n\n"
+
+            # Generate and emit action cards
+            action_cards = _generate_action_cards(intent, context_data, user_role)
+            if action_cards:
+                yield f"data: {json.dumps({'type': 'action_cards', 'cards': action_cards})}\n\n"
+
+            # Persist in background
+            background_tasks.add_task(_persist_message, session_id, "user", body.message, intent=intent)
+            background_tasks.add_task(
+                _persist_message, session_id, "assistant", response_text,
+                intent=intent, context_data=context_data,
+                follow_up_suggestions=follow_up_suggestions, action_cards=action_cards,
+            )
+
+            # Done
+            yield f"data: {json.dumps({'type': 'done', 'intent': intent, 'session_id': session_id})}\n\n"
+
+        except Exception as exc:
+            logger.error("Chat stream error: %s", exc, exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'data': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Action Execution Endpoint ──────────────────────────────────────────────────
+
+
+@router.post("/actions/execute", response_model=ActionExecuteResponse)
+async def execute_action(
+    body: ActionExecuteRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Execute an action suggested by DisasterGPT.
+    Supports: resource allocation, report generation, alert acknowledgment, etc.
+    """
+    user_role = user.get("role", "")
+    if user_role not in ("admin", "coordinator", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only admins and coordinators can execute actions")
+
+    logger.info("Action execution user=%s type=%s: %s", user.get("id"), body.action_type, body.action_payload)
+
+    try:
+        result = {}
+        success = True
+        message = ""
+
+        if body.action_type == "allocate_resources":
+            # Call the resource allocation endpoint
+            disaster_id = body.action_payload.get("disaster_id")
+            resource_type = body.action_payload.get("resource_type")
+            quantity = body.action_payload.get("quantity_needed", 0)
+
+            if not disaster_id or not resource_type:
+                raise HTTPException(status_code=400, detail="disaster_id and resource_type are required")
+
+            # Find available resources
+            avail_resp = await db.table("resources").select(
+                "id,quantity"
+            ).eq("type", resource_type).eq("status", "available").gte("quantity", quantity).limit(1).async_execute()
+
+            if avail_resp.data:
+                resource = avail_resp.data[0]
+                # Allocate the resource
+                await db.table("resources").update({
+                    "status": "allocated",
+                    "allocated_to": disaster_id,
+                }).eq("id", resource["id"]).async_execute()
+
+                result = {"resource_id": resource["id"], "allocated_quantity": quantity, "disaster_id": disaster_id}
+                message = f"Successfully allocated {quantity} units of {resource_type} to disaster {disaster_id}"
+            else:
+                success = False
+                message = f"No available {resource_type} with sufficient quantity ({quantity}) found"
+                result = {"available": False, "resource_type": resource_type}
+
+        elif body.action_type == "generate_sitrep":
+            disaster_id = body.action_payload.get("disaster_id")
+            # Trigger sitrep generation
+            from app.services.sitrep_service import generate_sitrep
+
+            report = await generate_sitrep(disaster_id=disaster_id)
+            result = {"report": report}
+            message = "Situation report generated successfully"
+
+        elif body.action_type == "acknowledge_alert":
+            alert_id = body.action_payload.get("alert_id")
+            if alert_id:
+                await db.table("anomaly_alerts").update({
+                    "status": "acknowledged",
+                    "acknowledged_by": user.get("id"),
+                    "acknowledged_at": datetime.now(UTC).isoformat(),
+                }).eq("id", alert_id).async_execute()
+                result = {"alert_id": alert_id, "status": "acknowledged"}
+                message = f"Alert {alert_id} acknowledged"
+            else:
+                success = False
+                message = "alert_id is required"
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown action type: {body.action_type}")
+
+        # Log the action
+        try:
+            await db_admin.table("disastergpt_action_log").insert({
+                "session_id": body.session_id,
+                "user_id": user.get("id", "unknown"),
+                "action_type": body.action_type,
+                "action_payload": body.action_payload,
+                "result_status": "success" if success else "failed",
+                "result_data": result,
+            }).async_execute()
+        except Exception as exc:
+            logger.warning("Failed to log action: %s", exc)
+
+        return ActionExecuteResponse(
+            success=success,
+            action_type=body.action_type,
+            result=result,
+            message=message,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Action execution failed: %s", exc, exc_info=True)
+
+        # Log failed action
+        try:
+            await db_admin.table("disastergpt_action_log").insert({
+                "session_id": body.session_id,
+                "user_id": user.get("id", "unknown"),
+                "action_type": body.action_type,
+                "action_payload": body.action_payload,
+                "result_status": "failed",
+                "result_data": {"error": str(exc)},
+            }).async_execute()
+        except Exception:
+            pass
+
+        raise HTTPException(status_code=500, detail=f"Action execution failed: {exc}")
+
+
+# ── Digest Subscription Endpoints ──────────────────────────────────────────────
+
+
+@router.post("/digest/subscribe", response_model=DigestSubscribeResponse)
+async def subscribe_digest(
+    body: DigestSubscribeRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Subscribe to daily auto-digest briefings."""
+    try:
+        user_id = user.get("id", "unknown")
+        user_role = user.get("role", "unknown")
+
+        # Upsert subscription
+        existing = (
+            await db_admin.table("disastergpt_digest_subscriptions")
+            .select("user_id")
+            .eq("user_id", user_id)
+            .maybe_single()
+            .async_execute()
+        )
+
+        if existing.data:
+            await db_admin.table("disastergpt_digest_subscriptions").update({
+                "digest_time": body.digest_time,
+                "timezone": body.timezone,
+                "enabled": True,
+            }).eq("user_id", user_id).async_execute()
+        else:
+            await db_admin.table("disastergpt_digest_subscriptions").insert({
+                "user_id": user_id,
+                "user_role": user_role,
+                "digest_time": body.digest_time,
+                "timezone": body.timezone,
+                "enabled": True,
+            }).async_execute()
+
+        # Calculate next digest time
+        from datetime import time as _time
+
+        hour, minute = map(int, body.digest_time.split(":"))
+        now = datetime.now(UTC)
+        next_digest = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if next_digest <= now:
+            next_digest += timedelta(days=1)
+
+        return DigestSubscribeResponse(
+            success=True,
+            message=f"Subscribed to daily digest at {body.digest_time} {body.timezone}",
+            next_digest_at=next_digest.isoformat(),
+        )
+    except Exception as exc:
+        logger.error("Digest subscription failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to subscribe: {exc}")
+
+
+@router.delete("/digest/unsubscribe")
+async def unsubscribe_digest(
+    user: dict = Depends(get_current_user),
+):
+    """Unsubscribe from daily auto-digest briefings."""
+    try:
+        user_id = user.get("id")
+        await db_admin.table("disastergpt_digest_subscriptions").update({
+            "enabled": False,
+        }).eq("user_id", user_id).async_execute()
+        return {"success": True, "message": "Unsubscribed from daily digest"}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to unsubscribe: {exc}")
+
+
+@router.get("/digest/history")
+async def get_digest_history(
+    limit: int = 10,
+    user: dict = Depends(get_current_user),
+):
+    """Get past digest history."""
+    try:
+        user_id = user.get("id")
+        resp = (
+            await db_admin.table("disastergpt_digest_log")
+            .select("id, digest_content, sent_at")
+            .eq("user_id", user_id)
+            .order("sent_at", desc=True)
+            .limit(limit)
+            .async_execute()
+        )
+        return resp.data or []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch digest history: {exc}")
+
+
+# ── Scheduled Digest Runner (called by cron or background task) ────────────────
+
+
+@router.post("/digest/run")
+async def run_scheduled_digests(
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_role("admin")),
+):
+    """
+    Trigger scheduled digest generation for all subscribed users.
+    This should be called by a cron job at the configured digest times.
+    """
+    logger.info("Running scheduled digests triggered by admin=%s", user.get("id"))
+
+    try:
+        resp = (
+            await db_admin.table("disastergpt_digest_subscriptions")
+            .select("user_id, user_role, digest_time, timezone")
+            .eq("enabled", True)
+            .async_execute()
+        )
+        subscriptions = resp.data or []
+
+        if not subscriptions:
+            return {"message": "No active digest subscriptions", "count": 0}
+
+        # Generate digests in background
+        for sub in subscriptions:
+            background_tasks.add_task(_generate_and_send_digest, sub)
+
+        return {"message": f"Queued {len(subscriptions)} digest generations", "count": len(subscriptions)}
+    except Exception as exc:
+        logger.error("Failed to run scheduled digests: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to run digests: {exc}")
+
+
+async def _generate_and_send_digest(subscription: dict):
+    """Generate a digest for a single user and store it."""
+    user_id = subscription.get("user_id")
+    user_role = subscription.get("user_role", "user")
+
+    try:
+        # Build a fake user dict for context pulling
+        user = {"id": user_id, "role": user_role}
+
+        # Pull full context
+        context = await _get_full_context(user, intent="digest")
+
+        # Generate digest
+        digest_text, _ = await _handle_digest_intent(context)
+
+        # Store in digest log
+        await db_admin.table("disastergpt_digest_log").insert({
+            "user_id": user_id,
+            "digest_content": digest_text,
+        }).async_execute()
+
+        # Update last_sent_at
+        await db_admin.table("disastergpt_digest_subscriptions").update({
+            "last_sent_at": datetime.now(UTC).isoformat(),
+        }).eq("user_id", user_id).async_execute()
+
+        logger.info("Generated digest for user=%s", user_id)
+    except Exception as exc:
+        logger.error("Failed to generate digest for user=%s: %s", user_id, exc)
+
+
+# ── Proactive Anomaly Alert Endpoint ───────────────────────────────────────────
+
+
+@router.get("/alerts/proactive")
+async def get_proactive_alerts(
+    user: dict = Depends(get_current_user),
+):
+    """
+    Get proactive anomaly-based insights.
+    Analyzes current data for anomalies and returns actionable alerts.
+    """
+    try:
+        context = await _get_full_context(user, intent="briefing")
+        alerts = context.get("active_alerts", [])
+
+        # Also check for data-driven anomalies
+        proactive_insights = []
+
+        # Check supply-demand gaps
+        gaps = context.get("supply_demand_gaps") or {}
+        critical = gaps.get("critical_shortages", [])
+        for gap in critical[:3]:
+            proactive_insights.append({
+                "type": "supply_shortage",
+                "severity": "critical",
+                "title": f"Critical shortage: {gap['type']}",
+                "description": f"Only {gap['coverage_pct']}% coverage — {gap['demand']} demanded vs {gap['supply']} available",
+                "action_suggestion": f"Allocate {gap['demand'] - gap['supply']} units of {gap['type']}",
+            })
+
+        # Check stale requests
+        lifecycle = context.get("request_lifecycle") or {}
+        stale_count = lifecycle.get("stale_count", 0)
+        if stale_count > 0:
+            proactive_insights.append({
+                "type": "stale_requests",
+                "severity": "high" if stale_count > 5 else "medium",
+                "title": f"{stale_count} requests pending > 48 hours",
+                "description": "These requests need immediate attention to avoid escalation",
+                "action_suggestion": "Review and prioritize stale requests",
+            })
+
+        # Check chatbot abandonment
+        chatbot = context.get("chatbot_intake_activity") or {}
+        abandon_rate = chatbot.get("abandonment_rate", 0)
+        if abandon_rate > 30:
+            proactive_insights.append({
+                "type": "high_abandonment",
+                "severity": "medium",
+                "title": f"High chatbot abandonment rate: {abandon_rate}%",
+                "description": "Victims are abandoning the intake process — consider simplifying the flow",
+                "action_suggestion": "Review chatbot UX and reduce friction",
+            })
+
+        # Check low-engagement roles
+        engagement = context.get("engagement_summary") or {}
+        if engagement.get("active_volunteers_30d", 0) == 0:
+            proactive_insights.append({
+                "type": "zero_volunteer_activity",
+                "severity": "medium",
+                "title": "No active volunteers in the last 30 days",
+                "description": "Volunteer engagement has dropped to zero — consider outreach campaigns",
+                "action_suggestion": "Send volunteer engagement notifications",
+            })
+
+        return {
+            "system_alerts": alerts,
+            "proactive_insights": proactive_insights,
+            "total_alerts": len(alerts) + len(proactive_insights),
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+    except Exception as exc:
+        logger.error("Failed to get proactive alerts: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to get proactive alerts: {exc}")
+
+
+# ── Session Management Endpoints ───────────────────────────────────────────────
 
 
 @router.get("/sessions/{session_id}", response_model=SessionHistoryResponse)
@@ -1752,16 +3748,24 @@ async def get_session_history(
     session_id: str = Path(..., description="Session ID to retrieve history for"),
     user: dict = Depends(get_current_user),
 ):
-    """
-    Retrieve conversation history for a specific session.
-    Returns the last 10 messages.
-    """
+    """Retrieve conversation history for a specific session (from DB)."""
+    # Try DB first
+    db_history = await _get_session_history_from_db(session_id, limit=50)
+    if db_history:
+        return SessionHistoryResponse(
+            session_id=session_id,
+            messages=[ChatMessage(**m) for m in db_history],
+            created_at=db_history[0].get("timestamp", "") if db_history else "",
+            message_count=len(db_history),
+        )
+
+    # Fall back to in-memory
     if session_id not in _chat_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     session = _chat_sessions[session_id]
     messages = session.get("messages", [])
-    
+
     return SessionHistoryResponse(
         session_id=session_id,
         messages=[ChatMessage(**m) for m in messages],
@@ -1775,12 +3779,16 @@ async def delete_session(
     session_id: str = Path(..., description="Session ID to delete"),
     user: dict = Depends(get_current_user),
 ):
-    """
-    Clear/delete a conversation session.
-    """
-    if session_id not in _chat_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    del _chat_sessions[session_id]
-    
+    """Clear/delete a conversation session (from DB and in-memory)."""
+    # Delete from DB
+    try:
+        await db_admin.table("disastergpt_messages").delete().eq("session_id", session_id).async_execute()
+        await db_admin.table("disastergpt_sessions").delete().eq("session_id", session_id).async_execute()
+    except Exception as exc:
+        logger.warning("Failed to delete session from DB: %s", exc)
+
+    # Delete from in-memory
+    if session_id in _chat_sessions:
+        del _chat_sessions[session_id]
+
     return {"message": f"Session {session_id} deleted successfully", "session_id": session_id}
