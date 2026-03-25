@@ -319,30 +319,19 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
                                                 >
                                                     <option value="">Select resource…</option>
 
-                                                    {/* Standard disaster-related resource types */}
-                                                    <optgroup label="🍞 Food">
-                                                        <option value="Food">Food (General)</option>
-                                                    </optgroup>
-                                                    <optgroup label="💧 Water">
-                                                        <option value="Water">Water (General)</option>
-                                                    </optgroup>
-                                                    <optgroup label="🏥 Medical">
-                                                        <option value="Medical">Medical Supplies</option>
-                                                    </optgroup>
-                                                    <optgroup label="🏠 Shelter">
-                                                        <option value="Shelter">Shelter / Housing</option>
-                                                    </optgroup>
-                                                    <optgroup label="👕 Clothing">
-                                                        <option value="Clothing">Clothing</option>
-                                                    </optgroup>
-                                                    <optgroup label="💰 Financial">
-                                                        <option value="Financial Aid">Financial Aid</option>
-                                                    </optgroup>
-                                                    <optgroup label="🚨 Emergency">
-                                                        <option value="Evacuation">Evacuation Assistance</option>
+                                                    {/* ── Predefined resource types ── */}
+                                                    <optgroup label="Standard Resources">
+                                                        <option value="Food">🍞 Food</option>
+                                                        <option value="Water">💧 Water</option>
+                                                        <option value="Medical">🏥 Medical Supplies</option>
+                                                        <option value="Shelter">🏠 Shelter / Housing</option>
+                                                        <option value="Clothing">👕 Clothing</option>
+                                                        <option value="Financial Aid">💰 Financial Aid</option>
+                                                        <option value="Evacuation">🚨 Evacuation Assistance</option>
+                                                        <option value="Volunteers">🙋 Volunteers</option>
                                                     </optgroup>
 
-                                                    {/* DB available resources grouped by category */}
+                                                    {/* ── DB available resources (in‑stock items) ── */}
                                                     {Object.entries(resourcesByCategory).map(([category, resources]) => (
                                                         <optgroup key={`db-${category}`} label={`${CATEGORY_EMOJI[category] || '📦'} ${category} (In Stock)`}>
                                                             {resources.map((r) => (
@@ -353,29 +342,31 @@ export function ResourceRequestForm({ editRequest }: { editRequest?: ResourceReq
                                                         </optgroup>
                                                     ))}
 
-                                                    {/* Allow custom + volunteers */}
-                                                    <optgroup label="🙋 Other">
-                                                        <option value="Volunteers">🙋 Volunteers</option>
-                                                        <option value="Custom">📦 Custom Resource</option>
+                                                    {/* ── Custom / manually typed resource ── */}
+                                                    <optgroup label="Other">
+                                                        <option value="Custom">📦 Custom Resource (type your own)</option>
                                                     </optgroup>
                                                 </select>
                                                 <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
                                             </div>
                                         </div>
 
-                                        {/* Custom name */}
+                                        {/* Custom resource name — visible when user picks "Custom" */}
                                         {item.resource_type === 'Custom' && (
                                             <div className="flex-1">
                                                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">
-                                                    Custom Resource Name
+                                                    Custom Resource Name <span className="text-red-500">*</span>
                                                 </label>
                                                 <input
                                                     type="text"
                                                     value={item.custom_name}
                                                     onChange={(e) => updateItem(item.id, 'custom_name', e.target.value)}
-                                                    placeholder="e.g. Baby formula, Wheelchair…"
+                                                    placeholder="e.g. Baby formula, Wheelchair, Diapers…"
                                                     className="w-full px-3 py-2.5 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-slate-900 dark:text-white text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-red-500/30 focus:border-red-500/50"
                                                 />
+                                                <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">
+                                                    Type the name of any resource not listed above
+                                                </p>
                                             </div>
                                         )}
 
