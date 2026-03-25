@@ -21,6 +21,7 @@ import ScheduleSitrepButton from '@/components/admin/ScheduleSitrepButton'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary'
+import HotspotPanel from '@/components/coordinator/HotspotPanel'
 
 const mdComponents = {
     table: (props: any) => (
@@ -1086,115 +1087,9 @@ export default function AdminCoordinatorPage() {
 
             {/* Hotspots Tab */}
             {activeTab === 'hotspots' && (
-                <div className="space-y-4">
-                    <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
-                        <ErrorBoundary>
-                            <div className="flex items-center gap-2 mb-1">
-                                <MapPin className="w-5 h-5 text-red-500" />
-                                <h3 className="text-sm font-bold text-slate-900 dark:text-white">Hotspot Clusters</h3>
-                            </div>
-                            <p className="text-xs text-slate-500 mb-4">
-                                DBSCAN-based spatial clustering of disaster events. Each cluster represents a geographic hotspot.
-                            </p>
-                            {hotspotsLoading ? (
-                                <div className="py-8 text-center">
-                                    <Loader2 className="w-6 h-6 animate-spin text-red-500 mx-auto mb-2" />
-                                    <p className="text-xs text-slate-500">Computing hotspot clusters...</p>
-                                </div>
-                            ) : hotspots && (() => {
-                                const raw = hotspots?.features
-                                    ? hotspots.features
-                                    : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
-                                return raw.length > 0
-                            })() ? (
-                                <div className="space-y-3">
-                                    {(() => {
-                                        const clusters = hotspots?.features
-                                            ? hotspots.features.map((f: any) => {
-                                                const p = f.properties || {}
-                                                const coords = p.centroid?.coordinates || f.geometry?.coordinates
-                                                return {
-                                                    cluster_id: p.id ?? p.cluster_id,
-                                                    priority: p.priority_label || p.priority || 'medium',
-                                                    event_count: p.request_count ?? p.event_count ?? p.size ?? 0,
-                                                    centroid: coords ? { lat: coords[1], lng: coords[0] } : null,
-                                                    radius_km: p.radius_km,
-                                                    avg_severity: p.avg_priority ?? p.avg_severity,
-                                                    dominant_type: p.dominant_type,
-                                                    total_people: p.total_people,
-                                                    detected_at: p.detected_at,
-                                                }
-                                            })
-                                            : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
-                                        return clusters
-                                    })().map((cluster: any, i: number) => (
-                                        <div key={cluster.cluster_id || i} className="rounded-xl border border-slate-100 dark:border-white/5 overflow-hidden">
-                                            <div className="px-4 py-3 bg-red-50/50 dark:bg-red-500/5 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-                                                <div className="flex items-center gap-2">
-                                                    <div className={cn(
-                                                        "w-3 h-3 rounded-full",
-                                                        cluster.priority === 'critical' ? 'bg-red-500' :
-                                                        cluster.priority === 'high' ? 'bg-orange-500' :
-                                                        cluster.priority === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
-                                                    )} />
-                                                    <span className="text-sm font-semibold text-slate-900 dark:text-white">
-                                                        Cluster #{cluster.cluster_id ?? i + 1}
-                                                    </span>
-                                                    {cluster.priority && (
-                                                        <span className={cn(
-                                                            "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase",
-                                                            cluster.priority === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400' :
-                                                            cluster.priority === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400' :
-                                                            'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/10 dark:text-yellow-400'
-                                                        )}>
-                                                            {cluster.priority}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <span className="text-xs text-slate-400">
-                                                    {cluster.event_count || cluster.size || '?'} events
-                                                </span>
-                                            </div>
-                                            <div className="px-4 py-3 grid grid-cols-2 md:grid-cols-4 gap-3">
-                                                {cluster.centroid && (
-                                                    <div>
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Centroid</p>
-                                                        <p className="text-xs text-slate-700 dark:text-slate-300">
-                                                            {cluster.centroid.lat?.toFixed(4)}, {cluster.centroid.lng?.toFixed(4)}
-                                                        </p>
-                                                    </div>
-                                                )}
-                                                {cluster.radius_km !== undefined && (
-                                                    <div>
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Radius</p>
-                                                        <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.radius_km?.toFixed(1)} km</p>
-                                                    </div>
-                                                )}
-                                                {cluster.avg_severity !== undefined && (
-                                                    <div>
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Avg Severity</p>
-                                                        <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.avg_severity?.toFixed(2)}</p>
-                                                    </div>
-                                                )}
-                                                {cluster.dominant_type && (
-                                                    <div>
-                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Type</p>
-                                                        <p className="text-xs text-slate-700 dark:text-slate-300">{cluster.dominant_type}</p>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            ) : (
-                                <div className="py-8 text-center text-slate-400">
-                                    <MapPin className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                    <p className="text-sm">No hotspot clusters detected. Ensure disaster data is seeded.</p>
-                                </div>
-                            )}
-                        </ErrorBoundary>
-                    </div>
-                </div>
+                <ErrorBoundary>
+                    <HotspotPanel selectedDisasterId={null} />
+                </ErrorBoundary>
             )}
 
             {/* Severity Forecast Tab */}

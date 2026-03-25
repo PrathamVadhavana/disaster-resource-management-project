@@ -503,6 +503,21 @@ export const api = {
     getHotspotDetail: (clusterId: string) =>
         apiFetch(`/api/hotspots/${clusterId}`),
 
+    triggerClustering: () =>
+        apiFetch('/api/hotspots/trigger', { method: 'POST' }),
+
+    updateHotspotStatus: (clusterId: string, status: string) =>
+        apiFetch(`/api/hotspots/${clusterId}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+
+    assignHotspotResources: (clusterId: string, data: { resource_type: string; quantity: number; assigned_to?: string; notes?: string }) =>
+        apiFetch(`/api/hotspots/${clusterId}/assign`, { method: 'POST', body: JSON.stringify(data) }),
+
+    sendHotspotAlert: (clusterId: string, data: { channel?: string; recipient_role?: string; subject?: string; body?: string; severity?: string }) =>
+        apiFetch(`/api/hotspots/${clusterId}/alert`, { method: 'POST', body: JSON.stringify(data) }),
+
+    getHotspotInsights: (clusterId: string) =>
+        apiFetch(`/api/hotspots/${clusterId}/insights`),
+
     // ━━ Causal AI ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     runCounterfactual: (data: { disaster_id: string; intervention: { variable: string; new_value: number }; outcome_variable?: string }) =>
         apiFetch('/api/causal/counterfactual', { method: 'POST', body: JSON.stringify(data) }),
