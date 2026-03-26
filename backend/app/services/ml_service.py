@@ -20,7 +20,12 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingRegressor
-from sklearn.metrics import classification_report, f1_score, r2_score, mean_absolute_error
+from sklearn.metrics import (
+    classification_report,
+    f1_score,
+    r2_score,
+    mean_absolute_error,
+)
 from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import cross_val_predict
 from sklearn.multioutput import MultiOutputRegressor
@@ -148,8 +153,12 @@ class MLService:
         # Spread (median + quantile bounds)
         if spr_path.exists():
             self.models["spread"] = joblib.load(spr_path)
-            self.models["spread_lower"] = joblib.load(spr_lo) if spr_lo.exists() else None
-            self.models["spread_upper"] = joblib.load(spr_hi) if spr_hi.exists() else None
+            self.models["spread_lower"] = (
+                joblib.load(spr_lo) if spr_lo.exists() else None
+            )
+            self.models["spread_upper"] = (
+                joblib.load(spr_hi) if spr_hi.exists() else None
+            )
             meta = self.model_dir / "spread_metadata.json"
             if meta.exists():
                 with open(meta) as f:
@@ -228,7 +237,9 @@ class MLService:
 
     def _build_impact_features(self, features: dict[str, Any]) -> pd.DataFrame:
         sev = float(features.get("severity_score", 0.5))
-        pop = float(features.get("affected_population", features.get("population", 10000)))
+        pop = float(
+            features.get("affected_population", features.get("population", 10000))
+        )
         gdp = float(features.get("gdp_per_capita", 10000))
         infra = float(features.get("infrastructure_density", 0.5))
         dtype = features.get("disaster_type", "other")
@@ -256,8 +267,81 @@ class MLService:
     def _clip01(value: float) -> float:
         return max(0.0, min(1.0, float(value)))
 
-    def _record_prediction_event(self, prediction_type: str, model_version: str, confidence: float) -> None:
-        safe_type = prediction_type if prediction_type in self.prediction_telemetry["by_type"] else "severity"
+    @staticmethod
+    def _severity_index(level: str) -> int:
+        try:
+            return SEVERITY_ORDER.index(level)
+        except ValueError:
+            return 0
+
+    def _apply_severity_guardrail(
+        self, predicted: str, features: dict[str, Any]
+    ) -> str:
+        """Prevent implausibly low severity under extreme hazard conditions."""
+
+        def _safe_float(value: Any, default: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        dtype = str(features.get("disaster_type", "other")).lower()
+        wind = _safe_float(features.get("wind_speed", 0), 0.0)
+        temp = _safe_float(features.get("temperature", 25), 25.0)
+        hum = _safe_float(features.get("humidity", 60), 60.0)
+        pres = _safe_float(features.get("pressure", 1013.25), 1013.25)
+
+        floor = "low"
+
+        if wind >= 200:
+            floor = "critical"
+        elif wind >= 120:
+            floor = "high"
+        elif wind >= 70:
+            floor = "medium"
+
+        if pres <= 960:
+            floor = "critical"
+        elif pres <= 985 and self._severity_index(floor) < self._severity_index("high"):
+            floor = "high"
+
+        if dtype == "wildfire":
+            if temp >= 42 and hum <= 30:
+                floor = "critical"
+            elif (
+                temp >= 35
+                and hum <= 40
+                and self._severity_index(floor) < self._severity_index("high")
+            ):
+                floor = "high"
+
+        if dtype in {"hurricane", "cyclone"} and self._severity_index(
+            floor
+        ) < self._severity_index("high"):
+            floor = "high"
+
+        if (
+            dtype == "flood"
+            and hum >= 85
+            and wind >= 60
+            and self._severity_index(floor) < self._severity_index("high")
+        ):
+            floor = "high"
+
+        return (
+            floor
+            if self._severity_index(predicted) < self._severity_index(floor)
+            else predicted
+        )
+
+    def _record_prediction_event(
+        self, prediction_type: str, model_version: str, confidence: float
+    ) -> None:
+        safe_type = (
+            prediction_type
+            if prediction_type in self.prediction_telemetry["by_type"]
+            else "severity"
+        )
         model_version_norm = str(model_version or "unknown")
         is_fallback = "fallback" in model_version_norm.lower()
 
@@ -275,10 +359,13 @@ class MLService:
             "confidence_score": round(self._clip01(confidence), 4),
         }
         self.prediction_telemetry["recent_events"].append(event)
-        if len(self.prediction_telemetry["recent_events"]) > self._telemetry_window_size:
-            self.prediction_telemetry["recent_events"] = self.prediction_telemetry["recent_events"][
-                -self._telemetry_window_size :
-            ]
+        if (
+            len(self.prediction_telemetry["recent_events"])
+            > self._telemetry_window_size
+        ):
+            self.prediction_telemetry["recent_events"] = self.prediction_telemetry[
+                "recent_events"
+            ][-self._telemetry_window_size :]
 
         self.prediction_telemetry["last_updated"] = event["timestamp"]
 
@@ -329,7 +416,9 @@ class MLService:
 
     def get_fallback_alerts(self) -> dict[str, Any]:
         snapshot = self.get_fallback_governance_snapshot()
-        threshold = snapshot.get("threshold", {}).get("fallback_alert_rate", self.fallback_alert_rate)
+        threshold = snapshot.get("threshold", {}).get(
+            "fallback_alert_rate", self.fallback_alert_rate
+        )
         recent_window = snapshot.get("recent_window", {})
 
         alerts: list[dict[str, Any]] = []
@@ -345,7 +434,7 @@ class MLService:
                 }
             )
 
-        by_type = (recent_window.get("by_type") or {})
+        by_type = recent_window.get("by_type") or {}
         for ptype, stats in by_type.items():
             if stats.get("alert"):
                 alerts.append(
@@ -368,7 +457,9 @@ class MLService:
             "snapshot": snapshot,
         }
 
-    def _calibrate_classification_confidence(self, raw_confidence: float, margin: float | None = None) -> float:
+    def _calibrate_classification_confidence(
+        self, raw_confidence: float, margin: float | None = None
+    ) -> float:
         conf = self._clip01(raw_confidence)
         margin_score = 0.0
         if margin is not None:
@@ -385,7 +476,9 @@ class MLService:
     ) -> float:
         confidence = self._clip01(base_confidence)
         if interval_width is not None and predicted_value > 0:
-            rel_width = abs(float(interval_width)) / max(abs(float(predicted_value)), 1.0)
+            rel_width = abs(float(interval_width)) / max(
+                abs(float(predicted_value)), 1.0
+            )
             interval_penalty = self._clip01(rel_width)
             confidence = self._clip01(confidence * (1 - 0.45 * interval_penalty))
 
@@ -455,6 +548,8 @@ class MLService:
             severity, confidence = self._fallback_severity(features)
             confidence = self._calibrate_classification_confidence(confidence)
 
+        severity = self._apply_severity_guardrail(severity, features)
+
         # Return legacy result with multi-horizon stub fields for compat
         confidence = self._clip01(confidence)
         result = {
@@ -469,7 +564,11 @@ class MLService:
             "confidence_band": self._confidence_band(confidence),
             "model_version": self.model_version,
         }
-        self._record_prediction_event("severity", str(result.get("model_version") or self.model_version), confidence)
+        self._record_prediction_event(
+            "severity",
+            str(result.get("model_version") or self.model_version),
+            confidence,
+        )
         return result
 
     async def predict_spread(self, features: dict[str, Any]) -> dict[str, Any]:
@@ -488,8 +587,14 @@ class MLService:
             if self.models.get("spread_upper") is not None:
                 upper = float(self.models["spread_upper"].predict(X)[0])
 
-            ci_width = (upper - lower) if (lower is not None and upper is not None) else None
-            confidence = max(0.0, min(1.0, 1 - (ci_width / max(predicted_area, 1)) * 0.5)) if ci_width else 0.7
+            ci_width = (
+                (upper - lower) if (lower is not None and upper is not None) else None
+            )
+            confidence = (
+                max(0.0, min(1.0, 1 - (ci_width / max(predicted_area, 1)) * 0.5))
+                if ci_width
+                else 0.7
+            )
             confidence = self._calibrate_regression_confidence(
                 model_key="spread",
                 base_confidence=confidence,
@@ -518,7 +623,9 @@ class MLService:
         if upper is not None:
             result["ci_upper_km2"] = round(upper, 2)
 
-        self._record_prediction_event("spread", str(result.get("model_version") or self.model_version), confidence)
+        self._record_prediction_event(
+            "spread", str(result.get("model_version") or self.model_version), confidence
+        )
 
         return result
 
@@ -560,7 +667,9 @@ class MLService:
             "confidence_band": self._confidence_band(confidence),
             "model_version": self.model_version,
         }
-        self._record_prediction_event("impact", str(result.get("model_version") or self.model_version), confidence)
+        self._record_prediction_event(
+            "impact", str(result.get("model_version") or self.model_version), confidence
+        )
         return result
 
     async def predict(
@@ -589,7 +698,8 @@ class MLService:
             "spread_loaded": self.models.get("spread") is not None,
             "impact_loaded": self.models.get("impact") is not None,
             "metadata": {
-                k: {kk: vv for kk, vv in v.items() if kk != "classification_report"} for k, v in self.metadata.items()
+                k: {kk: vv for kk, vv in v.items() if kk != "classification_report"}
+                for k, v in self.metadata.items()
             },
         }
 
@@ -597,17 +707,48 @@ class MLService:
 
     @staticmethod
     def _fallback_severity(features: dict[str, Any]):
-        temp = features.get("temperature", 25)
-        wind = features.get("wind_speed", 20)
-        hum = features.get("humidity", 60)
-        score = (temp * 0.3 + wind * 0.5 + hum * 0.2) / 100
-        if score > 0.75:
-            return "critical", 0.55
-        elif score > 0.5:
-            return "high", 0.50
-        elif score > 0.3:
-            return "medium", 0.45
-        return "low", 0.40
+        def _safe_float(value: Any, default: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        temp = _safe_float(features.get("temperature", 25), 25.0)
+        wind = _safe_float(features.get("wind_speed", 20), 20.0)
+        hum = _safe_float(features.get("humidity", 60), 60.0)
+        pres = _safe_float(features.get("pressure", 1013.25), 1013.25)
+        dtype = str(features.get("disaster_type", "other")).lower()
+
+        # Normalize core weather signals into 0..1 risk components.
+        temp_risk = max(0.0, min(1.0, (temp - 20.0) / 20.0))
+        wind_risk = max(0.0, min(1.0, wind / 80.0))
+        hum_risk = max(0.0, min(1.0, hum / 100.0))
+        pressure_risk = max(0.0, min(1.0, (1013.25 - pres) / 40.0))
+
+        type_bias = {
+            "hurricane": 0.22,
+            "cyclone": 0.20,
+            "wildfire": 0.18,
+            "earthquake": 0.16,
+            "flood": 0.12,
+            "other": 0.08,
+        }.get(dtype, 0.08)
+
+        score = (
+            temp_risk * 0.22
+            + wind_risk * 0.30
+            + hum_risk * 0.20
+            + pressure_risk * 0.16
+            + type_bias
+        )
+
+        if score >= 0.85:
+            return "critical", 0.58
+        if score >= 0.65:
+            return "high", 0.52
+        if score >= 0.45:
+            return "medium", 0.47
+        return "low", 0.42
 
     @staticmethod
     def _fallback_spread(features: dict[str, Any]):
@@ -649,7 +790,10 @@ class MLService:
         severity_result = await self._build_severity_training_data()
         if severity_result.get("skipped"):
             logger.warning("Severity model skipped — insufficient data (< 10 rows)")
-            results["severity"] = {"skipped": True, "reason": severity_result.get("reason")}
+            results["severity"] = {
+                "skipped": True,
+                "reason": severity_result.get("reason"),
+            }
         else:
             # Train and save
             train_result = await self._train_model_with_cv(
@@ -713,8 +857,13 @@ class MLService:
 
         demand_result = await self._build_demand_forecasting_data()
         if demand_result.get("skipped"):
-            logger.warning("Demand forecasting model skipped — insufficient data (< 10 rows)")
-            results["demand_forecasting"] = {"skipped": True, "reason": demand_result.get("reason")}
+            logger.warning(
+                "Demand forecasting model skipped — insufficient data (< 10 rows)"
+            )
+            results["demand_forecasting"] = {
+                "skipped": True,
+                "reason": demand_result.get("reason"),
+            }
         else:
             train_result = await self._train_model_with_cv(
                 X=demand_result["X"],
@@ -747,7 +896,9 @@ class MLService:
             # Query disasters with non-null severity and not predicted
             disasters_resp = (
                 await db_admin.table("disasters")
-                .select("id, type, severity, start_date, affected_population, casualties, location_id")
+                .select(
+                    "id, type, severity, start_date, affected_population, casualties, location_id"
+                )
                 .neq("status", "predicted")
                 .not_.is_("severity", None)
                 .execute()
@@ -756,7 +907,10 @@ class MLService:
             logger.info(f"Found {len(disasters)} disasters with severity data")
 
             if len(disasters) < 10:
-                return {"skipped": True, "reason": f"Only {len(disasters)} rows (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(disasters)} rows (minimum 10)",
+                }
 
             # Get location data
             location_ids = [d["location_id"] for d in disasters if d.get("location_id")]
@@ -768,7 +922,7 @@ class MLService:
                     .in_("id", location_ids)
                     .execute()
                 )
-                for loc in (loc_resp.data or []):
+                for loc in loc_resp.data or []:
                     locations[loc["id"]] = loc
 
             # Get outcome_tracking for ground truth
@@ -782,7 +936,7 @@ class MLService:
                     .in_("disaster_id", disaster_ids)
                     .execute()
                 )
-                for outcome in (outcomes_resp.data or []):
+                for outcome in outcomes_resp.data or []:
                     outcomes[outcome["disaster_id"]] = outcome
 
             # Build features
@@ -802,7 +956,11 @@ class MLService:
                 if start_date:
                     try:
                         if isinstance(start_date, str):
-                            month = int(start_date.split("-")[1]) if "-" in start_date else 1
+                            month = (
+                                int(start_date.split("-")[1])
+                                if "-" in start_date
+                                else 1
+                            )
                         else:
                             month = getattr(start_date, "month", 1)
                     except Exception:
@@ -813,15 +971,24 @@ class MLService:
                     "latitude": loc.get("latitude", 0) or 0,
                     "longitude": loc.get("longitude", 0) or 0,
                     "affected_population": d.get("affected_population", 0) or 0,
-                    "casualties": outcome.get("actual_casualties") or d.get("casualties", 0) or 0,
+                    "casualties": outcome.get("actual_casualties")
+                    or d.get("casualties", 0)
+                    or 0,
                     "month_of_year": month,
                 }
-                row["severity_label"] = SEVERITY_ORDER.index(severity.lower()) if severity.lower() in SEVERITY_ORDER else -1
+                row["severity_label"] = (
+                    SEVERITY_ORDER.index(severity.lower())
+                    if severity.lower() in SEVERITY_ORDER
+                    else -1
+                )
                 if row["severity_label"] >= 0:
                     rows.append(row)
 
             if len(rows) < 10:
-                return {"skipped": True, "reason": f"Only {len(rows)} valid rows after processing (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(rows)} valid rows after processing (minimum 10)",
+                }
 
             df = pd.DataFrame(rows)
 
@@ -830,13 +997,19 @@ class MLService:
                 df[f"dtype_{dt}"] = (df["disaster_type"] == dt).astype(float)
 
             feature_cols = [
-                "latitude", "longitude", "affected_population", "casualties", "month_of_year"
+                "latitude",
+                "longitude",
+                "affected_population",
+                "casualties",
+                "month_of_year",
             ] + [f"dtype_{dt}" for dt in DISASTER_TYPES]
 
             X = df[feature_cols].astype(float)
             y = df["severity_label"].astype(int)
 
-            logger.info(f"Severity training data: {len(X)} rows, {len(feature_cols)} features")
+            logger.info(
+                f"Severity training data: {len(X)} rows, {len(feature_cols)} features"
+            )
             return {"X": X, "y": y, "rows": len(rows)}
 
         except Exception as e:
@@ -858,7 +1031,9 @@ class MLService:
             # Query predictions of type spread
             preds_resp = (
                 await db_admin.table("predictions")
-                .select("id, disaster_id, features, metadata, affected_area_km, prediction_type")
+                .select(
+                    "id, disaster_id, features, metadata, affected_area_km, prediction_type"
+                )
                 .eq("prediction_type", "spread")
                 .execute()
             )
@@ -866,10 +1041,15 @@ class MLService:
             logger.info(f"Found {len(predictions)} spread predictions")
 
             if len(predictions) < 10:
-                return {"skipped": True, "reason": f"Only {len(predictions)} predictions (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(predictions)} predictions (minimum 10)",
+                }
 
             # Get disaster data for each prediction
-            disaster_ids = list(set([p["disaster_id"] for p in predictions if p.get("disaster_id")]))
+            disaster_ids = list(
+                set([p["disaster_id"] for p in predictions if p.get("disaster_id")])
+            )
             disasters = {}
             if disaster_ids:
                 disasters_resp = (
@@ -878,7 +1058,7 @@ class MLService:
                     .in_("id", disaster_ids)
                     .execute()
                 )
-                for d in (disasters_resp.data or []):
+                for d in disasters_resp.data or []:
                     disasters[d["id"]] = d
 
             # Get outcome_tracking for ground truth
@@ -892,7 +1072,7 @@ class MLService:
                     .in_("prediction_id", pred_ids)
                     .execute()
                 )
-                for outcome in (outcomes_resp.data or []):
+                for outcome in outcomes_resp.data or []:
                     outcomes[outcome["prediction_id"]] = outcome
 
             # Build features
@@ -911,7 +1091,12 @@ class MLService:
                 features = p.get("features", {}) or {}
 
                 wind_speed = metadata.get("wind_speed") or features.get("wind_speed", 0)
-                current_area = metadata.get("current_area") or features.get("current_area_km2") or p.get("affected_area_km", 0) or 0
+                current_area = (
+                    metadata.get("current_area")
+                    or features.get("current_area_km2")
+                    or p.get("affected_area_km", 0)
+                    or 0
+                )
 
                 # Get severity numeric
                 severity = disaster.get("severity", "low")
@@ -932,7 +1117,10 @@ class MLService:
                 rows.append(row)
 
             if len(rows) < 10:
-                return {"skipped": True, "reason": f"Only {len(rows)} valid rows (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(rows)} valid rows (minimum 10)",
+                }
 
             df = pd.DataFrame(rows)
 
@@ -940,12 +1128,16 @@ class MLService:
             for dt in DISASTER_TYPES:
                 df[f"dtype_{dt}"] = (df["disaster_type"] == dt).astype(float)
 
-            feature_cols = ["wind_speed", "current_area", "severity_numeric"] + [f"dtype_{dt}" for dt in DISASTER_TYPES]
+            feature_cols = ["wind_speed", "current_area", "severity_numeric"] + [
+                f"dtype_{dt}" for dt in DISASTER_TYPES
+            ]
 
             X = df[feature_cols].astype(float)
             y = df["label"].astype(float)
 
-            logger.info(f"Spread training data: {len(X)} rows, {len(feature_cols)} features")
+            logger.info(
+                f"Spread training data: {len(X)} rows, {len(feature_cols)} features"
+            )
             return {"X": X, "y": y, "rows": len(rows)}
 
         except Exception as e:
@@ -973,10 +1165,15 @@ class MLService:
             logger.info(f"Found {len(predictions)} impact predictions")
 
             if len(predictions) < 10:
-                return {"skipped": True, "reason": f"Only {len(predictions)} predictions (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(predictions)} predictions (minimum 10)",
+                }
 
             # Get disaster data
-            disaster_ids = list(set([p["disaster_id"] for p in predictions if p.get("disaster_id")]))
+            disaster_ids = list(
+                set([p["disaster_id"] for p in predictions if p.get("disaster_id")])
+            )
             disasters = {}
             if disaster_ids:
                 disasters_resp = (
@@ -985,7 +1182,7 @@ class MLService:
                     .in_("id", disaster_ids)
                     .execute()
                 )
-                for d in (disasters_resp.data or []):
+                for d in disasters_resp.data or []:
                     disasters[d["id"]] = d
 
             # Get outcome_tracking for ground truth
@@ -999,7 +1196,7 @@ class MLService:
                     .in_("prediction_id", pred_ids)
                     .execute()
                 )
-                for outcome in (outcomes_resp.data or []):
+                for outcome in outcomes_resp.data or []:
                     outcomes[outcome["prediction_id"]] = outcome
 
             # Build features - multi-output: [casualties, damage]
@@ -1019,8 +1216,16 @@ class MLService:
                 severity_numeric = severity_map.get(severity.lower(), 0)
 
                 # Get labels - prefer outcome_tracking, fallback to disaster data
-                casualties = outcome.get("actual_casualties") or disaster.get("casualties", 0) or 0
-                damage = outcome.get("actual_damage_usd") or disaster.get("estimated_damage", 0) or 0
+                casualties = (
+                    outcome.get("actual_casualties")
+                    or disaster.get("casualties", 0)
+                    or 0
+                )
+                damage = (
+                    outcome.get("actual_damage_usd")
+                    or disaster.get("estimated_damage", 0)
+                    or 0
+                )
 
                 # Convert damage to millions for consistency
                 damage_millions = float(damage) / 1_000_000 if damage else 0
@@ -1038,7 +1243,10 @@ class MLService:
                 rows.append(row)
 
             if len(rows) < 10:
-                return {"skipped": True, "reason": f"Only {len(rows)} valid rows (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(rows)} valid rows (minimum 10)",
+                }
 
             df = pd.DataFrame(rows)
 
@@ -1046,12 +1254,16 @@ class MLService:
             for dt in DISASTER_TYPES:
                 df[f"dtype_{dt}"] = (df["disaster_type"] == dt).astype(float)
 
-            feature_cols = ["affected_population", "severity_numeric"] + [f"dtype_{dt}" for dt in DISASTER_TYPES]
+            feature_cols = ["affected_population", "severity_numeric"] + [
+                f"dtype_{dt}" for dt in DISASTER_TYPES
+            ]
 
             X = df[feature_cols].astype(float)
             y = df[["casualties", "damage_millions"]].astype(float)
 
-            logger.info(f"Impact training data: {len(X)} rows, {len(feature_cols)} features, multi-output [casualties, damage]")
+            logger.info(
+                f"Impact training data: {len(X)} rows, {len(feature_cols)} features, multi-output [casualties, damage]"
+            )
             return {"X": X, "y": y, "rows": len(rows)}
 
         except Exception as e:
@@ -1080,7 +1292,10 @@ class MLService:
             logger.info(f"Found {len(records)} resource consumption records")
 
             if len(records) < 10:
-                return {"skipped": True, "reason": f"Only {len(records)} records (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(records)} records (minimum 10)",
+                }
 
             # Convert to DataFrame and process
             df = pd.DataFrame(records)
@@ -1095,9 +1310,11 @@ class MLService:
             df["month"] = df["timestamp"].dt.month
 
             # Group by resource_type and date to get daily consumption
-            daily = df.groupby(["resource_type", "date"]).agg({
-                "quantity_consumed": "sum"
-            }).reset_index()
+            daily = (
+                df.groupby(["resource_type", "date"])
+                .agg({"quantity_consumed": "sum"})
+                .reset_index()
+            )
 
             # Sort by resource_type and date
             daily = daily.sort_values(["resource_type", "date"])
@@ -1112,34 +1329,57 @@ class MLService:
 
                 # Create lagged features
                 rt_data["quantity_yesterday"] = rt_data["quantity_consumed"].shift(1)
-                rt_data["quantity_7d_avg"] = rt_data["quantity_consumed"].rolling(window=7, min_periods=1).mean().shift(1)
+                rt_data["quantity_7d_avg"] = (
+                    rt_data["quantity_consumed"]
+                    .rolling(window=7, min_periods=1)
+                    .mean()
+                    .shift(1)
+                )
                 rt_data["quantity_tomorrow"] = rt_data["quantity_consumed"].shift(-1)
 
                 # Add to rows
                 for _, row in rt_data.iterrows():
-                    if pd.isna(row["quantity_yesterday"]) or pd.isna(row["quantity_tomorrow"]):
+                    if pd.isna(row["quantity_yesterday"]) or pd.isna(
+                        row["quantity_tomorrow"]
+                    ):
                         continue
 
                     # Parse date for features
                     if isinstance(row["date"], str):
                         date_parts = row["date"].split("-")
-                        day_of_week = datetime(int(date_parts[0]), int(date_parts[1]), int(date_parts[2])).weekday() + 1
+                        day_of_week = (
+                            datetime(
+                                int(date_parts[0]),
+                                int(date_parts[1]),
+                                int(date_parts[2]),
+                            ).weekday()
+                            + 1
+                        )
                         month = int(date_parts[1])
                     else:
                         day_of_week = row["day_of_week"]
                         month = row["month"]
 
-                    rows.append({
-                        "resource_type": rt,
-                        "day_of_week": day_of_week,
-                        "month": month,
-                        "quantity_yesterday": row["quantity_yesterday"],
-                        "quantity_7d_avg": row["quantity_7d_avg"] if not pd.isna(row["quantity_7d_avg"]) else row["quantity_yesterday"],
-                        "quantity_tomorrow": row["quantity_tomorrow"],
-                    })
+                    rows.append(
+                        {
+                            "resource_type": rt,
+                            "day_of_week": day_of_week,
+                            "month": month,
+                            "quantity_yesterday": row["quantity_yesterday"],
+                            "quantity_7d_avg": (
+                                row["quantity_7d_avg"]
+                                if not pd.isna(row["quantity_7d_avg"])
+                                else row["quantity_yesterday"]
+                            ),
+                            "quantity_tomorrow": row["quantity_tomorrow"],
+                        }
+                    )
 
             if len(rows) < 10:
-                return {"skipped": True, "reason": f"Only {len(rows)} valid rows after processing (minimum 10)"}
+                return {
+                    "skipped": True,
+                    "reason": f"Only {len(rows)} valid rows after processing (minimum 10)",
+                }
 
             df = pd.DataFrame(rows)
 
@@ -1147,12 +1387,19 @@ class MLService:
             for rt in resource_types:
                 df[f"resource_{rt}"] = (df["resource_type"] == rt).astype(float)
 
-            feature_cols = ["day_of_week", "month", "quantity_yesterday", "quantity_7d_avg"] + [f"resource_{rt}" for rt in resource_types]
+            feature_cols = [
+                "day_of_week",
+                "month",
+                "quantity_yesterday",
+                "quantity_7d_avg",
+            ] + [f"resource_{rt}" for rt in resource_types]
 
             X = df[feature_cols].astype(float)
             y = df["quantity_tomorrow"].astype(float)
 
-            logger.info(f"Demand forecasting training data: {len(X)} rows, {len(feature_cols)} features")
+            logger.info(
+                f"Demand forecasting training data: {len(X)} rows, {len(feature_cols)} features"
+            )
             return {"X": X, "y": y, "rows": len(rows)}
 
         except Exception as e:
@@ -1200,7 +1447,9 @@ class MLService:
                 n_jobs=-1,
             )
             # Cross-validation scoring
-            cv_scores = cross_val_score(model, X_scaled, y, cv=cv, scoring="f1_weighted")
+            cv_scores = cross_val_score(
+                model, X_scaled, y, cv=cv, scoring="f1_weighted"
+            )
             cv_mean = float(np.mean(cv_scores))
             cv_std = float(np.std(cv_scores))
 
@@ -1226,7 +1475,9 @@ class MLService:
             with open(meta_path, "w") as f:
                 json.dump(metadata, f, indent=2, default=str)
 
-            logger.info(f"{model_type} model saved — CV F1: {cv_mean:.4f} ± {cv_std:.4f}")
+            logger.info(
+                f"{model_type} model saved — CV F1: {cv_mean:.4f} ± {cv_std:.4f}"
+            )
 
         else:
             if is_multi_output:
@@ -1240,7 +1491,9 @@ class MLService:
                 model = MultiOutputRegressor(base_model)
 
                 # CV for multi-output - use negative MAE
-                cv_scores = cross_val_score(model, X_scaled, y, cv=cv, scoring="neg_mean_absolute_error")
+                cv_scores = cross_val_score(
+                    model, X_scaled, y, cv=cv, scoring="neg_mean_absolute_error"
+                )
                 cv_mean = float(-np.mean(cv_scores))  # Convert to positive MAE
                 cv_std = float(np.std(cv_scores))
 
@@ -1266,7 +1519,9 @@ class MLService:
                 with open(meta_path, "w") as f:
                     json.dump(metadata, f, indent=2, default=str)
 
-                logger.info(f"{model_type} model saved — CV MAE: {cv_mean:.4f} ± {cv_std:.4f}")
+                logger.info(
+                    f"{model_type} model saved — CV MAE: {cv_mean:.4f} ± {cv_std:.4f}"
+                )
 
             else:
                 # Single output regression (Spread, Demand Forecasting)
@@ -1304,7 +1559,9 @@ class MLService:
                 with open(meta_path, "w") as f:
                     json.dump(metadata, f, indent=2, default=str)
 
-                logger.info(f"{model_type} model saved — CV R2: {cv_mean:.4f} ± {cv_std:.4f}")
+                logger.info(
+                    f"{model_type} model saved — CV R2: {cv_mean:.4f} ± {cv_std:.4f}"
+                )
 
         # Write retraining event to model_evaluation_reports
         await self._log_training_event(
@@ -1344,8 +1601,16 @@ class MLService:
                 "total_predictions": 0,
                 "total_with_outcomes": training_rows,
                 "accuracy": cv_score_mean if "severity" in model_type else None,
-                "mae": cv_score_mean if model_type in ["spread", "impact", "demand_forecasting"] else None,
-                "r_squared": cv_score_mean if model_type in ["spread", "demand_forecasting"] else None,
+                "mae": (
+                    cv_score_mean
+                    if model_type in ["spread", "impact", "demand_forecasting"]
+                    else None
+                ),
+                "r_squared": (
+                    cv_score_mean
+                    if model_type in ["spread", "demand_forecasting"]
+                    else None
+                ),
                 "rmse": None,
                 "mape": None,
                 "retrain_triggered": True,
@@ -1367,7 +1632,10 @@ class MLService:
 
         for model_type, result in results.items():
             if result.get("skipped"):
-                manifest["models"][model_type] = {"skipped": True, "reason": result.get("reason")}
+                manifest["models"][model_type] = {
+                    "skipped": True,
+                    "reason": result.get("reason"),
+                }
             else:
                 manifest["models"][model_type] = {
                     "trained": result.get("trained"),

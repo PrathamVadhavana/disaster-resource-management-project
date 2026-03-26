@@ -14,10 +14,12 @@ import uuid
 from collections import Counter
 from datetime import UTC, datetime
 
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from app.core.config import ingestion_config as cfg
 from app.database import db_admin
 from app.dependencies import get_current_user
 
@@ -40,11 +42,56 @@ class AssignResourcePayload(BaseModel):
 
 
 class SendAlertPayload(BaseModel):
-    channel: str = Field("in_app", description="in_app, email, sms")
+    channel: str = Field("in_app", description="in_app, email")
     recipient_role: str = Field("ngo", description="ngo, volunteer, admin")
     subject: str | None = None
     body: str | None = None
     severity: str = Field("high")
+
+
+async def _send_sendgrid_email(to_email: str, subject: str, body: str) -> dict:
+    """Send a single email via SendGrid REST API."""
+    if not cfg.SENDGRID_API_KEY:
+        return {
+            "status": "failed",
+            "error": "SendGrid is not configured (missing SENDGRID_API_KEY).",
+        }
+
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {
+            "email": cfg.SENDGRID_FROM_EMAIL,
+            "name": "Disaster Management Alerts",
+        },
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": body},
+            {
+                "type": "text/html",
+                "value": f'<pre style="white-space:pre-wrap;font-family:Arial">{body}</pre>',
+            },
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {cfg.SENDGRID_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code in (200, 201, 202):
+            return {
+                "status": "sent",
+                "message_id": resp.headers.get("X-Message-Id", ""),
+            }
+        return {"status": "failed", "error": resp.text[:300]}
+    except Exception as exc:
+        logger.error("SendGrid email send failed for %s: %s", to_email, exc)
+        return {"status": "failed", "error": str(exc)}
 
 
 # ── Existing endpoints ───────────────────────────────────────────────────────
@@ -57,7 +104,9 @@ class SendAlertPayload(BaseModel):
 )
 async def get_hotspots(
     status: str | None = Query("active", description="Filter by cluster status"),
-    min_priority: str | None = Query(None, description="Minimum priority label (low/medium/high/critical)"),
+    min_priority: str | None = Query(
+        None, description="Minimum priority label (low/medium/high/critical)"
+    ),
     user: dict = Depends(get_current_user),
 ):
     """Return all hotspot clusters as a **GeoJSON FeatureCollection**.
@@ -83,14 +132,17 @@ async def get_hotspots(
     priority_order = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
     if status and status != "all":
-        fc["features"] = [f for f in fc["features"] if f["properties"].get("status") == status]
+        fc["features"] = [
+            f for f in fc["features"] if f["properties"].get("status") == status
+        ]
 
     if min_priority and min_priority in priority_order:
         threshold = priority_order[min_priority]
         fc["features"] = [
             f
             for f in fc["features"]
-            if priority_order.get(f["properties"].get("priority_label", "low"), 0) >= threshold
+            if priority_order.get(f["properties"].get("priority_label", "low"), 0)
+            >= threshold
         ]
 
     return JSONResponse(
@@ -109,7 +161,12 @@ async def get_hotspot_detail(
 ):
     """Return a single hotspot cluster by ID with full request details."""
     try:
-        resp = await db_admin.table("hotspot_clusters").select("*").eq("id", cluster_id).async_execute()
+        resp = (
+            await db_admin.table("hotspot_clusters")
+            .select("*")
+            .eq("id", cluster_id)
+            .async_execute()
+        )
         rows = resp.data or []
     except Exception as exc:
         logger.error("Failed to fetch cluster %s: %s", cluster_id, exc)
@@ -128,7 +185,9 @@ async def get_hotspot_detail(
             for rid in request_ids[:50]:  # cap to avoid huge queries
                 r_resp = (
                     await db_admin.table("resource_requests")
-                    .select("id, resource_type, priority, status, latitude, longitude, head_count, description")
+                    .select(
+                        "id, resource_type, priority, status, latitude, longitude, head_count, description"
+                    )
                     .eq("id", rid)
                     .async_execute()
                 )
@@ -197,7 +256,9 @@ async def update_hotspot_status(
 
     valid_statuses = {"active", "monitoring", "resolved"}
     if payload.status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Status must be one of {valid_statuses}")
+        raise HTTPException(
+            status_code=400, detail=f"Status must be one of {valid_statuses}"
+        )
 
     now_iso = datetime.now(UTC).isoformat()
     update_data: dict = {"status": payload.status, "updated_at": now_iso}
@@ -215,7 +276,9 @@ async def update_hotspot_status(
         logger.error("Failed to update hotspot %s status: %s", cluster_id, exc)
         raise HTTPException(status_code=500, detail="Could not update hotspot status")
 
-    return JSONResponse(content={"message": f"Hotspot {cluster_id} status updated to {payload.status}"})
+    return JSONResponse(
+        content={"message": f"Hotspot {cluster_id} status updated to {payload.status}"}
+    )
 
 
 @router.post(
@@ -233,7 +296,12 @@ async def assign_hotspot_resources(
 
     # Verify the cluster exists
     try:
-        resp = await db_admin.table("hotspot_clusters").select("id, centroid_lat, centroid_lon, dominant_type").eq("id", cluster_id).async_execute()
+        resp = (
+            await db_admin.table("hotspot_clusters")
+            .select("id, centroid_lat, centroid_lon, dominant_type")
+            .eq("id", cluster_id)
+            .async_execute()
+        )
         if not (resp.data or []):
             raise HTTPException(status_code=404, detail="Hotspot cluster not found")
     except HTTPException:
@@ -264,17 +332,23 @@ async def assign_hotspot_resources(
             "title": f"Resources assigned to Hotspot",
             "message": f"{payload.quantity}x {payload.resource_type} assigned to hotspot {cluster_id[:8]}",
             "priority": "high",
-            "data": {"hotspot_id": cluster_id, "resource_type": payload.resource_type, "quantity": payload.quantity},
+            "data": {
+                "hotspot_id": cluster_id,
+                "resource_type": payload.resource_type,
+                "quantity": payload.quantity,
+            },
             "created_at": datetime.now(UTC).isoformat(),
         }
         await db_admin.table("notifications").insert(notif).async_execute()
     except Exception as exc:
         logger.warning("Failed to create assignment notification: %s", exc)
 
-    return JSONResponse(content={
-        "message": f"Assigned {payload.quantity}x {payload.resource_type} to hotspot {cluster_id[:8]}",
-        "allocation_id": allocation_record["id"],
-    })
+    return JSONResponse(
+        content={
+            "message": f"Assigned {payload.quantity}x {payload.resource_type} to hotspot {cluster_id[:8]}",
+            "allocation_id": allocation_record["id"],
+        }
+    )
 
 
 @router.post(
@@ -292,7 +366,12 @@ async def send_hotspot_alert(
 
     # Fetch cluster for context
     try:
-        resp = await db_admin.table("hotspot_clusters").select("*").eq("id", cluster_id).async_execute()
+        resp = (
+            await db_admin.table("hotspot_clusters")
+            .select("*")
+            .eq("id", cluster_id)
+            .async_execute()
+        )
         cluster_rows = resp.data or []
     except Exception as exc:
         logger.error("Failed to fetch hotspot %s for alerting: %s", cluster_id, exc)
@@ -304,7 +383,10 @@ async def send_hotspot_alert(
     cluster = cluster_rows[0]
 
     # Build the alert subject/body
-    subject = payload.subject or f"⚠️ Hotspot Alert — {cluster.get('priority_label', 'high').upper()} priority zone"
+    subject = (
+        payload.subject
+        or f"⚠️ Hotspot Alert — {cluster.get('priority_label', 'high').upper()} priority zone"
+    )
     body = payload.body or (
         f"A {cluster.get('priority_label', 'high')} priority hotspot with "
         f"{cluster.get('request_count', 0)} events affecting "
@@ -313,8 +395,27 @@ async def send_hotspot_alert(
         f"Location: ({cluster.get('centroid_lat', 0):.4f}, {cluster.get('centroid_lon', 0):.4f})"
     )
 
+    valid_roles = {"ngo", "volunteer", "admin"}
+    if payload.recipient_role not in valid_roles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"recipient_role must be one of {sorted(valid_roles)}",
+        )
+
+    valid_channels = {"in_app", "email"}
+    if payload.channel not in valid_channels:
+        raise HTTPException(
+            status_code=400,
+            detail=f"channel must be one of {sorted(valid_channels)}",
+        )
+
+    if payload.channel == "email" and not cfg.SENDGRID_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Email channel is not configured: missing SENDGRID_API_KEY.",
+        )
+
     # Find recipients based on role
-    alerts_sent = 0
     try:
         user_resp = await (
             db_admin.table("users")
@@ -326,36 +427,150 @@ async def send_hotspot_alert(
         recipients = user_resp.data or []
     except Exception as exc:
         logger.error("Failed to fetch recipients: %s", exc)
-        recipients = []
+        raise HTTPException(
+            status_code=500, detail="Failed to fetch recipients for alert"
+        )
+
+    if not recipients:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No recipients found for role '{payload.recipient_role}'.",
+        )
 
     now_iso = datetime.now(UTC).isoformat()
 
-    for recipient in recipients[:20]:  # Cap at 20 recipients per alert
-        try:
-            alert_record = {
+    alerts_sent = 0
+    notifications_created = 0
+    ngo_alerts_created = 0
+
+    selected_recipients = recipients[:20]
+
+    if payload.channel == "email":
+        recipients_with_email = [r for r in selected_recipients if r.get("email")]
+        if not recipients_with_email:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No valid recipient emails found for role '{payload.recipient_role}'. "
+                    "Please ensure users in this role have email addresses."
+                ),
+            )
+
+    alert_rows = []
+    email_failures = 0
+    for recipient in selected_recipients:
+        recipient_email = recipient.get("email")
+        status = "sent"
+        sent_at = now_iso
+        error_message = None
+        external_ref = None
+
+        if payload.channel == "email":
+            if not recipient_email:
+                status = "failed"
+                sent_at = None
+                error_message = "Recipient has no email"
+                email_failures += 1
+            else:
+                result = await _send_sendgrid_email(recipient_email, subject, body)
+                status = result.get("status", "failed")
+                if status != "sent":
+                    sent_at = None
+                    error_message = result.get("error")
+                    email_failures += 1
+                external_ref = result.get("message_id")
+
+        alert_rows.append(
+            {
                 "id": str(uuid.uuid4()),
                 "channel": payload.channel,
-                "recipient": recipient.get("email", ""),
+                "recipient": recipient_email or f"user:{recipient.get('id')}",
                 "recipient_role": payload.recipient_role,
                 "subject": subject,
                 "body": body,
                 "severity": payload.severity,
-                "status": "sent",
-                "sent_at": now_iso,
+                "status": status,
+                "external_ref": external_ref,
+                "error_message": error_message,
+                "sent_at": sent_at,
                 "created_at": now_iso,
             }
-            await db_admin.table("alert_notifications").insert(alert_record).async_execute()
-            alerts_sent += 1
+        )
+
+    try:
+        alert_resp = (
+            await db_admin.table("alert_notifications")
+            .insert(alert_rows)
+            .async_execute()
+        )
+        if payload.channel == "email":
+            alerts_sent = len(
+                [row for row in alert_rows if row.get("status") == "sent"]
+            )
+        else:
+            alerts_sent = len(alert_resp.data or alert_rows)
+    except Exception as exc:
+        logger.error(
+            "Failed to insert alert_notifications for hotspot %s: %s", cluster_id, exc
+        )
+
+    priority_map = {
+        "critical": "critical",
+        "high": "high",
+        "medium": "medium",
+        "low": "low",
+    }
+    notification_rows = []
+    for recipient in selected_recipients:
+        uid = recipient.get("id")
+        if not uid:
+            continue
+        notification_rows.append(
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": uid,
+                "title": subject,
+                "message": body,
+                "priority": priority_map.get(payload.severity, "high"),
+                "read": False,
+                "data": {
+                    "type": "hotspot_alert",
+                    "hotspot_id": cluster_id,
+                    "recipient_role": payload.recipient_role,
+                    "channel": payload.channel,
+                    "severity": payload.severity,
+                },
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+        )
+
+    if notification_rows:
+        try:
+            notif_resp = (
+                await db_admin.table("notifications")
+                .insert(notification_rows)
+                .async_execute()
+            )
+            notifications_created = len(notif_resp.data or notification_rows)
         except Exception as exc:
-            logger.warning("Failed to send alert to %s: %s", recipient.get("id"), exc)
+            logger.error(
+                "Failed to create in-app notifications for hotspot %s: %s",
+                cluster_id,
+                exc,
+            )
 
     # Also push to ngo_alerts table for real-time dashboard updates
     if payload.recipient_role == "ngo":
+        ngo_rows = []
         for recipient in recipients[:10]:
-            try:
-                ngo_alert = {
+            ngo_id = recipient.get("id")
+            if not ngo_id:
+                continue
+            ngo_rows.append(
+                {
                     "id": str(uuid.uuid4()),
-                    "ngo_id": recipient["id"],
+                    "ngo_id": ngo_id,
                     "hotspot_id": cluster_id,
                     "alert_type": "admin_hotspot_alert",
                     "title": subject,
@@ -371,15 +586,47 @@ async def send_hotspot_alert(
                     "status": "active",
                     "created_at": now_iso,
                 }
-                await db_admin.table("ngo_alerts").insert(ngo_alert).async_execute()
+            )
+        if ngo_rows:
+            try:
+                ngo_resp = (
+                    await db_admin.table("ngo_alerts").insert(ngo_rows).async_execute()
+                )
+                ngo_alerts_created = len(ngo_resp.data or ngo_rows)
             except Exception as exc:
-                logger.warning("Failed to insert ngo_alert for %s: %s", recipient.get("id"), exc)
+                logger.error(
+                    "Failed to insert ngo_alerts for hotspot %s: %s", cluster_id, exc
+                )
 
-    return JSONResponse(content={
-        "message": f"Alert sent to {alerts_sent} {payload.recipient_role}(s)",
-        "alerts_sent": alerts_sent,
-        "hotspot_id": cluster_id,
-    })
+    if payload.channel == "email" and alerts_sent == 0:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Email dispatch failed for all recipients. "
+                f"attempted={len(selected_recipients)}, failures={email_failures}. "
+                "Check SendGrid API key/sender verification and recipient email addresses."
+            ),
+        )
+
+    if alerts_sent == 0 and notifications_created == 0 and ngo_alerts_created == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Alert dispatch failed: no alert records or notifications were created.",
+        )
+
+    return JSONResponse(
+        content={
+            "message": (
+                f"Alert sent to {alerts_sent} {payload.recipient_role}(s); "
+                f"in-app notifications created: {notifications_created}."
+            ),
+            "alerts_sent": alerts_sent,
+            "email_failures": email_failures,
+            "notifications_created": notifications_created,
+            "ngo_alerts_created": ngo_alerts_created,
+            "hotspot_id": cluster_id,
+        }
+    )
 
 
 @router.get(
@@ -397,7 +644,12 @@ async def get_hotspot_insights(
     """
     # Fetch cluster
     try:
-        resp = await db_admin.table("hotspot_clusters").select("*").eq("id", cluster_id).async_execute()
+        resp = (
+            await db_admin.table("hotspot_clusters")
+            .select("*")
+            .eq("id", cluster_id)
+            .async_execute()
+        )
         rows = resp.data or []
     except Exception as exc:
         logger.error("Failed to fetch hotspot %s for insights: %s", cluster_id, exc)
@@ -438,54 +690,69 @@ async def get_hotspot_insights(
 
     # Priority breakdown
     prio_counts = Counter(r.get("priority", "medium") for r in member_requests)
-    priority_breakdown = [{"priority": p, "count": c} for p, c in prio_counts.most_common()]
+    priority_breakdown = [
+        {"priority": p, "count": c} for p, c in prio_counts.most_common()
+    ]
 
     # Risk score (0-100)
-    risk_score = min(100, int(
-        (avg_priority / 4.0) * 40 +
-        min(request_count / 20.0, 1.0) * 30 +
-        min(total_people / 100.0, 1.0) * 30
-    ))
+    risk_score = min(
+        100,
+        int(
+            (avg_priority / 4.0) * 40
+            + min(request_count / 20.0, 1.0) * 30
+            + min(total_people / 100.0, 1.0) * 30
+        ),
+    )
 
     # Generate recommendations
     recommendations = []
     if priority_label in ("critical", "high"):
-        recommendations.append({
-            "action": "immediate_response",
-            "title": "Deploy Emergency Response Team",
-            "description": f"This hotspot has {priority_label} priority with {total_people} affected people. Immediate deployment recommended.",
-            "urgency": "critical",
-        })
+        recommendations.append(
+            {
+                "action": "immediate_response",
+                "title": "Deploy Emergency Response Team",
+                "description": f"This hotspot has {priority_label} priority with {total_people} affected people. Immediate deployment recommended.",
+                "urgency": "critical",
+            }
+        )
     if dominant_type in ("Medical", "Evacuation"):
-        recommendations.append({
-            "action": "medical_support",
-            "title": f"Prioritize {dominant_type} Resources",
-            "description": f"Dominant need is {dominant_type}. Coordinate with health services and emergency responders.",
-            "urgency": "high",
-        })
+        recommendations.append(
+            {
+                "action": "medical_support",
+                "title": f"Prioritize {dominant_type} Resources",
+                "description": f"Dominant need is {dominant_type}. Coordinate with health services and emergency responders.",
+                "urgency": "high",
+            }
+        )
     if request_count > 10:
-        recommendations.append({
-            "action": "scale_response",
-            "title": "Scale Up Operations",
-            "description": f"With {request_count} active requests, consider deploying additional NGO teams and volunteers.",
-            "urgency": "high",
-        })
+        recommendations.append(
+            {
+                "action": "scale_response",
+                "title": "Scale Up Operations",
+                "description": f"With {request_count} active requests, consider deploying additional NGO teams and volunteers.",
+                "urgency": "high",
+            }
+        )
     if total_people > 50:
-        recommendations.append({
-            "action": "mass_shelter",
-            "title": "Activate Mass Shelter Protocol",
-            "description": f"{total_people} people affected. Coordinate temporary shelter and supply distribution.",
-            "urgency": "high" if total_people > 100 else "medium",
-        })
+        recommendations.append(
+            {
+                "action": "mass_shelter",
+                "title": "Activate Mass Shelter Protocol",
+                "description": f"{total_people} people affected. Coordinate temporary shelter and supply distribution.",
+                "urgency": "high" if total_people > 100 else "medium",
+            }
+        )
 
     # Default recommendation
     if not recommendations:
-        recommendations.append({
-            "action": "monitor",
-            "title": "Continue Monitoring",
-            "description": "This hotspot is within normal parameters. Continue routine monitoring.",
-            "urgency": "low",
-        })
+        recommendations.append(
+            {
+                "action": "monitor",
+                "title": "Continue Monitoring",
+                "description": "This hotspot is within normal parameters. Continue routine monitoring.",
+                "urgency": "low",
+            }
+        )
 
     # Situation summary
     summary = (
@@ -494,19 +761,29 @@ async def get_hotspot_insights(
         f"Dominant need: {dominant_type}. Risk score: {risk_score}/100."
     )
 
-    return JSONResponse(content={
-        "cluster_id": cluster_id,
-        "summary": summary,
-        "risk_score": risk_score,
-        "risk_level": "critical" if risk_score >= 75 else "high" if risk_score >= 50 else "medium" if risk_score >= 25 else "low",
-        "resource_breakdown": resource_breakdown,
-        "priority_breakdown": priority_breakdown,
-        "recommendations": recommendations,
-        "stats": {
-            "request_count": request_count,
-            "total_people": total_people,
-            "avg_priority": avg_priority,
-            "priority_label": priority_label,
-            "dominant_type": dominant_type,
-        },
-    })
+    return JSONResponse(
+        content={
+            "cluster_id": cluster_id,
+            "summary": summary,
+            "risk_score": risk_score,
+            "risk_level": (
+                "critical"
+                if risk_score >= 75
+                else (
+                    "high"
+                    if risk_score >= 50
+                    else "medium" if risk_score >= 25 else "low"
+                )
+            ),
+            "resource_breakdown": resource_breakdown,
+            "priority_breakdown": priority_breakdown,
+            "recommendations": recommendations,
+            "stats": {
+                "request_count": request_count,
+                "total_people": total_people,
+                "avg_priority": avg_priority,
+                "priority_label": priority_label,
+                "dominant_type": dominant_type,
+            },
+        }
+    )

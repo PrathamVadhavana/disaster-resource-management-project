@@ -7,8 +7,8 @@ import { subscribeToTable } from '@/lib/realtime'
 import { useAuth } from '@/lib/auth-provider'
 import { cn } from '@/lib/utils'
 import {
-    Bell, Check, CheckCheck, X, Clock, AlertTriangle,
-    CheckCircle2, XCircle, Package, Info, Volume2
+    Bell, CheckCheck, X, AlertTriangle,
+    CheckCircle2, XCircle, Package, Info
 } from 'lucide-react'
 
 const TYPE_ICONS: Record<string, { icon: any; color: string }> = {
@@ -95,7 +95,18 @@ export function NotificationBell() {
         return () => document.removeEventListener('mousedown', handler)
     }, [])
 
-    const markAllRead = () => markReadMutation.mutate(undefined)
+    const markAllRead = () => {
+        if (unread <= 0 || markReadMutation.isPending) return
+        markReadMutation.mutate(undefined)
+    }
+
+    const getNotificationType = (n: any): string => {
+        return n?.data?.type || n?.type || 'info'
+    }
+
+    const isNotificationRead = (n: any): boolean => {
+        return Boolean(n?.read ?? n?.is_read ?? false)
+    }
 
     const timeAgo = (dateStr: string) => {
         const diff = Date.now() - new Date(dateStr).getTime()
@@ -127,7 +138,7 @@ export function NotificationBell() {
             </button>
 
             {open && (
-                <div className="absolute right-0 top-full mt-2 w-96 max-h-[480px] bg-white dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
+                <div className="absolute right-0 top-full mt-2 w-96 max-h-120 bg-white dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-top-2">
                     {/* Header */}
                     <div className="px-4 py-3 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
                         <h3 className="text-sm font-bold text-slate-900 dark:text-white">Notifications</h3>
@@ -147,7 +158,7 @@ export function NotificationBell() {
                     </div>
 
                     {/* List */}
-                    <div className="overflow-y-auto max-h-[380px] divide-y divide-slate-50 dark:divide-white/5">
+                    <div className="overflow-y-auto max-h-95 divide-y divide-slate-50 dark:divide-white/5">
                         {notifications.length === 0 ? (
                             <div className="py-12 text-center">
                                 <Bell className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto mb-2" />
@@ -155,17 +166,20 @@ export function NotificationBell() {
                             </div>
                         ) : (
                             notifications.map((n: any) => {
-                                const typeInfo = TYPE_ICONS[n.type] || TYPE_ICONS.info
+                                const typeInfo = TYPE_ICONS[getNotificationType(n)] || TYPE_ICONS.info
                                 const Icon = typeInfo.icon
+                                const isRead = isNotificationRead(n)
                                 return (
                                     <div
                                         key={n.id}
                                         className={cn(
-                                            'px-4 py-3 flex items-start gap-3 hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors cursor-pointer',
-                                            !n.is_read && 'bg-blue-50/50 dark:bg-blue-500/5'
+                                            'px-4 py-3 flex items-start gap-3 hover:bg-slate-50 dark:hover:bg-white/2 transition-colors cursor-pointer',
+                                            !isRead && 'bg-blue-50/50 dark:bg-blue-500/5'
                                         )}
                                         onClick={() => {
-                                            if (!n.is_read) markReadMutation.mutate([n.id])
+                                            if (!isRead && n?.id && !markReadMutation.isPending) {
+                                                markReadMutation.mutate([n.id])
+                                            }
                                         }}
                                     >
                                         <div className={cn('w-8 h-8 rounded-full flex items-center justify-center shrink-0 bg-slate-100 dark:bg-white/5', typeInfo.color)}>
@@ -174,7 +188,7 @@ export function NotificationBell() {
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-2">
                                                 <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">{n.title}</p>
-                                                {!n.is_read && <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />}
+                                                {!isRead && <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />}
                                             </div>
                                             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-2">{n.message}</p>
                                             <p className="text-[10px] text-slate-400 mt-1">{timeAgo(n.created_at)}</p>

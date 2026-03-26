@@ -77,7 +77,7 @@ export function AdminSidebar() {
                     <Menu className="w-5 h-5 text-slate-600 dark:text-slate-400" />
                 </button>
                 <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center">
+                    <div className="w-8 h-8 rounded-lg bg-linear-to-br from-slate-700 to-slate-900 flex items-center justify-center">
                         <Shield className="w-4 h-4 text-white" />
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">Admin Panel</span>
@@ -98,7 +98,7 @@ export function AdminSidebar() {
             )}>
                 <div className="flex items-center justify-between h-16 px-5 border-b border-slate-200 dark:border-white/5 shrink-0">
                     <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-slate-700 to-slate-900 dark:from-slate-600 dark:to-slate-800 flex items-center justify-center shadow-lg">
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-slate-700 to-slate-900 dark:from-slate-600 dark:to-slate-800 flex items-center justify-center shadow-lg">
                             <Shield className="w-5 h-5 text-white" />
                         </div>
                         <div>
@@ -112,8 +112,8 @@ export function AdminSidebar() {
                 </div>
 
                 <div className="p-4 border-b border-slate-200 dark:border-white/5 shrink-0">
-                    <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/5">
-                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-slate-600 to-slate-800 flex items-center justify-center text-white font-bold text-sm shadow-lg">
+                    <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-white/3 border border-slate-200 dark:border-white/5">
+                        <div className="w-10 h-10 rounded-full bg-linear-to-br from-slate-600 to-slate-800 flex items-center justify-center text-white font-bold text-sm shadow-lg">
                             {profile?.full_name?.charAt(0)?.toUpperCase() || 'A'}
                         </div>
                         <div className="min-w-0">
@@ -133,14 +133,14 @@ export function AdminSidebar() {
                                 className={cn(
                                     'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
                                     active
-                                        ? 'bg-gradient-to-r from-slate-500/10 to-slate-400/10 dark:from-white/10 dark:to-white/5 text-slate-900 dark:text-white border border-slate-300 dark:border-white/10 shadow-sm'
-                                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/[0.04]'
+                                        ? 'bg-linear-to-r from-slate-500/10 to-slate-400/10 dark:from-white/10 dark:to-white/5 text-slate-900 dark:text-white border border-slate-300 dark:border-white/10 shadow-sm'
+                                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/4'
                                 )}>
-                                <Icon className={cn('w-[18px] h-[18px] shrink-0', active ? 'text-slate-700 dark:text-white' : '')} />
-                                <span className="flex-1">{item.label}</span>
+                                <Icon className={cn('w-4.5 h-4.5 shrink-0', active ? 'text-slate-700 dark:text-white' : 'text-slate-500 dark:text-slate-300')} />
+                                <span className="truncate">{item.label}</span>
                                 {badges[item.href] > 0 && (
                                     <span className={cn(
-                                        'min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-bold flex items-center justify-center',
+                                        'ml-auto min-w-5 h-5 px-1.5 rounded-full text-[10px] font-bold flex items-center justify-center',
                                         item.href === '/admin/sla'
                                             ? 'bg-red-100 dark:bg-red-500/15 text-red-600 dark:text-red-400'
                                             : 'bg-purple-100 dark:bg-purple-500/15 text-purple-600 dark:text-purple-400'
@@ -155,13 +155,13 @@ export function AdminSidebar() {
 
                 <div className="p-3 border-t border-slate-200 dark:border-white/5 space-y-1 shrink-0">
                     <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                        className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all">
-                        {mounted ? (theme === 'dark' ? <Sun className="w-[18px] h-[18px]" /> : <Moon className="w-[18px] h-[18px]" />) : <div className="w-[18px] h-[18px]" />}
+                        className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/4 transition-all">
+                        {mounted ? (theme === 'dark' ? <Sun className="w-4.5 h-4.5" /> : <Moon className="w-4.5 h-4.5" />) : <div className="w-4.5 h-4.5" />}
                         <span>{mounted ? (theme === 'dark' ? 'Light Mode' : 'Dark Mode') : 'Toggle Theme'}</span>
                     </button>
                     <button onClick={() => signOut()}
                         className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/5 transition-all">
-                        <LogOut className="w-[18px] h-[18px]" />
+                        <LogOut className="w-4.5 h-4.5" />
                         <span>Sign Out</span>
                     </button>
                 </div>

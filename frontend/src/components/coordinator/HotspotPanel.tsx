@@ -178,8 +178,16 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
 
     const alertMutation = useMutation({
         mutationFn: (data: { clusterId: string; channel: string; recipient_role: string; severity: string; subject?: string; body?: string }) =>
-            api.sendHotspotAlert(data.clusterId, data),
+            api.sendHotspotAlert(data.clusterId, {
+                channel: data.channel,
+                recipient_role: data.recipient_role,
+                severity: data.severity,
+                subject: data.subject,
+                body: data.body,
+            }),
         onSuccess: () => {
+            qc.invalidateQueries({ queryKey: ['notifications'] })
+            qc.invalidateQueries({ queryKey: ['hotspots'] })
             setModalMode(null)
             setSelectedCluster(null)
         },
@@ -224,7 +232,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                     { label: 'People Affected', value: totalPeople, icon: Users, color: 'text-blue-600 dark:text-blue-400', bg: 'bg-blue-50 dark:bg-blue-500/10' },
                     { label: 'Total Events', value: totalEvents, icon: Activity, color: 'text-purple-600 dark:text-purple-400', bg: 'bg-purple-50 dark:bg-purple-500/10' },
                 ].map((kpi) => (
-                    <div key={kpi.label} className="rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-4">
+                    <div key={kpi.label} className="rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/2 p-4">
                         <div className="flex items-center gap-2 mb-2">
                             <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center", kpi.bg)}>
                                 <kpi.icon className={cn("w-4 h-4", kpi.color)} />
@@ -241,7 +249,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                 <button
                     onClick={() => triggerMutation.mutate()}
                     disabled={triggerMutation.isPending}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-red-600 to-orange-600 text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-red-600/20 transition-all"
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-linear-to-r from-red-600 to-orange-600 text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-red-600/20 transition-all"
                 >
                     {triggerMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
                     {triggerMutation.isPending ? 'Clustering...' : 'Re-Cluster Now'}
@@ -273,7 +281,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                     {showFilterDropdown && (
                         <>
                             <div className="fixed inset-0 z-10" onClick={() => setShowFilterDropdown(false)} />
-                            <div className="absolute left-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl shadow-xl z-20 py-1 min-w-[150px]">
+                            <div className="absolute left-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl shadow-xl z-20 py-1 min-w-37.5">
                                 {['all', 'low', 'medium', 'high', 'critical'].map(p => (
                                     <button
                                         key={p}
@@ -321,7 +329,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
             </div>
 
             {/* ── Cluster Cards ─────────────────────────────────────────────── */}
-            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
+            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/2 overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center gap-2">
                     <MapPin className="w-5 h-5 text-red-500" />
                     <h3 className="text-sm font-bold text-slate-900 dark:text-white">Hotspot Clusters</h3>
@@ -355,7 +363,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                             const config = PRIORITY_CONFIG[cluster.priority] || PRIORITY_CONFIG.medium
                             const icon = RESOURCE_ICONS[cluster.dominant_type] || '📦'
                             return (
-                                <div key={cluster.cluster_id || i} className="p-4 hover:bg-slate-50/50 dark:hover:bg-white/[0.01] transition-colors">
+                                <div key={cluster.cluster_id || i} className="p-4 hover:bg-slate-50/50 dark:hover:bg-white/1 transition-colors">
                                     {/* Card Header */}
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="flex items-center gap-3 min-w-0">
@@ -513,14 +521,14 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                     ) : insights ? (
                                         <div className="space-y-4">
                                             {/* Risk Score */}
-                                            <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/[0.02] p-4">
+                                            <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/2 p-4">
                                                 <div className="flex items-center justify-between mb-2">
                                                     <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Risk Score</p>
                                                     <span className={cn(
                                                         "text-xs px-2 py-0.5 rounded-full font-bold uppercase",
                                                         (insights as Insight).risk_level === 'critical' ? 'bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-400' :
-                                                        (insights as Insight).risk_level === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400' :
-                                                        'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/10 dark:text-yellow-400'
+                                                            (insights as Insight).risk_level === 'high' ? 'bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-400' :
+                                                                'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/10 dark:text-yellow-400'
                                                     )}>
                                                         {(insights as Insight).risk_level}
                                                     </span>
@@ -534,8 +542,8 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                                         className={cn(
                                                             "h-full rounded-full transition-all",
                                                             (insights as Insight).risk_score >= 75 ? 'bg-red-500' :
-                                                            (insights as Insight).risk_score >= 50 ? 'bg-orange-500' :
-                                                            (insights as Insight).risk_score >= 25 ? 'bg-yellow-500' : 'bg-green-500'
+                                                                (insights as Insight).risk_score >= 50 ? 'bg-orange-500' :
+                                                                    (insights as Insight).risk_score >= 25 ? 'bg-yellow-500' : 'bg-green-500'
                                                         )}
                                                         style={{ width: `${(insights as Insight).risk_score}%` }}
                                                     />
@@ -576,15 +584,15 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                                                 className={cn(
                                                                     "rounded-xl border p-4",
                                                                     rec.urgency === 'critical' ? 'border-red-200 dark:border-red-500/20 bg-red-50/50 dark:bg-red-500/5' :
-                                                                    rec.urgency === 'high' ? 'border-orange-200 dark:border-orange-500/20 bg-orange-50/50 dark:bg-orange-500/5' :
-                                                                    'border-slate-200 dark:border-white/10 bg-slate-50/50 dark:bg-white/[0.02]'
+                                                                        rec.urgency === 'high' ? 'border-orange-200 dark:border-orange-500/20 bg-orange-50/50 dark:bg-orange-500/5' :
+                                                                            'border-slate-200 dark:border-white/10 bg-slate-50/50 dark:bg-white/2'
                                                                 )}
                                                             >
                                                                 <div className="flex items-center gap-2 mb-1">
                                                                     <Shield className={cn(
                                                                         "w-4 h-4",
                                                                         rec.urgency === 'critical' ? 'text-red-500' :
-                                                                        rec.urgency === 'high' ? 'text-orange-500' : 'text-slate-400'
+                                                                            rec.urgency === 'high' ? 'text-orange-500' : 'text-slate-400'
                                                                     )} />
                                                                     <p className="text-sm font-bold text-slate-900 dark:text-white">{rec.title}</p>
                                                                 </div>
@@ -698,7 +706,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                         notes: assignForm.notes || undefined,
                                     })}
                                     disabled={assignMutation.isPending}
-                                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 text-white font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-blue-600/20"
+                                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-linear-to-r from-blue-600 to-cyan-600 text-white font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-blue-600/20"
                                 >
                                     {assignMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Package className="w-4 h-4" />}
                                     {assignMutation.isPending ? 'Assigning...' : 'Assign Resources'}
@@ -756,7 +764,6 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                     >
                                         <option value="in_app">In-App Notification</option>
                                         <option value="email">Email</option>
-                                        <option value="sms">SMS</option>
                                     </select>
                                 </div>
                                 <div>
@@ -784,7 +791,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                         ...alertForm,
                                     })}
                                     disabled={alertMutation.isPending}
-                                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-orange-600 to-red-600 text-white font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-orange-600/20"
+                                    className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-linear-to-r from-orange-600 to-red-600 text-white font-medium hover:opacity-90 disabled:opacity-50 shadow-lg shadow-orange-600/20"
                                 >
                                     {alertMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                                     {alertMutation.isPending ? 'Sending...' : `Send Alert to ${alertForm.recipient_role === 'ngo' ? 'NGOs' : alertForm.recipient_role === 'volunteer' ? 'Volunteers' : 'Admins'}`}
@@ -854,7 +861,7 @@ function HotspotMapEmbed({ cluster }: { cluster: ClusterData }) {
             // Cluster centroid marker
             const priorityColor = cluster.priority === 'critical' ? '#ef4444' :
                 cluster.priority === 'high' ? '#f97316' :
-                cluster.priority === 'medium' ? '#eab308' : '#22c55e'
+                    cluster.priority === 'medium' ? '#eab308' : '#22c55e'
 
             const icon = L.divIcon({
                 html: `<div style="background:${priorityColor};width:16px;height:16px;border-radius:50%;border:3px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.3)"></div>`,

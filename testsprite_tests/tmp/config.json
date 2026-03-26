@@ -1,0 +1,13 @@
+{
+  "status": "init",
+  "executionArgs": {
+    "projectName": "disaster-management-system",
+    "projectPath": "e:\\disaster-management-system",
+    "testIds": [],
+    "additionalInstruction": "Run complete frontend test coverage for this multi-role web app, including auth and role-based dashboard/navigation flows.",
+    "serverMode": "production",
+    "envs": {
+      "API_KEY": "sk-user-hfv_8rQ923up0w4OIiQ2JytnhlqY-V5t3eEiVF_sIIhHQUGZTFxnkLfQm8mPaCnf-SF0GEwy6l3aiK2LHlHBeNqhDzTXt5Dm6FH34k9ABQeqiLKkVdYpqsfdGXyigJOfVwc"
+    }
+  }
+}

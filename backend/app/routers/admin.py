@@ -14,7 +14,7 @@ import traceback
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -81,14 +81,21 @@ class PlatformSettingsBody(BaseModel):
 class ApproveRejectBody(BaseModel):
     """Body for approving or rejecting a resource request."""
 
-    action: str = Field(..., description="'approve', 'reject', 'reassign', or 'escalate'")
+    action: str = Field(
+        ..., description="'approve', 'reject', 'reassign', or 'escalate'"
+    )
     rejection_reason: str | None = Field(None, description="Required when rejecting")
     admin_note: str | None = Field(None, description="Optional note from admin")
-    assigned_to: str | None = Field(None, description="User ID to assign to (NGO/donor)")
-    assigned_role: str | None = Field(
-        None, description="Role of the assignee: 'ngo' or 'donor'. Auto-detected if omitted."
+    assigned_to: str | None = Field(
+        None, description="User ID to assign to (NGO/donor)"
     )
-    estimated_delivery: str | None = Field(None, description="ISO date for estimated delivery")
+    assigned_role: str | None = Field(
+        None,
+        description="Role of the assignee: 'ngo' or 'donor'. Auto-detected if omitted.",
+    )
+    estimated_delivery: str | None = Field(
+        None, description="ISO date for estimated delivery"
+    )
 
 
 class AdminNoteBody(BaseModel):
@@ -101,19 +108,33 @@ class AdminNoteBody(BaseModel):
 @router.get("/users")
 async def list_users(admin=Depends(require_admin)):
     """Return every user row (bypasses RLS via service-role client)."""
-    resp = await db_admin.table("users").select("*").order("created_at", desc=True).limit(500).async_execute()
+    resp = (
+        await db_admin.table("users")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(500)
+        .async_execute()
+    )
     return resp.data or []
 
 
 @router.patch("/users/{user_id}/role")
-async def update_user_role(user_id: str, body: UpdateRoleBody, admin=Depends(require_admin)):
+async def update_user_role(
+    user_id: str, body: UpdateRoleBody, admin=Depends(require_admin)
+):
     """Change a user's role with audit note."""
     from datetime import datetime
 
     updates = {"role": body.role, "updated_at": datetime.now(UTC).isoformat()}
 
     # Store history in metadata
-    metadata_resp = await db_admin.table("users").select("metadata").eq("id", user_id).maybe_single().async_execute()
+    metadata_resp = (
+        await db_admin.table("users")
+        .select("metadata")
+        .eq("id", user_id)
+        .maybe_single()
+        .async_execute()
+    )
     existing_meta = (metadata_resp.data or {}).get("metadata") or {}
 
     history = existing_meta.get("role_history", [])
@@ -145,7 +166,9 @@ async def update_user_role(user_id: str, body: UpdateRoleBody, admin=Depends(req
     }
     updates["metadata"] = existing_meta
 
-    resp = await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
+    resp = (
+        await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
+    )
     if not resp.data:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -162,12 +185,22 @@ async def update_user_role(user_id: str, body: UpdateRoleBody, admin=Depends(req
 
 
 @router.post("/users/{user_id}/role-request/review")
-async def review_role_switch_request(user_id: str, body: ReviewRoleSwitchBody, admin=Depends(require_admin)):
+async def review_role_switch_request(
+    user_id: str, body: ReviewRoleSwitchBody, admin=Depends(require_admin)
+):
     """Approve or reject a pending role switch request for a user."""
     if body.action not in {"approve", "reject"}:
-        raise HTTPException(status_code=400, detail="action must be 'approve' or 'reject'")
+        raise HTTPException(
+            status_code=400, detail="action must be 'approve' or 'reject'"
+        )
 
-    metadata_resp = await db_admin.table("users").select("role, metadata").eq("id", user_id).maybe_single().async_execute()
+    metadata_resp = (
+        await db_admin.table("users")
+        .select("role, metadata")
+        .eq("id", user_id)
+        .maybe_single()
+        .async_execute()
+    )
     row = metadata_resp.data or {}
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
@@ -187,13 +220,17 @@ async def review_role_switch_request(user_id: str, body: ReviewRoleSwitchBody, a
         break
 
     if not target_request:
-        raise HTTPException(status_code=404, detail="Pending role switch request not found")
+        raise HTTPException(
+            status_code=404, detail="Pending role switch request not found"
+        )
 
     now_iso = datetime.now(UTC).isoformat()
     target_request["status"] = "approved" if body.action == "approve" else "rejected"
     target_request["reviewed_by"] = admin.get("id")
     target_request["reviewed_at"] = now_iso
-    target_request["review_note"] = body.reason or ("Approved by admin" if body.action == "approve" else "Rejected by admin")
+    target_request["review_note"] = body.reason or (
+        "Approved by admin" if body.action == "approve" else "Rejected by admin"
+    )
 
     existing_meta["pending_role_switch_requests"] = pending_requests
     existing_meta["latest_role_switch_request"] = {
@@ -225,7 +262,9 @@ async def review_role_switch_request(user_id: str, body: ReviewRoleSwitchBody, a
     if body.action == "approve":
         updates["role"] = body.requested_role
 
-    resp = await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
+    resp = (
+        await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
+    )
     if not resp.data:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -234,7 +273,9 @@ async def review_role_switch_request(user_id: str, body: ReviewRoleSwitchBody, a
             from app.db_client import get_supabase_client
 
             sb = get_supabase_client()
-            sb.auth.admin.update_user_by_id(user_id, {"app_metadata": {"role": body.requested_role}})
+            sb.auth.admin.update_user_by_id(
+                user_id, {"app_metadata": {"role": body.requested_role}}
+            )
         except Exception as e:
             print(f"Warning: Failed to sync Supabase auth metadata: {e}")
 
@@ -249,7 +290,12 @@ async def review_role_switch_request(user_id: str, body: ReviewRoleSwitchBody, a
 @router.post("/users/{user_id}/verify")
 async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_admin)):
     """Verify or reject an NGO/Donor/Volunteer account."""
-    logger.info("verify_user called: user_id=%s status=%s by admin=%s", user_id, body.status, admin.get("id"))
+    logger.info(
+        "verify_user called: user_id=%s status=%s by admin=%s",
+        user_id,
+        body.status,
+        admin.get("id"),
+    )
 
     if body.status not in ("verified", "rejected", "pending"):
         raise HTTPException(status_code=400, detail="Invalid status")
@@ -257,13 +303,19 @@ async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_
     try:
         # 1. Update the Users table (both column and metadata for compatibility)
         metadata_resp = (
-            await db_admin.table("users").select("metadata").eq("id", user_id).maybe_single().async_execute()
+            await db_admin.table("users")
+            .select("metadata")
+            .eq("id", user_id)
+            .maybe_single()
+            .async_execute()
         )
         existing_meta = (metadata_resp.data or {}).get("metadata") or {}
 
         existing_meta["verification_status"] = body.status
         existing_meta["verification_notes"] = body.notes
-        existing_meta["verified_at"] = datetime.now(UTC).isoformat() if body.status == "verified" else None
+        existing_meta["verified_at"] = (
+            datetime.now(UTC).isoformat() if body.status == "verified" else None
+        )
         existing_meta["verified_by"] = admin.get("id")
 
         updates = {
@@ -272,8 +324,15 @@ async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_
             "updated_at": datetime.now(UTC).isoformat(),
         }
 
-        logger.info("Updating user %s with verification_status=%s", user_id, body.status)
-        resp = await db_admin.table("users").update(updates).eq("id", user_id).async_execute()
+        logger.info(
+            "Updating user %s with verification_status=%s", user_id, body.status
+        )
+        resp = (
+            await db_admin.table("users")
+            .update(updates)
+            .eq("id", user_id)
+            .async_execute()
+        )
         if not resp.data:
             logger.error("User %s not found during verification update", user_id)
             raise HTTPException(status_code=404, detail="User not found")
@@ -282,7 +341,9 @@ async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to update user %s verification in DB: %s", user_id, e, exc_info=True)
+        logger.error(
+            "Failed to update user %s verification in DB: %s", user_id, e, exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Database update failed: {str(e)}")
 
     # 2. Update Supabase auth metadata with verification status
@@ -298,7 +359,9 @@ async def verify_user(user_id: str, body: VerifyUserBody, admin=Depends(require_
         )
         logger.info("Supabase auth metadata updated for user %s", user_id)
     except Exception as e:
-        logger.warning("Failed to sync Supabase auth metadata for user %s: %s", user_id, e)
+        logger.warning(
+            "Failed to sync Supabase auth metadata for user %s: %s", user_id, e
+        )
 
     return {
         "status": body.status,
@@ -323,7 +386,13 @@ async def delete_user(user_id: str, admin=Depends(require_admin)):
 @router.get("/settings")
 async def get_settings(admin=Depends(require_admin)):
     """Get platform settings (single row)."""
-    resp = await db_admin.table("platform_settings").select("*").eq("id", 1).maybe_single().async_execute()
+    resp = (
+        await db_admin.table("platform_settings")
+        .select("*")
+        .eq("id", 1)
+        .maybe_single()
+        .async_execute()
+    )
     if not resp.data:
         # Return defaults if the row doesn't exist yet
         return {
@@ -354,7 +423,12 @@ async def update_settings(body: PlatformSettingsBody, admin=Depends(require_admi
     updates["updated_at"] = datetime.now(UTC).isoformat()
 
     # Upsert: update the single row
-    resp = await db_admin.table("platform_settings").update(updates).eq("id", 1).async_execute()
+    resp = (
+        await db_admin.table("platform_settings")
+        .update(updates)
+        .eq("id", 1)
+        .async_execute()
+    )
     if not resp.data:
         # Row might not exist – insert it
         updates["id"] = 1
@@ -389,7 +463,12 @@ async def platform_stats():
 
     try:
         # Count total users
-        users_resp = await db_admin.table("users").select("id", count="exact").limit(5000).async_execute()
+        users_resp = (
+            await db_admin.table("users")
+            .select("id", count="exact")
+            .limit(5000)
+            .async_execute()
+        )
         total_users = users_resp.count or 0
 
         # Count disasters
@@ -402,17 +481,26 @@ async def platform_stats():
         total_disasters = disasters_resp.count or 0
         disaster_data = disasters_resp.data or []
         active_disasters = sum(1 for d in disaster_data if d.get("status") == "active")
-        resolved_disasters = sum(1 for d in disaster_data if d.get("status") == "resolved")
-        total_casualties_helped = sum(int(d.get("casualties") or 0) for d in disaster_data)
+        resolved_disasters = sum(
+            1 for d in disaster_data if d.get("status") == "resolved"
+        )
+        total_casualties_helped = sum(
+            int(d.get("casualties") or 0) for d in disaster_data
+        )
 
         # Count resources
         resources_resp = (
-            await db_admin.table("resources").select("id, status", count="exact").limit(5000).async_execute()
+            await db_admin.table("resources")
+            .select("id, status", count="exact")
+            .limit(5000)
+            .async_execute()
         )
         total_resources = resources_resp.count or 0
         resource_data = resources_resp.data or []
         allocated_resources = sum(
-            1 for r in resource_data if r.get("status") in ("allocated", "in_transit", "delivered")
+            1
+            for r in resource_data
+            if r.get("status") in ("allocated", "in_transit", "delivered")
         )
 
         # Count volunteers
@@ -427,19 +515,29 @@ async def platform_stats():
 
         # Count NGOs
         ngos_resp = (
-            await db_admin.table("users").select("id", count="exact").eq("role", "ngo").limit(5000).async_execute()
+            await db_admin.table("users")
+            .select("id", count="exact")
+            .eq("role", "ngo")
+            .limit(5000)
+            .async_execute()
         )
         total_ngos = ngos_resp.count or 0
 
         # Count donations
         donations_resp = (
-            await db_admin.table("donations").select("amount").eq("status", "completed").limit(5000).async_execute()
+            await db_admin.table("donations")
+            .select("amount")
+            .eq("status", "completed")
+            .limit(5000)
+            .async_execute()
         )
         donation_data = donations_resp.data or []
         total_donated = sum(float(d.get("amount", 0)) for d in donation_data)
 
         result = {
-            "lives_impacted": max(total_casualties_helped, total_users * 3),  # Estimate: each user impacts ~3 people
+            "lives_impacted": max(
+                total_casualties_helped, total_users * 3
+            ),  # Estimate: each user impacts ~3 people
             "total_users": total_users,
             "total_volunteers": total_volunteers,
             "total_ngos": total_ngos,
@@ -449,7 +547,9 @@ async def platform_stats():
             "total_resources": total_resources,
             "resources_allocated": allocated_resources,
             "total_donated": total_donated,
-            "avg_response_minutes": (45 if resolved_disasters == 0 else max(15, 90 - resolved_disasters * 2)),
+            "avg_response_minutes": (
+                45 if resolved_disasters == 0 else max(15, 90 - resolved_disasters * 2)
+            ),
         }
 
         mem_cache_set(_cache_key, result, TTL_MEDIUM)
@@ -509,7 +609,9 @@ async def recent_incidents():
         base_data = resp.data or []
 
         # Manual enrichment for locations
-        location_ids = list(set(d["location_id"] for d in base_data if d.get("location_id")))
+        location_ids = list(
+            set(d["location_id"] for d in base_data if d.get("location_id"))
+        )
         location_map = {}
         if location_ids:
             loc_resp = (
@@ -534,7 +636,10 @@ async def recent_incidents():
                     "created_at": d.get("created_at"),
                     "latitude": loc.get("latitude"),
                     "longitude": loc.get("longitude"),
-                    "location_name": loc.get("name") or loc.get("city") or loc.get("country") or "Unknown",
+                    "location_name": loc.get("name")
+                    or loc.get("city")
+                    or loc.get("country")
+                    or "Unknown",
                 }
             )
         return incidents
@@ -568,7 +673,13 @@ async def _resolve_assignee_role(assignee_id: str | None, fallback: str = "ngo")
     if not assignee_id:
         return fallback
     try:
-        assignee = await db_admin.table("users").select("role").eq("id", assignee_id).maybe_single().async_execute()
+        assignee = (
+            await db_admin.table("users")
+            .select("role")
+            .eq("id", assignee_id)
+            .maybe_single()
+            .async_execute()
+        )
         role = (assignee.data or {}).get("role")
         return role or fallback
     except Exception:
@@ -582,9 +693,13 @@ async def list_all_requests(
         None,
         description="Filter by status: pending,approved,assigned,in_progress,completed,rejected",
     ),
-    priority: str | None = Query(None, description="Filter by priority: critical,high,medium,low"),
+    priority: str | None = Query(
+        None, description="Filter by priority: critical,high,medium,low"
+    ),
     resource_type: str | None = Query(None, description="Filter by resource type"),
-    search: str | None = Query(None, description="Search by ID, description, or victim_id"),
+    search: str | None = Query(
+        None, description="Search by ID, description, or victim_id"
+    ),
     date_from: str | None = Query(None, description="Filter from date (ISO)"),
     date_to: str | None = Query(None, description="Filter to date (ISO)"),
     sort_by: str = Query("created_at", description="Sort field"),
@@ -605,7 +720,9 @@ async def list_all_requests(
         if resource_type:
             query = query.eq("resource_type", resource_type)
         if search:
-            query = query.or_(f"id.eq.{search},description.ilike.%{search}%,victim_id.eq.{search}")
+            query = query.or_(
+                f"id.eq.{search},description.ilike.%{search}%,victim_id.eq.{search}"
+            )
         if date_from:
             query = query.gte("created_at", date_from)
         if date_to:
@@ -683,7 +800,9 @@ async def list_all_requests(
                     contributors.append(
                         {
                             "id": pid,
-                            "full_name": u_info.get("full_name") or entry.get("provider_name") or "Unknown",
+                            "full_name": u_info.get("full_name")
+                            or entry.get("provider_name")
+                            or "Unknown",
                             "role": entry.get("provider_role") or "unknown",
                         }
                     )
@@ -692,7 +811,12 @@ async def list_all_requests(
             requests.append(row)
 
         # Stats overview
-        all_resp = await db_admin.table("resource_requests").select("status", count="exact").limit(5000).async_execute()
+        all_resp = (
+            await db_admin.table("resource_requests")
+            .select("status", count="exact")
+            .limit(5000)
+            .async_execute()
+        )
         status_counts = {}
         for row in all_resp.data or []:
             s = row.get("status", "unknown")
@@ -708,7 +832,9 @@ async def list_all_requests(
     except Exception as e:
         print(f"❌ ADMIN LIST REQUESTS ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error fetching requests: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching requests: {str(e)}"
+        )
 
 
 @router.get("/requests/{request_id}")
@@ -718,7 +844,13 @@ async def get_request_detail(
 ):
     """Get a single resource request with full detail — admin only."""
     try:
-        response = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
+        response = (
+            await db_admin.table("resource_requests")
+            .select("*")
+            .eq("id", request_id)
+            .single()
+            .async_execute()
+        )
         if not response.data:
             raise HTTPException(status_code=404, detail="Request not found")
 
@@ -757,17 +889,30 @@ async def approve_reject_request(
 ):
     """Approve or reject a resource request. Admin only."""
     if body.action not in ("approve", "reject", "reassign", "escalate"):
-        raise HTTPException(status_code=400, detail="Action must be one of: approve, reject, reassign, escalate")
+        raise HTTPException(
+            status_code=400,
+            detail="Action must be one of: approve, reject, reassign, escalate",
+        )
 
     if body.action == "reject" and not body.rejection_reason:
-        raise HTTPException(status_code=400, detail="Rejection reason is required when rejecting")
+        raise HTTPException(
+            status_code=400, detail="Rejection reason is required when rejecting"
+        )
 
     if body.action == "reassign" and not body.assigned_to:
-        raise HTTPException(status_code=400, detail="assigned_to is required when reassigning")
+        raise HTTPException(
+            status_code=400, detail="assigned_to is required when reassigning"
+        )
 
     try:
         # Verify request exists
-        existing = await db_admin.table("resource_requests").select("*").eq("id", request_id).single().async_execute()
+        existing = (
+            await db_admin.table("resource_requests")
+            .select("*")
+            .eq("id", request_id)
+            .single()
+            .async_execute()
+        )
         if not existing.data:
             raise HTTPException(status_code=404, detail="Request not found")
 
@@ -800,7 +945,9 @@ async def approve_reject_request(
                     if body.assigned_role:
                         update_fields["assigned_role"] = body.assigned_role
                     else:
-                        update_fields["assigned_role"] = await _resolve_assignee_role(body.assigned_to, fallback="ngo")
+                        update_fields["assigned_role"] = await _resolve_assignee_role(
+                            body.assigned_to, fallback="ngo"
+                        )
                 else:
                     # Auto-assign to the first NGO that submitted availability
                     ngo_pulse = (
@@ -825,13 +972,17 @@ async def approve_reject_request(
                 if body.assigned_role:
                     update_fields["assigned_role"] = body.assigned_role
                 elif "assigned_role" not in update_fields:
-                    update_fields["assigned_role"] = await _resolve_assignee_role(body.assigned_to, fallback="ngo")
+                    update_fields["assigned_role"] = await _resolve_assignee_role(
+                        body.assigned_to, fallback="ngo"
+                    )
             if body.estimated_delivery:
                 update_fields["estimated_delivery"] = body.estimated_delivery
 
         elif body.action == "reject":
             if current_status in ("completed",):
-                raise HTTPException(status_code=400, detail="Cannot reject a completed request.")
+                raise HTTPException(
+                    status_code=400, detail="Cannot reject a completed request."
+                )
             update_fields["status"] = "rejected"
             update_fields["rejection_reason"] = body.rejection_reason
             update_fields["assigned_to"] = None
@@ -847,7 +998,9 @@ async def approve_reject_request(
             update_fields["status"] = "assigned"
             update_fields["assigned_to"] = body.assigned_to
             update_fields["rejection_reason"] = None
-            update_fields["assigned_role"] = body.assigned_role or await _resolve_assignee_role(body.assigned_to)
+            update_fields["assigned_role"] = (
+                body.assigned_role or await _resolve_assignee_role(body.assigned_to)
+            )
 
         elif body.action == "escalate":
             if current_status in ("completed", "closed", "rejected"):
@@ -857,11 +1010,21 @@ async def approve_reject_request(
                 )
 
             current_priority = (existing.data.get("priority") or "medium").lower()
-            escalation_map = {"low": "medium", "medium": "high", "high": "critical", "critical": "critical"}
+            escalation_map = {
+                "low": "medium",
+                "medium": "high",
+                "high": "critical",
+                "critical": "critical",
+            }
             update_fields["priority"] = escalation_map.get(current_priority, "high")
             update_fields["sla_escalated_at"] = datetime.now(UTC).isoformat()
 
-        response = await db_admin.table("resource_requests").update(update_fields).eq("id", request_id).async_execute()
+        response = (
+            await db_admin.table("resource_requests")
+            .update(update_fields)
+            .eq("id", request_id)
+            .async_execute()
+        )
 
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to update request")
@@ -873,7 +1036,9 @@ async def approve_reject_request(
             # Build audit details: include admin note if provided
             audit_details = body.rejection_reason if body.action == "reject" else None
             if body.admin_note:
-                audit_details = f"{audit_details or ''}\n[Admin Note] {body.admin_note}".strip()
+                audit_details = (
+                    f"{audit_details or ''}\n[Admin Note] {body.admin_note}".strip()
+                )
 
             await notify_request_status_change(
                 request_id=request_id,
@@ -919,7 +1084,11 @@ async def approve_reject_request(
 
             # ── Notify the assigned NGO when request is assigned ──
             assigned_to = update_fields.get("assigned_to")
-            if new_status == "assigned" and assigned_to and assigned_to != previous_assignee:
+            if (
+                new_status == "assigned"
+                and assigned_to
+                and assigned_to != previous_assignee
+            ):
                 await notify_user(
                     user_id=assigned_to,
                     title="📦 Request Assigned to You",
@@ -942,7 +1111,11 @@ async def approve_reject_request(
                 reason=body.admin_note or body.rejection_reason,
             )
             assigned_to = update_fields.get("assigned_to")
-            if new_status == "assigned" and assigned_to and (assigned_to != previous_assignee or current_status != "assigned"):
+            if (
+                new_status == "assigned"
+                and assigned_to
+                and (assigned_to != previous_assignee or current_status != "assigned")
+            ):
                 await emit_request_assigned(
                     request_id=request_id,
                     assigned_to=assigned_to,
@@ -967,7 +1140,9 @@ async def approve_reject_request(
     except Exception as e:
         print(f"❌ ADMIN ACTION ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error processing action: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error processing action: {str(e)}"
+        )
 
 
 @router.patch("/requests/{request_id}/status")
@@ -992,7 +1167,9 @@ async def update_request_status(
         "rejected",
     ]
     if new_status not in valid_statuses:
-        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}"
+        )
 
     try:
         existing = (
@@ -1013,19 +1190,41 @@ async def update_request_status(
             update_fields["rejection_reason"] = body["rejection_reason"]
         if body.get("assigned_to"):
             update_fields["assigned_to"] = body["assigned_to"]
-            update_fields["assigned_role"] = await _resolve_assignee_role(body["assigned_to"])
-        elif new_status in ("pending", "approved", "availability_submitted", "under_review", "rejected"):
+            update_fields["assigned_role"] = await _resolve_assignee_role(
+                body["assigned_to"]
+            )
+        elif new_status in (
+            "pending",
+            "approved",
+            "availability_submitted",
+            "under_review",
+            "rejected",
+        ):
             update_fields["assigned_to"] = None
             update_fields["assigned_role"] = None
         if body.get("estimated_delivery"):
             update_fields["estimated_delivery"] = body["estimated_delivery"]
 
-        if new_status == "assigned" and not update_fields.get("assigned_to") and not existing.data.get("assigned_to"):
-            raise HTTPException(status_code=400, detail="assigned_to is required when status is set to 'assigned'")
+        if (
+            new_status == "assigned"
+            and not update_fields.get("assigned_to")
+            and not existing.data.get("assigned_to")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="assigned_to is required when status is set to 'assigned'",
+            )
 
-        response = await db_admin.table("resource_requests").update(update_fields).eq("id", request_id).async_execute()
+        response = (
+            await db_admin.table("resource_requests")
+            .update(update_fields)
+            .eq("id", request_id)
+            .async_execute()
+        )
         if not response.data:
-            raise HTTPException(status_code=500, detail="Failed to update request status")
+            raise HTTPException(
+                status_code=500, detail="Failed to update request status"
+            )
         return _safe_request_row(response.data[0])
     except HTTPException:
         raise
@@ -1040,7 +1239,9 @@ async def update_request_status(
 async def list_available_resources(
     admin=Depends(require_admin),
     category: str | None = Query(None, description="Filter by category"),
-    status: str | None = Query(None, description="Filter by status: available, reserved"),
+    status: str | None = Query(
+        None, description="Filter by status: available, reserved"
+    ),
     search: str | None = Query(None, description="Search by title or description"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -1056,7 +1257,10 @@ async def list_available_resources(
             status_filter = "available"
 
         result = await unified_resource_service.get_unified_resources(
-            category=category, status=status_filter, limit=page_size, offset=(page - 1) * page_size
+            category=category,
+            status=status_filter,
+            limit=page_size,
+            offset=(page - 1) * page_size,
         )
 
         resources = result["resources"]
@@ -1064,7 +1268,9 @@ async def list_available_resources(
         category_summary = result["category_summary"]
 
         # Provider names enrichment (similar to original logic)
-        provider_ids = list(set(r.get("provider_id") for r in resources if r.get("provider_id")))
+        provider_ids = list(
+            set(r.get("provider_id") for r in resources if r.get("provider_id"))
+        )
         provider_names = {}
         if provider_ids:
             try:
@@ -1100,7 +1306,9 @@ async def list_available_resources(
     except Exception as e:
         print(f"❌ ADMIN RESOURCES ERROR: {type(e).__name__}: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error fetching resources: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching resources: {str(e)}"
+        )
 
 
 # ── Notifications & Audit Trail ───────────────────────────────────────────
@@ -1119,14 +1327,16 @@ async def list_notifications(
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-    notifications = await get_user_notifications(user_id, unread_only=unread_only, limit=limit)
+    notifications = await get_user_notifications(
+        user_id, unread_only=unread_only, limit=limit
+    )
     unread = await get_unread_count(user_id)
     return {"notifications": notifications, "unread_count": unread}
 
 
 @router.post("/notifications/mark-read")
 async def mark_read(
-    body: dict,
+    body: dict | None = Body(default=None),
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     """Mark notifications as read."""
@@ -1136,7 +1346,12 @@ async def mark_read(
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-    ids = body.get("notification_ids")  # None = mark all
+    payload = body or {}
+    ids = payload.get("notification_ids", payload.get("ids"))  # None = mark all
+    if ids is not None and not isinstance(ids, list):
+        raise HTTPException(
+            status_code=400, detail="notification_ids must be a list of IDs"
+        )
     count = await mark_notifications_read(user_id, ids)
     return {"marked_read": count}
 
@@ -1243,7 +1458,9 @@ async def get_ngo_submissions(
 
         return {"submissions": enriched, "total": len(enriched)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching submissions: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error fetching submissions: {str(e)}"
+        )
 
 
 # ── Analytics Data ────────────────────────────────────────────────────────
@@ -1315,7 +1532,9 @@ async def get_request_trends(
                 except Exception:
                     pass
 
-        avg_response_hours = round(sum(status_times) / len(status_times), 1) if status_times else 0
+        avg_response_hours = (
+            round(sum(status_times) / len(status_times), 1) if status_times else 0
+        )
 
         return {
             "daily_trends": sorted(daily.values(), key=lambda x: x["date"]),
@@ -1344,7 +1563,9 @@ async def export_data(
 ):
     """Export requests, resources, or users as CSV. Admin only."""
     if data_type not in ("requests", "resources", "users"):
-        raise HTTPException(status_code=400, detail="Invalid data_type. Use: requests, resources, users")
+        raise HTTPException(
+            status_code=400, detail="Invalid data_type. Use: requests, resources, users"
+        )
 
     try:
         output = io.StringIO()
@@ -1394,7 +1615,12 @@ async def export_data(
                 )
 
         elif data_type == "resources":
-            resp = await db_admin.table("resources").select("*").limit(5000).async_execute()
+            resp = (
+                await db_admin.table("resources")
+                .select("*")
+                .limit(5000)
+                .async_execute()
+            )
             rows = resp.data or []
             writer.writerow(
                 [
@@ -1462,7 +1688,9 @@ async def export_data(
         return StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={data_type}_export.csv"},
+            headers={
+                "Content-Disposition": f"attachment; filename={data_type}_export.csv"
+            },
         )
     except Exception as e:
         traceback.print_exc()
@@ -1484,7 +1712,9 @@ async def detect_duplicate_requests(
         since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
         resp = await (
             db_admin.table("resource_requests")
-            .select("id, victim_id, resource_type, quantity, description, status, created_at")
+            .select(
+                "id, victim_id, resource_type, quantity, description, status, created_at"
+            )
             .gte("created_at", since)
             .order("victim_id")
             .order("created_at")
@@ -1539,7 +1769,9 @@ async def detect_duplicate_requests(
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error detecting duplicates: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error detecting duplicates: {str(e)}"
+        )
 
 
 @router.get("/analytics/model-info")
@@ -1561,7 +1793,9 @@ async def get_admin_model_info(admin=Depends(require_admin)):
 class FairnessApplyBody(BaseModel):
     """Body for applying a specific Pareto-frontier allocation plan."""
 
-    plan_index: int = Field(..., ge=0, le=9, description="Index of the plan on the frontier (0–9)")
+    plan_index: int = Field(
+        ..., ge=0, le=9, description="Index of the plan on the frontier (0–9)"
+    )
     disaster_id: str | None = Field(None, description="Disaster to allocate for")
 
 
@@ -1596,7 +1830,12 @@ def _fairness_clamp(value: float, minimum: float, maximum: float) -> float:
 
 
 def _fairness_priority_score(row: dict) -> float:
-    priority = (row.get("manual_priority") or row.get("priority") or row.get("nlp_priority") or "medium").lower()
+    priority = (
+        row.get("manual_priority")
+        or row.get("priority")
+        or row.get("nlp_priority")
+        or "medium"
+    ).lower()
     return FAIRNESS_PRIORITY_SCORES.get(priority, 5.0)
 
 
@@ -1610,18 +1849,27 @@ def _fairness_haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -
     return 6371.0 * 2 * asin(sqrt(a))
 
 
-def _fairness_point_from_row(row: dict | None, location_map: dict[str, dict], disaster_map: dict[str, dict]) -> tuple[float | None, float | None]:
+def _fairness_point_from_row(
+    row: dict | None, location_map: dict[str, dict], disaster_map: dict[str, dict]
+) -> tuple[float | None, float | None]:
     if not row:
         return None, None
 
     if row.get("latitude") is not None and row.get("longitude") is not None:
-        return _fairness_safe_float(row.get("latitude")), _fairness_safe_float(row.get("longitude"))
+        return _fairness_safe_float(row.get("latitude")), _fairness_safe_float(
+            row.get("longitude")
+        )
 
     location_id = row.get("location_id")
     if location_id and location_id in location_map:
         location = location_map[location_id]
-        if location.get("latitude") is not None and location.get("longitude") is not None:
-            return _fairness_safe_float(location.get("latitude")), _fairness_safe_float(location.get("longitude"))
+        if (
+            location.get("latitude") is not None
+            and location.get("longitude") is not None
+        ):
+            return _fairness_safe_float(location.get("latitude")), _fairness_safe_float(
+                location.get("longitude")
+            )
 
     disaster_id = row.get("disaster_id") or row.get("linked_disaster_id")
     disaster = disaster_map.get(disaster_id) if disaster_id else None
@@ -1631,15 +1879,24 @@ def _fairness_point_from_row(row: dict | None, location_map: dict[str, dict], di
     return None, None
 
 
-def _fairness_user_point(user: dict, location_map: dict[str, dict]) -> tuple[float | None, float | None]:
+def _fairness_user_point(
+    user: dict, location_map: dict[str, dict]
+) -> tuple[float | None, float | None]:
     metadata = user.get("metadata") or {}
     if metadata.get("latitude") is not None and metadata.get("longitude") is not None:
-        return _fairness_safe_float(metadata.get("latitude")), _fairness_safe_float(metadata.get("longitude"))
+        return _fairness_safe_float(metadata.get("latitude")), _fairness_safe_float(
+            metadata.get("longitude")
+        )
     location_id = metadata.get("location_id")
     if location_id and location_id in location_map:
         location = location_map[location_id]
-        if location.get("latitude") is not None and location.get("longitude") is not None:
-            return _fairness_safe_float(location.get("latitude")), _fairness_safe_float(location.get("longitude"))
+        if (
+            location.get("latitude") is not None
+            and location.get("longitude") is not None
+        ):
+            return _fairness_safe_float(location.get("latitude")), _fairness_safe_float(
+                location.get("longitude")
+            )
     return None, None
 
 
@@ -1647,16 +1904,34 @@ async def _build_fairness_inputs(disaster_id: str | None):
     from app.services.allocation_engine import AvailableResource, ResourceNeed
     from ml.fairness_metrics import HistoricalRecord, ZoneDemographics
 
-    resource_resp = await db_admin.table("resources").select("*").eq("status", "available").async_execute()
-    request_resp = await db_admin.table("resource_requests").select("*").limit(5000).async_execute()
-    disaster_resp = await db_admin.table("disasters").select("*").limit(2000).async_execute()
+    resource_resp = (
+        await db_admin.table("resources")
+        .select("*")
+        .eq("status", "available")
+        .async_execute()
+    )
+    request_resp = (
+        await db_admin.table("resource_requests")
+        .select("*")
+        .limit(5000)
+        .async_execute()
+    )
+    disaster_resp = (
+        await db_admin.table("disasters").select("*").limit(2000).async_execute()
+    )
     location_resp = (
         await db_admin.table("locations")
         .select("id, name, latitude, longitude, metadata, population, type")
         .limit(5000)
         .async_execute()
     )
-    ngo_resp = await db_admin.table("users").select("id, metadata").eq("role", "ngo").limit(2000).async_execute()
+    ngo_resp = (
+        await db_admin.table("users")
+        .select("id, metadata")
+        .eq("role", "ngo")
+        .limit(2000)
+        .async_execute()
+    )
 
     resource_rows = resource_resp.data or []
     request_rows = request_resp.data or []
@@ -1676,7 +1951,9 @@ async def _build_fairness_inputs(disaster_id: str | None):
     filtered_requests = [row for row in request_rows if _matches_request(row)]
     if disaster_id:
         resource_rows = [
-            row for row in resource_rows if row.get("disaster_id") in (None, "", disaster_id)
+            row
+            for row in resource_rows
+            if row.get("disaster_id") in (None, "", disaster_id)
         ]
 
     resources = []
@@ -1686,7 +1963,9 @@ async def _build_fairness_inputs(disaster_id: str | None):
         expiry_str = row.get("expiry_date")
         if expiry_str:
             try:
-                expiry_date = datetime.fromisoformat(str(expiry_str).replace("Z", "+00:00"))
+                expiry_date = datetime.fromisoformat(
+                    str(expiry_str).replace("Z", "+00:00")
+                )
             except Exception:
                 expiry_date = None
         resources.append(
@@ -1705,7 +1984,12 @@ async def _build_fairness_inputs(disaster_id: str | None):
     need_groups: dict[tuple[str, str], dict] = {}
     zone_aggregates: dict[str, dict] = {}
     for row in filtered_requests:
-        zone_id = row.get("location_id") or row.get("disaster_id") or row.get("linked_disaster_id") or f"request:{row['id']}"
+        zone_id = (
+            row.get("location_id")
+            or row.get("disaster_id")
+            or row.get("linked_disaster_id")
+            or f"request:{row['id']}"
+        )
         lat, lon = _fairness_point_from_row(row, location_map, disaster_map)
         quantity = max(_fairness_safe_float(row.get("quantity"), 1.0), 1.0)
         head_count = max(int(row.get("head_count") or 1), 1)
@@ -1731,12 +2015,39 @@ async def _build_fairness_inputs(disaster_id: str | None):
         zone["request_count"] += 1
         zone["head_count"] += head_count
         zone["urgent_count"] += 1 if priority_score >= 8.0 else 0
-        zone["verified_count"] += 1 if row.get("is_verified") or row.get("verification_status") == "verified" else 0
-        zone["fulfillment_total"] += _fairness_safe_float(row.get("fulfillment_pct"), 0.0)
+        zone["verified_count"] += (
+            1
+            if row.get("is_verified") or row.get("verification_status") == "verified"
+            else 0
+        )
+        zone["fulfillment_total"] += _fairness_safe_float(
+            row.get("fulfillment_pct"), 0.0
+        )
         lowered_type = resource_type.lower()
-        if any(token in lowered_type for token in ("medical", "medicine", "oxygen", "ambulance", "insulin", "blood")):
+        if any(
+            token in lowered_type
+            for token in (
+                "medical",
+                "medicine",
+                "oxygen",
+                "ambulance",
+                "insulin",
+                "blood",
+            )
+        ):
             zone["medical_weight"] += 1
-        if any(token in lowered_type for token in ("water", "food", "shelter", "blanket", "clothing", "baby", "hygiene")):
+        if any(
+            token in lowered_type
+            for token in (
+                "water",
+                "food",
+                "shelter",
+                "blanket",
+                "clothing",
+                "baby",
+                "hygiene",
+            )
+        ):
             zone["survival_weight"] += 1
 
         need_key = (zone_id, resource_type)
@@ -1755,7 +2066,10 @@ async def _build_fairness_inputs(disaster_id: str | None):
             },
         )
         grouped_need["quantity"] += quantity
-        grouped_need["urgency"] = max(grouped_need["urgency"], _fairness_clamp(priority_score + min(head_count, 8) / 4.0, 1.0, 10.0))
+        grouped_need["urgency"] = max(
+            grouped_need["urgency"],
+            _fairness_clamp(priority_score + min(head_count, 8) / 4.0, 1.0, 10.0),
+        )
         grouped_need["head_count"] = max(grouped_need["head_count"], head_count)
 
     needs = [
@@ -1794,12 +2108,17 @@ async def _build_fairness_inputs(disaster_id: str | None):
             nearby_ngos = sum(
                 1
                 for ngo_lat, ngo_lon in ngo_points
-                if _fairness_haversine_km(zone_data["lat"], zone_data["lon"], ngo_lat, ngo_lon) <= 20.0
+                if _fairness_haversine_km(
+                    zone_data["lat"], zone_data["lon"], ngo_lat, ngo_lon
+                )
+                <= 20.0
             )
 
         elderly_ratio = _fairness_safe_float(
             metadata.get("elderly_ratio"),
-            _fairness_clamp(0.08 + (urgent_share * 0.18) + (medical_share * 0.12), 0.05, 0.55),
+            _fairness_clamp(
+                0.08 + (urgent_share * 0.18) + (medical_share * 0.12), 0.05, 0.55
+            ),
         )
         children_ratio = _fairness_safe_float(
             metadata.get("children_ratio"),
@@ -1807,10 +2126,20 @@ async def _build_fairness_inputs(disaster_id: str | None):
         )
         medical_needs_ratio = _fairness_safe_float(
             metadata.get("medical_needs_ratio"),
-            _fairness_clamp(0.05 + (medical_share * 0.35) + ((1.0 - verified_share) * 0.10), 0.05, 0.85),
+            _fairness_clamp(
+                0.05 + (medical_share * 0.35) + ((1.0 - verified_share) * 0.10),
+                0.05,
+                0.85,
+            ),
         )
-        population = max(int(location.get("population") or 0), zone_data["head_count"] or 1)
-        is_rural = bool(metadata.get("is_rural", location.get("type") == "region" or nearby_ngos == 0))
+        population = max(
+            int(location.get("population") or 0), zone_data["head_count"] or 1
+        )
+        is_rural = bool(
+            metadata.get(
+                "is_rural", location.get("type") == "region" or nearby_ngos == 0
+            )
+        )
 
         zones.append(
             ZoneDemographics(
@@ -1829,14 +2158,21 @@ async def _build_fairness_inputs(disaster_id: str | None):
 
     hist_records: list = []
     try:
-        alloc_log_resp = await db_admin.table("allocation_log").select("*").limit(5000).async_execute()
+        alloc_log_resp = (
+            await db_admin.table("allocation_log")
+            .select("*")
+            .limit(5000)
+            .async_execute()
+        )
         for row in alloc_log_resp.data or []:
             hist_records.append(
                 HistoricalRecord(
                     disaster_id=row.get("disaster_id", ""),
                     zone_id=row.get("zone_id", row.get("location_id", "")),
                     resources_received=_fairness_safe_float(row.get("quantity"), 0.0),
-                    median_resources=_fairness_safe_float(row.get("median_quantity"), 0.0),
+                    median_resources=_fairness_safe_float(
+                        row.get("median_quantity"), 0.0
+                    ),
                 )
             )
     except Exception:
@@ -1844,11 +2180,22 @@ async def _build_fairness_inputs(disaster_id: str | None):
 
     summary = {
         "active_request_count": len(filtered_requests),
-        "victims_impacted": sum(zone["head_count"] for zone in zone_aggregates.values()),
-        "urgent_request_count": sum(zone["urgent_count"] for zone in zone_aggregates.values()),
+        "victims_impacted": sum(
+            zone["head_count"] for zone in zone_aggregates.values()
+        ),
+        "urgent_request_count": sum(
+            zone["urgent_count"] for zone in zone_aggregates.values()
+        ),
         "zones_with_live_requests": len(zone_aggregates),
-        "requested_resource_units": round(sum(item["quantity"] for item in need_groups.values()), 2),
-        "available_resource_units": round(sum(_fairness_safe_float(row.get("quantity"), 0.0) for row in resource_rows), 2),
+        "requested_resource_units": round(
+            sum(item["quantity"] for item in need_groups.values()), 2
+        ),
+        "available_resource_units": round(
+            sum(
+                _fairness_safe_float(row.get("quantity"), 0.0) for row in resource_rows
+            ),
+            2,
+        ),
     }
 
     return resources, needs, zones, hist_records, summary
@@ -1856,8 +2203,12 @@ async def _build_fairness_inputs(disaster_id: str | None):
 
 @router.get("/fairness-frontier")
 async def get_fairness_frontier(
-    disaster_id: str | None = Query(None, description="Disaster ID to compute frontier for"),
-    max_distance_km: float = Query(500.0, ge=1, description="Max resource distance in km"),
+    disaster_id: str | None = Query(
+        None, description="Disaster ID to compute frontier for"
+    ),
+    max_distance_km: float = Query(
+        500.0, ge=1, description="Max resource distance in km"
+    ),
     admin=Depends(require_admin),
 ):
     """
@@ -1871,7 +2222,10 @@ async def get_fairness_frontier(
         from ml.fair_allocator import (
             compute_pareto_frontier,
         )
-        resources, needs, zones, hist_records, summary = await _build_fairness_inputs(disaster_id)
+
+        resources, needs, zones, hist_records, summary = await _build_fairness_inputs(
+            disaster_id
+        )
 
         # ── Compute Pareto frontier ──
         frontier = compute_pareto_frontier(
@@ -1907,7 +2261,9 @@ async def get_fairness_frontier(
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to compute fairness frontier: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to compute fairness frontier: {str(e)}"
+        )
 
 
 @router.post("/fairness-frontier/apply")
@@ -1925,7 +2281,9 @@ async def apply_fairness_plan(
         from ml.fair_allocator import compute_pareto_frontier
         from ml.fairness_metrics import ZoneAllocation as ZA
 
-        resources, needs, zones, hist_records, _summary = await _build_fairness_inputs(body.disaster_id)
+        resources, needs, zones, hist_records, _summary = await _build_fairness_inputs(
+            body.disaster_id
+        )
 
         frontier = compute_pareto_frontier(
             resources=resources,
@@ -1969,7 +2327,10 @@ async def apply_fairness_plan(
         try:
             from ml.fair_allocator import generate_fairness_audit
 
-            zone_allocs = [ZA(zone_id=zid, allocated_quantity=qty) for zid, qty in chosen.zone_allocations.items()]
+            zone_allocs = [
+                ZA(zone_id=zid, allocated_quantity=qty)
+                for zid, qty in chosen.zone_allocations.items()
+            ]
             audit = generate_fairness_audit(
                 zones=zones,
                 allocations=zone_allocs,
@@ -2007,7 +2368,12 @@ async def get_fairness_audit(
 ):
     """Retrieve stored fairness audit reports."""
     try:
-        query = db_admin.table("fairness_audits").select("*").order("applied_at", desc=True).limit(limit)
+        query = (
+            db_admin.table("fairness_audits")
+            .select("*")
+            .order("applied_at", desc=True)
+            .limit(limit)
+        )
         if disaster_id:
             query = query.eq("disaster_id", disaster_id)
         resp = await query.async_execute()
@@ -2023,7 +2389,9 @@ async def get_fairness_audit(
 class ScheduleSitRepBody(BaseModel):
     """Body for configuring the SitRep generation schedule."""
 
-    interval_hours: int = Field(..., ge=1, le=24, description="Interval in hours (1–24)")
+    interval_hours: int = Field(
+        ..., ge=1, le=24, description="Interval in hours (1–24)"
+    )
 
 
 @router.post("/sitrep/schedule")
@@ -2047,7 +2415,9 @@ async def schedule_sitrep(
 
         # If the app supports runtime config reload, update the config object
         # For now, we log the change and note that a restart may be needed
-        logger.info(f"Scheduled SitRep interval updated to {body.interval_hours}h (UTC hour {new_hour})")
+        logger.info(
+            f"Scheduled SitRep interval updated to {body.interval_hours}h (UTC hour {new_hour})"
+        )
 
         return {
             "message": f"Scheduled SitRep interval set to {body.interval_hours} hour(s).",
@@ -2057,7 +2427,9 @@ async def schedule_sitrep(
         }
     except Exception as e:
         logger.error(f"Failed to schedule SitRep: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to schedule SitRep: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to schedule SitRep: {str(e)}"
+        )
 
 
 @router.get("/sitrep/schedule")

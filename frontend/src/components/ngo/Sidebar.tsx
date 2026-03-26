@@ -71,7 +71,7 @@ export function NGOSidebar() {
                     <Menu className="w-5 h-5 text-slate-600 dark:text-slate-400" />
                 </button>
                 <div className="flex items-center gap-2 flex-1">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center">
+                    <div className="w-8 h-8 rounded-lg bg-linear-to-br from-blue-500 to-cyan-600 flex items-center justify-center">
                         <Building2 className="w-4 h-4 text-white" />
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">NGO Portal</span>
@@ -101,7 +101,7 @@ export function NGOSidebar() {
                 {/* Logo */}
                 <div className="flex items-center justify-between h-16 px-5 border-b border-slate-200 dark:border-white/5 shrink-0">
                     <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+                        <div className="w-9 h-9 rounded-xl bg-linear-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
                             <Building2 className="w-5 h-5 text-white" />
                         </div>
                         <div>
@@ -116,8 +116,8 @@ export function NGOSidebar() {
 
                 {/* User card */}
                 <div className="p-4 border-b border-slate-200 dark:border-white/5 shrink-0">
-                    <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/5">
-                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/80 to-cyan-500/80 flex items-center justify-center text-white font-bold text-sm shadow-lg">
+                    <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-white/3 border border-slate-200 dark:border-white/5">
+                        <div className="w-10 h-10 rounded-full bg-linear-to-br from-blue-500/80 to-cyan-500/80 flex items-center justify-center text-white font-bold text-sm shadow-lg">
                             {profile?.full_name?.charAt(0)?.toUpperCase() || 'N'}
                         </div>
                         <div className="min-w-0">
@@ -138,10 +138,10 @@ export function NGOSidebar() {
                                 className={cn(
                                     'flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200',
                                     active
-                                        ? 'bg-gradient-to-r from-blue-500/10 to-cyan-500/10 dark:from-blue-500/15 dark:to-cyan-500/10 text-blue-700 dark:text-white border border-blue-200 dark:border-blue-500/20 shadow-sm'
-                                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/[0.04]'
+                                        ? 'bg-linear-to-r from-blue-500/10 to-cyan-500/10 dark:from-blue-500/15 dark:to-cyan-500/10 text-blue-700 dark:text-white border border-blue-200 dark:border-blue-500/20 shadow-sm'
+                                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/4'
                                 )}>
-                                <Icon className={cn('w-[18px] h-[18px] shrink-0', active ? 'text-blue-500 dark:text-blue-400' : '')} />
+                                <Icon className={cn('w-4.5 h-4.5 shrink-0', active ? 'text-blue-500 dark:text-blue-400' : '')} />
                                 <span>{item.label}</span>
                             </Link>
                         )
@@ -151,13 +151,13 @@ export function NGOSidebar() {
                 {/* Bottom */}
                 <div className="p-3 border-t border-slate-200 dark:border-white/5 space-y-1 shrink-0">
                     <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                        className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/[0.04] transition-all">
-                        {mounted ? (theme === 'dark' ? <Sun className="w-[18px] h-[18px]" /> : <Moon className="w-[18px] h-[18px]" />) : <div className="w-[18px] h-[18px]" />}
+                        className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-white/4 transition-all">
+                        {mounted ? (theme === 'dark' ? <Sun className="w-4.5 h-4.5" /> : <Moon className="w-4.5 h-4.5" />) : <div className="w-4.5 h-4.5" />}
                         <span>{mounted ? (theme === 'dark' ? 'Light Mode' : 'Dark Mode') : 'Toggle Theme'}</span>
                     </button>
                     <button onClick={() => signOut()}
                         className="flex items-center gap-3 w-full px-3 py-2.5 rounded-xl text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/5 transition-all">
-                        <LogOut className="w-[18px] h-[18px]" />
+                        <LogOut className="w-4.5 h-4.5" />
                         <span>Sign Out</span>
                     </button>
                 </div>
