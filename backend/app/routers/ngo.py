@@ -705,6 +705,16 @@ async def update_delivery_status(
         "updated_at": datetime.now(UTC).isoformat(),
     }
 
+    # Auto-update fulfillment_pct based on status progression
+    _STATUS_FULFILLMENT_MAP = {
+        "assigned": 25, "in_progress": 50,
+        "delivered": 90, "completed": 100,
+    }
+    _min_pct = _STATUS_FULFILLMENT_MAP.get(body.new_status)
+    if _min_pct is not None:
+        _current_pct = existing.data.get("fulfillment_pct") or 0
+        updates["fulfillment_pct"] = max(_current_pct, _min_pct)
+
     # Generate delivery confirmation code when status becomes "delivered"
     delivery_code = None
     if body.new_status == "delivered":

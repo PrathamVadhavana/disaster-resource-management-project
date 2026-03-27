@@ -924,6 +924,12 @@ async def approve_reject_request(
             "updated_at": datetime.now(UTC).isoformat(),
         }
 
+        # Status-to-fulfillment mapping for auto-updating fulfillment_pct
+        _STATUS_FULFILLMENT_MAP = {
+            "assigned": 25, "in_progress": 50,
+            "delivered": 90, "completed": 100,
+        }
+
         if body.action == "approve":
             if current_status not in (
                 "pending",
@@ -1018,6 +1024,15 @@ async def approve_reject_request(
             }
             update_fields["priority"] = escalation_map.get(current_priority, "high")
             update_fields["sla_escalated_at"] = datetime.now(UTC).isoformat()
+
+        # Auto-update fulfillment_pct based on the new status
+        _new_status_for_pct = update_fields.get("status", current_status)
+        _min_pct = _STATUS_FULFILLMENT_MAP.get(_new_status_for_pct)
+        if _min_pct is not None:
+            _current_pct = existing.data.get("fulfillment_pct") or 0
+            update_fields["fulfillment_pct"] = max(_current_pct, _min_pct)
+        elif _new_status_for_pct == "rejected":
+            update_fields["fulfillment_pct"] = 0
 
         response = (
             await db_admin.table("resource_requests")
@@ -1174,7 +1189,7 @@ async def update_request_status(
     try:
         existing = (
             await db_admin.table("resource_requests")
-            .select("id, status, assigned_to")
+            .select("id, status, assigned_to, fulfillment_pct")
             .eq("id", request_id)
             .maybe_single()
             .async_execute()
@@ -1186,6 +1201,18 @@ async def update_request_status(
             "status": new_status,
             "updated_at": datetime.now(UTC).isoformat(),
         }
+
+        # Auto-update fulfillment_pct based on status progression
+        _STATUS_FULFILLMENT_MAP2 = {
+            "assigned": 25, "in_progress": 50,
+            "delivered": 90, "completed": 100,
+        }
+        _min_pct2 = _STATUS_FULFILLMENT_MAP2.get(new_status)
+        if _min_pct2 is not None:
+            _current_pct2 = existing.data.get("fulfillment_pct") or 0
+            update_fields["fulfillment_pct"] = max(_current_pct2, _min_pct2)
+        elif new_status == "rejected":
+            update_fields["fulfillment_pct"] = 0
         if body.get("rejection_reason"):
             update_fields["rejection_reason"] = body["rejection_reason"]
         if body.get("assigned_to"):
