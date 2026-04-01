@@ -18,9 +18,9 @@ router = APIRouter()
 
 @router.get("/")
 async def get_disasters(
-    status: DisasterStatus | None = None,
-    severity: DisasterSeverity | None = None,
-    type: DisasterType | None = None,
+    status: str | None = Query(None, description="Filter by status (comma-separated for multiples)"),
+    severity: str | None = Query(None, description="Filter by severity (comma-separated for multiples)"),
+    type: str | None = Query(None, description="Filter by type (comma-separated for multiples)"),
     source: str | None = Query(None, description="Filter by source (automated, victim)"),
     search: str | None = None,
     limit: int = Query(default=100, le=500),
@@ -38,11 +38,26 @@ async def get_disasters(
         query = db.table("disasters").select("*")
 
         if status:
-            query = query.eq("status", status.value)
+            status_list = [s.strip() for s in status.split(",") if s.strip()]
+            if len(status_list) == 1:
+                query = query.eq("status", status_list[0])
+            else:
+                query = query.in_("status", status_list)
+        
         if severity:
-            query = query.eq("severity", severity.value)
+            severity_list = [s.strip() for s in severity.split(",") if s.strip()]
+            if len(severity_list) == 1:
+                query = query.eq("severity", severity_list[0])
+            else:
+                query = query.in_("severity", severity_list)
+
         if type:
-            query = query.eq("type", type.value)
+            type_list = [t.strip() for t in type.split(",") if t.strip()]
+            if len(type_list) == 1:
+                query = query.eq("type", type_list[0])
+            else:
+                query = query.in_("type", type_list)
+
         if source:
             # Filter by source in metadata JSONB
             query = query.eq("metadata->>source", source)

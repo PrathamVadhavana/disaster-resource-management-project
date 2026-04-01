@@ -194,11 +194,24 @@ export interface ForecastHorizon {
     upper_bound: string
 }
 
+export interface VictimMarker {
+    id: string
+    latitude: number
+    longitude: number
+    priority: string
+    resource_type: string
+    status: string
+    description: string
+    head_count: number
+    disaster_id?: string
+}
+
 export interface HeatmapData {
     center: { latitude: number; longitude: number }
-    radius_km: number
+    dynamic_reach_km?: number
     horizons: Record<string, { grid: number[][]; x_range: number[]; y_range: number[]; learned_physics: any }>
     model: string
+    victim_markers?: VictimMarker[]
 }
 
 export interface RequestEvent {
@@ -341,9 +354,9 @@ export async function getMultiHorizonForecast(features?: Record<string, any>, di
 export async function getSpreadHeatmap(params: {
     latitude: number
     longitude: number
-    radius_km?: number
     horizons?: number[]
     resolution?: number
+    disaster_id?: string
 }): Promise<HeatmapData> {
     return apiFetch<HeatmapData>('/api/workflow/spread/heatmap', {
         method: 'POST',
