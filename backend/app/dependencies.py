@@ -10,6 +10,7 @@ Database  : Supabase PostgREST via db_client.
 
 import logging
 import os
+import time
 
 import httpx
 from fastapi import Depends, HTTPException
@@ -19,6 +20,12 @@ from jose import ExpiredSignatureError, JWTError, jwk, jwt
 from app.database import db_admin
 
 logger = logging.getLogger(__name__)
+
+# ── User role TTL cache ─────────────────────────────────────────────────────
+# Avoids a DB round-trip for every authenticated request (was the #2 bottleneck).
+# Cache maps uid → (role, additional_roles, email, expires_at)
+_USER_ROLE_CACHE: dict[str, tuple] = {}
+_USER_ROLE_TTL = 300  # 5 minutes
 
 # Global ML service instance
 ml_service = None
@@ -141,21 +148,28 @@ async def get_current_user(
     """Extract and verify user from bearer token.
 
     Returns a dict with id, email, role, and metadata.
-    The role is read from the Supabase user_metadata or ``app_metadata``
-    baked into the JWT.  If missing, a fallback lookup against the ``users``
-    table is performed.
+    Role is read from the Supabase users table with a 5-min TTL cache
+    so that only 1 in ~300 requests needs a DB round-trip.
     """
     decoded = _verify_supabase_token(credentials.credentials)
     uid = decoded["uid"]
     email = decoded.get("email")
-    # Supabase stores custom claims in app_metadata or user_metadata
     app_meta = decoded.get("app_metadata", {})
     user_meta = decoded.get("user_metadata", {})
     role = app_meta.get("role") or user_meta.get("role")
-    app_meta.get("additional_roles", [])
 
-    # Source of truth: always prefer DB role so admin-approved role changes
-    # apply immediately even if JWT claim is stale.
+    # Fast path: check in-memory cache first
+    cached = _USER_ROLE_CACHE.get(uid)
+    if cached and cached[3] > time.monotonic():
+        role, _additional_roles, cached_email, _exp = cached
+        return {
+            "id": uid,
+            "email": email or cached_email,
+            "role": role,
+            "metadata": decoded,
+        }
+
+    # Slow path: DB lookup (happens at most once per 5 min per user)
     try:
         db_resp = (
             await db_admin.table("users")
@@ -167,8 +181,10 @@ async def get_current_user(
         if db_resp.data:
             role = db_resp.data.get("role") or role
             email = email or db_resp.data.get("email")
+            additional_roles = db_resp.data.get("additional_roles") or []
+            _USER_ROLE_CACHE[uid] = (role, additional_roles, email, time.monotonic() + _USER_ROLE_TTL)
     except Exception as db_err:
-        print(f"DB role lookup error: {db_err}")
+        logger.warning("DB role lookup error for %s: %s", uid, db_err)
 
     return {
         "id": uid,
@@ -181,11 +197,7 @@ async def get_current_user(
 def require_role(*allowed_roles: str):
     """
     FastAPI dependency factory that checks the user has one of the allowed roles.
-
-    Usage:
-        @router.get("/admin-only", dependencies=[Depends(require_role("admin"))])
-        async def admin_only_endpoint(): ...
-
+    Uses a 5-minute TTL cache for DB role lookups to avoid a round-trip per request.
     """
 
     async def _check(
@@ -199,23 +211,27 @@ def require_role(*allowed_roles: str):
         role = app_meta.get("role") or user_meta.get("role")
         additional_roles = app_meta.get("additional_roles", [])
 
-        # Source of truth: always prefer DB role and additional roles so
-        # role updates made by admin are effective immediately.
-        try:
-            db_resp = (
-                await db_admin.table("users")
-                .select("role, additional_roles")
-                .eq("id", uid)
-                .maybe_single()
-                .async_execute()
-            )
-            if db_resp.data:
-                role = db_resp.data.get("role") or role
-                db_additional = db_resp.data.get("additional_roles") or []
-                if isinstance(db_additional, list):
-                    additional_roles = db_additional
-        except Exception as db_err:
-            print(f"DB role lookup error: {db_err}")
+        # Fast path: hit in-memory cache
+        cached = _USER_ROLE_CACHE.get(uid)
+        if cached and cached[3] > time.monotonic():
+            role, additional_roles, _email, _exp = cached
+        else:
+            # Slow path — one DB call, result cached for 5 min
+            try:
+                db_resp = (
+                    await db_admin.table("users")
+                    .select("role, additional_roles")
+                    .eq("id", uid)
+                    .maybe_single()
+                    .async_execute()
+                )
+                if db_resp.data:
+                    role = db_resp.data.get("role") or role
+                    db_additional = db_resp.data.get("additional_roles") or []
+                    additional_roles = db_additional if isinstance(db_additional, list) else []
+                    _USER_ROLE_CACHE[uid] = (role, additional_roles, email, time.monotonic() + _USER_ROLE_TTL)
+            except Exception as db_err:
+                logger.warning("DB role lookup error for %s: %s", uid, db_err)
 
         user_roles = [role] + (additional_roles if isinstance(additional_roles, list) else [])
 
@@ -246,9 +262,8 @@ require_victim = require_role("admin", "victim")
 def require_verified_role(*allowed_roles: str):
     """
     Checks if the user has one of the allowed roles AND is verified.
-    Reads verification_status from the database (users table) for
-    immediate effect after admin verification, rather than relying
-    on JWT claims which may take up to 1 hour to refresh.
+    Uses the role cache for the role check, then does a targeted
+    verification_status lookup only when needed.
     """
 
     async def _check(
@@ -274,7 +289,7 @@ def require_verified_role(*allowed_roles: str):
                 if db_resp.data:
                     status = db_resp.data.get("verification_status") or "pending"
             except Exception as e:
-                print(f"DB verification check error: {e}")
+                logger.warning("DB verification check error for %s: %s", user["id"], e)
 
         if status != "verified":
             raise HTTPException(

@@ -24,7 +24,6 @@ export interface SpreadMapViewProps {
         xRange: [number, number]
         yRange: [number, number]
     }
-    canvasDataUrl: string
     grid: number[][]
     height?: string
     onCellHover?: (row: number, col: number, val: number) => void
@@ -32,6 +31,7 @@ export interface SpreadMapViewProps {
     epicenters?: Array<{lat: number, lon: number}>
     victimMarkers?: VictimMarkerData[]
     showMarkers?: boolean
+    smoothImage?: string
 }
 
 // ─── Priority colors ─────────────────────────────────────────────────────────
@@ -191,33 +191,28 @@ function gridToGeoJSON(grid: number[][], bounds: SpreadMapViewProps['bounds']) {
     const dLat = (maxLat - minLat) / (rows - 1)
     const dLon = (maxLon - minLon) / (cols - 1)
 
-    // Expand the cell slightly to remove grid lines
-    const padX = dLon * 0.05
-    const padY = dLat * 0.05
+    // Higher threshold: Only render cells > 0.15 intensity for performance
+    const THRESHOLD = 0.15 
 
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
             const val = grid[r][c]
-            if (val < 0.05) continue // Don't render empty areas
+            if (val < THRESHOLD) continue 
 
-            // The backend array starts 'r=0' at minLat and increments up correctly.
-            const btmLat = minLat + r * dLat - (dLat / 2) - padY
-            const topLat = minLat + r * dLat + (dLat / 2) + padY
-            
-            const leftLon = minLon + c * dLon - (dLon / 2) - padX
-            const rightLon = minLon + c * dLon + (dLon / 2) + padX
+            const lat = minLat + r * dLat // Row 0 is South
+            const btmLat = lat - (dLat / 2)
+            const topLat = lat + (dLat / 2)
+            const leftLon = minLon + c * dLon - (dLon / 2)
+            const rightLon = minLon + c * dLon + (dLon / 2)
 
-            // Ensure coordinates are counter-clockwise for GeoJSON polygons
             features.push({
                 type: 'Feature',
-                properties: { val, row: r, col: c },
+                properties: { val },
                 geometry: {
                     type: 'Polygon',
                     coordinates: [[
-                        [leftLon, btmLat],
-                        [rightLon, btmLat],
-                        [rightLon, topLat],
-                        [leftLon, topLat],
+                        [leftLon, btmLat], [rightLon, btmLat],
+                        [rightLon, topLat], [leftLon, topLat],
                         [leftLon, btmLat]
                     ]]
                 }
@@ -249,6 +244,7 @@ function SpreadMapView({
     epicenters = [],
     victimMarkers = [],
     showMarkers = true,
+    smoothImage,
 }: SpreadMapViewProps) {
     const mapRef = useRef<MapRef | null>(null)
     const [viewState, setViewState] = useState({
@@ -280,8 +276,14 @@ function SpreadMapView({
         })
     }, [is3D])
 
-    const geoJsonData = useMemo(() => {
-        return gridToGeoJSON(grid, bounds)
+    const [geoJsonData, setGeoJsonData] = useState<any>({ type: 'FeatureCollection', features: [] })
+    
+    // Throttled update – prevents lagging on every mini-step
+    useEffect(() => {
+        const timeout = setTimeout(() => {
+            setGeoJsonData(gridToGeoJSON(grid, bounds))
+        }, 150) // Reduced lag: update every 150ms instead of every 80ms
+        return () => clearTimeout(timeout)
     }, [grid, bounds])
 
     // Interaction handler to replace mapMouseTracker
@@ -302,7 +304,8 @@ function SpreadMapView({
         const rows = grid.length
         const cols = grid[0]?.length || 0
 
-        const row = Math.floor(((bounds.yRange[1] - lat) / (bounds.yRange[1] - bounds.yRange[0])) * rows)
+        // Correct Mapping: Bottom-up
+        const row = Math.floor(((lat - bounds.yRange[0]) / (bounds.yRange[1] - bounds.yRange[0])) * rows)
         const col = Math.floor(((lng - bounds.xRange[0]) / (bounds.xRange[1] - bounds.xRange[0])) * cols)
 
         const clampedRow = Math.max(0, Math.min(rows - 1, row))
@@ -319,9 +322,19 @@ function SpreadMapView({
     // Compute paint height expression
     const extrusionHeight = useMemo(() => {
         return is3D 
-            ? ['*', ['*', ['get', 'val'], ['get', 'val']], 10000]
+            ? ['*', ['*', ['get', 'val'], ['get', 'val']], 15000] // Slightly higher peaks for better 3D effect
             : 0
     }, [is3D])
+
+    // Image source coordinates [TL, TR, BR, BL]
+    const imageCoordinates = useMemo(() => {
+        return [
+            [bounds.xRange[0], bounds.yRange[1]],
+            [bounds.xRange[1], bounds.yRange[1]],
+            [bounds.xRange[1], bounds.yRange[0]],
+            [bounds.xRange[0], bounds.yRange[0]]
+        ] as [[number, number], [number, number], [number, number], [number, number]]
+    }, [bounds])
 
     return (
         <div style={{ height, width: '100%' }} className="relative bg-[#1a1a1a]">
@@ -338,18 +351,32 @@ function SpreadMapView({
             >
                 <NavigationControl position="bottom-right" visualizePitch={true} />
 
-                {/* 3D Heatmap Peaks */}
+                {/* Smooth Raster Heatmap Base */}
+                {smoothImage && (
+                    <Source id="smooth-heatmap-source" type="image" url={smoothImage} coordinates={imageCoordinates}>
+                        <Layer
+                            id="smooth-heatmap-layer"
+                            type="raster"
+                            paint={{
+                                'raster-opacity': is3D ? 0.6 : 0.85,
+                                'raster-fade-duration': 300
+                            }}
+                        />
+                    </Source>
+                )}
+
+                {/* 3D Heatmap Peaks (slightly more transparent to see smooth base) */}
                 <Source id="heatmap-data" type="geojson" data={geoJsonData}>
                     <Layer
                         id="heatmap-extrusion-layer"
                         type="fill-extrusion"
                         paint={{
                             'fill-extrusion-color': HEATMAP_COLORS as any,
-                            // Extrude up to 10000 meters quadratically based on intensity (or 0 for flat 2D)
                             'fill-extrusion-height': extrusionHeight as any,
                             'fill-extrusion-base': 0,
-                            'fill-extrusion-opacity': 0.85,
-                            'fill-extrusion-height-transition': { duration: 1000, delay: 0 } as any
+                            'fill-extrusion-opacity': is3D ? 0.5 : 0, // Lower opacity if 3D to see the smooth raster underneath
+                            'fill-extrusion-height-transition': { duration: 400 } as any,
+                            'fill-extrusion-color-transition': { duration: 400 } as any
                         }}
                     />
                 </Source>

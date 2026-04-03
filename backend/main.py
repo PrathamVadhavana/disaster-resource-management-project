@@ -311,6 +311,43 @@ async def health_check():
     return {"status": "healthy", "ml_models_loaded": ml is not None and ml.models_loaded}
 
 
+@app.get("/cache-stats", tags=["Admin"])
+async def get_cache_stats():
+    """Return in-memory and Redis cache statistics."""
+    from app.core.query_cache import cache_stats as mem_stats
+
+    from app.dependencies import _USER_ROLE_CACHE
+    import time
+
+    now = time.monotonic()
+    active_role_entries = sum(1 for v in _USER_ROLE_CACHE.values() if v[3] > now)
+    return {
+        "in_memory_query_cache": mem_stats(),
+        "user_role_cache": {
+            "total_users_cached": len(_USER_ROLE_CACHE),
+            "active_entries": active_role_entries,
+        },
+    }
+
+
+@app.post("/admin/invalidate-user-cache", tags=["Admin"])
+async def invalidate_user_role_cache(user_id: str | None = None):
+    """Immediately invalidate the user role cache.
+
+    Use this after changing a user's role so the new role takes effect
+    on their next request without waiting for the 5-minute TTL.
+    Pass ?user_id=<uid> to invalidate a specific user, or omit to clear all.
+    """
+    from app.dependencies import _USER_ROLE_CACHE
+
+    if user_id:
+        _USER_ROLE_CACHE.pop(user_id, None)
+        return {"cleared": 1, "user_id": user_id}
+    count = len(_USER_ROLE_CACHE)
+    _USER_ROLE_CACHE.clear()
+    return {"cleared": count, "message": "All user role cache entries cleared"}
+
+
 @app.get("/test-datetime")
 async def test_datetime():
     """Test endpoint to check datetime serialization"""
@@ -374,8 +411,27 @@ async def global_exception_handler(request, exc):
 
 
 if __name__ == "__main__":
+    import os
+
     import uvicorn
 
-    uvicorn.run(
-        "main:app", host="0.0.0.0", port=8000, reload=True, reload_dirs=["app", "ml", "scripts"], log_level="info"
-    )
+    workers = int(os.getenv("WEB_CONCURRENCY", "1"))
+    # Multi-worker mode disables --reload (incompatible).
+    # Set WEB_CONCURRENCY > 1 in production for real parallelism.
+    if workers > 1:
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=8000,
+            workers=workers,
+            log_level="info",
+        )
+    else:
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=True,
+            reload_dirs=["app", "ml", "scripts"],
+            log_level="info",
+        )

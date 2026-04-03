@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import threading
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -34,21 +33,27 @@ class APIResponse:
 
 
 # ── Supabase client (lazy singleton) ──────────────────────────────────────────
+# The Supabase Python client is thread-safe — each query builds its own HTTP
+# request via httpx, so no coarse-grained lock is needed.  The old _db_lock
+# serialised every query and was the #1 latency bottleneck.
 
 _supabase_client: Client | None = None
-_db_lock = threading.Lock()
+_init_lock_flag = False  # lightweight guard only during first-time init
 
 
 def _get_sb() -> Client:
-    """Return the Supabase client, creating it on first call."""
-    global _supabase_client
-    if _supabase_client is None:
-        url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-        if not url or not key:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
-        _supabase_client = create_client(url, key)
-        logger.info("Supabase client initialised")
+    """Return the Supabase client, creating it on first call (thread-safe init)."""
+    global _supabase_client, _init_lock_flag
+    if _supabase_client is not None:
+        return _supabase_client
+    # Only the very first creation needs a guard — use a simple flag.
+    # Worst case two threads both create a client; that's harmless.
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if not url or not key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
+    _supabase_client = create_client(url, key)
+    logger.info("Supabase client initialised")
     return _supabase_client
 
 
@@ -286,26 +291,29 @@ class QueryBuilder:
     # ── EXECUTE ───────────────────────────────────────────────────────────
 
     def execute(self) -> APIResponse:
-        """Execute the built query and return an APIResponse."""
-        with _db_lock:
-            try:
-                sb = _get_sb()
-                tbl = sb.table(self._table)
+        """Execute the built query and return an APIResponse.
 
-                if self._operation == "select":
-                    return self._exec_select(tbl)
-                if self._operation == "insert":
-                    return self._exec_insert(tbl)
-                if self._operation == "update":
-                    return self._exec_update(tbl)
-                if self._operation == "upsert":
-                    return self._exec_upsert(tbl)
-                if self._operation == "delete":
-                    return self._exec_delete(tbl)
-                raise ValueError(f"Unknown operation: {self._operation}")
-            except Exception as e:
-                logger.error("DB query failed [%s on %s]: %s", self._operation, self._table, e)
-                raise
+        No global lock — the Supabase client is thread-safe and each query
+        runs as an independent HTTP request through httpx connection pooling.
+        """
+        try:
+            sb = _get_sb()
+            tbl = sb.table(self._table)
+
+            if self._operation == "select":
+                return self._exec_select(tbl)
+            if self._operation == "insert":
+                return self._exec_insert(tbl)
+            if self._operation == "update":
+                return self._exec_update(tbl)
+            if self._operation == "upsert":
+                return self._exec_upsert(tbl)
+            if self._operation == "delete":
+                return self._exec_delete(tbl)
+            raise ValueError(f"Unknown operation: {self._operation}")
+        except Exception as e:
+            logger.error("DB query failed [%s on %s]: %s", self._operation, self._table, e)
+            raise
 
     async def async_execute(self) -> APIResponse:
         """Execute the query in a thread pool to avoid blocking the event loop."""

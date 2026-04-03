@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.cache import CACHE_TTL_SHORT, cache_get, cache_invalidate_pattern, cache_set
 from app.database import db
 from app.dependencies import require_role
 from app.schemas import (
@@ -80,6 +81,12 @@ async def get_resources(
 ):
     """Get all resources with optional filtering"""
     try:
+        # Build a deterministic cache key from query params
+        cache_key = f"resources:list:{location_id}:{status}:{disaster_id}:{limit}"
+        cached = await cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         query = db.table("resources").select("*")
 
         if location_id:
@@ -92,7 +99,9 @@ async def get_resources(
         query = query.order("priority", desc=True).limit(limit)
         response = await query.async_execute()
 
-        return response.data
+        result = response.data or []
+        await cache_set(cache_key, result, CACHE_TTL_SHORT)
+        return result
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -142,6 +151,7 @@ async def create_resource(
         if not response.data:
             raise HTTPException(status_code=400, detail="Failed to create resource")
 
+        await cache_invalidate_pattern("resources:*")
         return response.data[0]
 
     except Exception as e:
@@ -164,6 +174,7 @@ async def update_resource(
         if not response.data:
             raise HTTPException(status_code=404, detail="Resource not found")
 
+        await cache_invalidate_pattern("resources:*")
         return response.data[0]
 
     except Exception as e:
