@@ -228,7 +228,7 @@ async def logout(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)):
-    """Get current user profile"""
+    """Get current user profile, merged with role-specific details."""
     try:
         # Get user profile from DB
         response = (
@@ -239,7 +239,37 @@ async def me(user: dict = Depends(get_current_user)):
             .async_execute()
         )
 
-        return response.data
+        profile = response.data or {}
+        role = profile.get("role", "")
+
+        # Merge role-specific details into the profile
+        detail_table_map = {
+            "ngo": "ngo_details",
+            "donor": "donor_details",
+            "volunteer": "volunteer_details",
+            "victim": "victim_details",
+        }
+        detail_table = detail_table_map.get(role)
+        if detail_table:
+            try:
+                detail_resp = (
+                    await db_admin.table(detail_table)
+                    .select("*")
+                    .eq("id", user["id"])
+                    .maybe_single()
+                    .async_execute()
+                )
+                if detail_resp.data:
+                    detail_data = detail_resp.data
+                    # Don't overwrite id/created_at/updated_at from details
+                    detail_data.pop("id", None)
+                    detail_data.pop("created_at", None)
+                    detail_data.pop("updated_at", None)
+                    profile.update(detail_data)
+            except Exception as e:
+                logger.warning(f"Failed to load {detail_table}: {e}")
+
+        return profile
 
     except Exception:
         raise HTTPException(status_code=401, detail="Authentication failed")
@@ -247,7 +277,12 @@ async def me(user: dict = Depends(get_current_user)):
 
 @router.put("/me")
 async def update_me(request: Request, user: dict = Depends(get_current_user)):
-    """Update current user profile fields."""
+    """Update current user profile fields.
+
+    Splits incoming data between the `users` table and role-specific
+    detail tables (e.g. `ngo_details`) so that all fields persist
+    correctly.
+    """
     try:
         body = await request.json()
         # Prevent updating sensitive fields
@@ -259,13 +294,47 @@ async def update_me(request: Request, user: dict = Depends(get_current_user)):
         body.pop("verification_notes", None)
         body.pop("metadata", None)
 
-        response = (
-            await db_admin.table("users")
-            .update(body)
-            .eq("id", user["id"])
-            .async_execute()
-        )
-        return response.data[0] if response.data else {}
+        uid = user["id"]
+
+        # Determine if there are role-specific fields to save
+        ngo_fields = {
+            "organization_name", "registration_number", "operating_sectors",
+            "website", "phone_number", "address", "latitude", "longitude",
+        }
+
+        # Get current user role
+        role = user.get("role", "")
+
+        # Split NGO-specific fields out of the users update
+        ngo_data = {}
+        if role == "ngo":
+            for f in list(body.keys()):
+                if f in ngo_fields:
+                    ngo_data[f] = body.pop(f)
+
+        # Update users table (only if there are remaining fields)
+        result_data = {}
+        if body:
+            body["updated_at"] = datetime.now(UTC).isoformat()
+            response = (
+                await db_admin.table("users")
+                .update(body)
+                .eq("id", uid)
+                .async_execute()
+            )
+            result_data = response.data[0] if response.data else {}
+
+        # Upsert role-specific details
+        if role == "ngo" and ngo_data:
+            ngo_data["id"] = uid
+            ngo_data["updated_at"] = datetime.now(UTC).isoformat()
+            try:
+                await db_admin.table("ngo_details").upsert(ngo_data).async_execute()
+            except Exception as e:
+                logger.warning(f"Failed to update ngo_details: {e}")
+
+        # Return merged profile
+        return await me(user)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

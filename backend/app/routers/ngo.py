@@ -1222,3 +1222,22 @@ async def mark_notifications_read(
         )
 
     return {"message": "Notifications marked as read"}
+
+
+# ================ TEAM DIRECTORY ================
+
+
+@router.get("/team")
+async def list_team_members(ngo=Depends(require_ngo)):
+    """List platform users relevant to NGO operations (NGO, volunteer, admin roles).
+
+    Returns a limited set of fields — no sensitive data.
+    """
+    resp = (
+        await db_admin.table("users")
+        .select("id, email, full_name, phone, organization, role, is_profile_completed, created_at")
+        .in_("role", ["ngo", "volunteer", "admin"])
+        .order("created_at", desc=True)
+        .async_execute()
+    )
+    return resp.data or []

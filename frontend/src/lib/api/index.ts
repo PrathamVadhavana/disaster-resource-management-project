@@ -445,6 +445,9 @@ export const api = {
     getNgoStats: () =>
         apiFetch('/api/ngo/dashboard-stats'),
 
+    getNgoTeam: () =>
+        apiFetch('/api/ngo/team'),
+
     // ━━ NGO Enhanced Dashboard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     submitNgoAvailability: (requestId: string, data: { available_quantity: number; estimated_delivery_time: string; assigned_team?: string; vehicle_type?: string; ngo_latitude?: number; ngo_longitude?: number; notes?: string }) =>
         apiFetch(`/api/ngo/requests/${requestId}/availability`, { method: 'POST', body: JSON.stringify(data) }),

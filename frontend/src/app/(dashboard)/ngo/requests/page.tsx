@@ -9,7 +9,7 @@ import { SubmitAvailabilityModal } from '@/components/ngo/SubmitAvailabilityModa
 import {
     Loader2, Search, MapPin, Package, ChevronLeft, ChevronRight,
     ArrowRight, AlertTriangle, CheckCircle2, Eye, Send,
-    RefreshCw, Navigation, Calendar, User, Users,
+    RefreshCw, Navigation, Calendar, User, Users, Building2,
 } from 'lucide-react'
 
 const PRIORITY_DOT: Record<string, string> = {
@@ -32,18 +32,44 @@ export default function NGOApprovedRequestsPage() {
     const [showAvailabilityModal, setShowAvailabilityModal] = useState<any>(null)
     const [sortBy, setSortBy] = useState<'priority' | 'distance'>('priority')
     const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null)
-    const [gpsStatus, setGpsStatus] = useState<'detecting' | 'ready' | 'denied' | 'unavailable'>('detecting')
+    const [gpsSource, setGpsSource] = useState<'detecting' | 'browser' | 'profile' | 'unavailable'>('detecting')
     const [poolModal, setPoolModal] = useState<string | null>(null)
 
-    // Auto-detect GPS
+    // Fetch NGO profile to get stored coordinates
+    const { data: ngoProfile } = useQuery({
+        queryKey: ['my-profile'],
+        queryFn: () => api.getMyProfile(),
+    })
+
+    // Auto-detect GPS, then fall back to stored registration coordinates
     useEffect(() => {
-        if (!navigator.geolocation) { setGpsStatus('unavailable'); return }
+        if (!navigator.geolocation) {
+            // No browser GPS — use stored coordinates if available
+            if (ngoProfile?.latitude && ngoProfile?.longitude) {
+                setGps({ lat: Number(ngoProfile.latitude), lng: Number(ngoProfile.longitude) })
+                setGpsSource('profile')
+            } else {
+                setGpsSource('unavailable')
+            }
+            return
+        }
         navigator.geolocation.getCurrentPosition(
-            pos => { setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setGpsStatus('ready') },
-            err => { setGpsStatus(err.code === 1 ? 'denied' : 'unavailable') },
+            pos => {
+                setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude })
+                setGpsSource('browser')
+            },
+            () => {
+                // Browser GPS failed — fall back to stored coordinates
+                if (ngoProfile?.latitude && ngoProfile?.longitude) {
+                    setGps({ lat: Number(ngoProfile.latitude), lng: Number(ngoProfile.longitude) })
+                    setGpsSource('profile')
+                } else {
+                    setGpsSource('unavailable')
+                }
+            },
             { enableHighAccuracy: true, timeout: 10000 }
         )
-    }, [])
+    }, [ngoProfile])
 
     const { data, isLoading, refetch } = useQuery({
         queryKey: ['ngo-fulfillment', page, priorityFilter, sortBy, gps?.lat, gps?.lng],
@@ -89,6 +115,16 @@ export default function NGOApprovedRequestsPage() {
             </div>
         )
     }
+
+    const gpsLabel = gpsSource === 'browser' ? 'Live GPS'
+        : gpsSource === 'profile' ? 'Registered Address'
+        : gpsSource === 'detecting' ? 'Detecting…'
+        : 'Location Unavailable'
+
+    const gpsColor = gpsSource === 'browser' ? 'bg-green-100 dark:bg-green-500/10 text-green-600'
+        : gpsSource === 'profile' ? 'bg-blue-100 dark:bg-blue-500/10 text-blue-600'
+        : gpsSource === 'detecting' ? 'bg-amber-100 dark:bg-amber-500/10 text-amber-600'
+        : 'bg-red-100 dark:bg-red-500/10 text-red-500'
 
     return (
         <div className="space-y-6">
@@ -143,13 +179,9 @@ export default function NGOApprovedRequestsPage() {
                         {s === 'priority' ? 'By Priority' : 'By Distance'}
                     </button>
                 ))}
-                <span className={cn('ml-auto text-[10px] font-medium px-2.5 py-1 rounded-full',
-                    gpsStatus === 'ready' ? 'bg-green-100 dark:bg-green-500/10 text-green-600' :
-                        gpsStatus === 'detecting' ? 'bg-amber-100 dark:bg-amber-500/10 text-amber-600' :
-                            'bg-red-100 dark:bg-red-500/10 text-red-500'
-                )}>
-                    <Navigation className="w-3 h-3 inline mr-1" />
-                    {gpsStatus === 'ready' ? 'GPS Ready' : gpsStatus === 'detecting' ? 'Detecting GPS…' : gpsStatus === 'denied' ? 'GPS Denied' : 'GPS Unavailable'}
+                <span className={cn('ml-auto text-[10px] font-medium px-2.5 py-1 rounded-full flex items-center gap-1', gpsColor)}>
+                    {gpsSource === 'profile' ? <Building2 className="w-3 h-3" /> : <Navigation className="w-3 h-3" />}
+                    {gpsLabel}
                 </span>
             </div>
 

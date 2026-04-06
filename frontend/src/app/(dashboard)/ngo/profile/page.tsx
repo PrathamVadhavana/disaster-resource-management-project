@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { Loader2, Save, CheckCircle2, User, Mail, Phone, Building2, Globe, MapPin, ArrowRightLeft } from 'lucide-react'
+import { Loader2, Save, CheckCircle2, User, Mail, Phone, Building2, Globe, MapPin, ArrowRightLeft, LocateFixed } from 'lucide-react'
 
 export default function NgoProfilePage() {
     const queryClient = useQueryClient()
@@ -22,14 +22,16 @@ export default function NgoProfilePage() {
     const [organization, setOrganization] = useState('')
     const [website, setWebsite] = useState('')
     const [address, setAddress] = useState('')
+    const [phoneNumber, setPhoneNumber] = useState('')
 
     useEffect(() => {
         if (profile) {
             setFullName(profile.full_name || profile.display_name || '')
             setPhone(profile.phone || '')
-            setOrganization(profile.organization || '')
+            setOrganization(profile.organization_name || profile.organization || '')
             setWebsite(profile.website || '')
             setAddress(profile.address || '')
+            setPhoneNumber(profile.phone_number || profile.phone || '')
         }
     }, [profile])
 
@@ -65,9 +67,11 @@ export default function NgoProfilePage() {
         updateMut.mutate({
             full_name: fullName,
             phone,
-            organization,
+            // NGO-specific fields — backend will route these to ngo_details
+            organization_name: organization,
             website,
             address,
+            phone_number: phoneNumber,
         })
     }
 
@@ -111,9 +115,10 @@ export default function NgoProfilePage() {
                             </div>
                             <div>
                                 <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-                                    <Phone className="w-3.5 h-3.5" /> Phone
+                                    <Phone className="w-3.5 h-3.5" /> Phone Number
                                 </label>
-                                <input type="tel" value={phone} onChange={e => setPhone(e.target.value)}
+                                <input type="tel" value={phoneNumber} onChange={e => setPhoneNumber(e.target.value)}
+                                    placeholder="+91 98765 43210"
                                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30" />
                             </div>
                         </div>
@@ -147,6 +152,14 @@ export default function NgoProfilePage() {
                                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/30" />
                             </div>
                         </div>
+
+                        {/* Show stored GPS coordinates if available */}
+                        {profile?.latitude && profile?.longitude && (
+                            <div className="flex items-center gap-2 p-3 rounded-xl bg-blue-50 dark:bg-blue-500/5 border border-blue-100 dark:border-blue-500/10 text-xs text-blue-600 dark:text-blue-400">
+                                <LocateFixed className="w-3.5 h-3.5 shrink-0" />
+                                <span>GPS Coordinates: {Number(profile.latitude).toFixed(5)}, {Number(profile.longitude).toFixed(5)}</span>
+                            </div>
+                        )}
                     </div>
                 </div>
 

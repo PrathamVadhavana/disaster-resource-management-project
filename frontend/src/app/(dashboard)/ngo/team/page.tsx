@@ -36,7 +36,7 @@ export default function NGOTeamPage() {
     // Fetch real users from the database - show NGO-relevant roles
     const { data: users, isLoading } = useQuery({
         queryKey: ['ngo-team-users'],
-        queryFn: () => api.getUsers(),
+        queryFn: () => api.getNgoTeam(),
         refetchInterval: 30000,
     })
 
@@ -89,6 +89,9 @@ export default function NGOTeamPage() {
                     <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Team Management</h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
                         {stats.total} team members across operations
+                    </p>
+                    <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+                        Platform directory of all NGO staff, volunteers, and admins. Use this to find and contact collaborators.
                     </p>
                 </div>
             </div>

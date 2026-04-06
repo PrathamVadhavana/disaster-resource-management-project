@@ -28,6 +28,10 @@ export const ngoDetailsSchema = z.object({
     registration_number: z.string().min(2, "Registration number is required"),
     operating_sectors: z.array(z.string()).min(1, "Select at least one sector"),
     website: z.string().url().optional().or(z.literal('')),
+    phone_number: z.string().optional().or(z.literal('')),
+    address: z.string().min(2, "Address is required"),
+    latitude: z.number().optional(),
+    longitude: z.number().optional(),
 });
 
 export const donorDetailsSchema = z.object({
