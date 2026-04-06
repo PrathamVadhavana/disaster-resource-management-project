@@ -536,6 +536,8 @@ async def get_request_pool_ngo(request_id: str, ngo=Depends(require_ngo)):
 async def list_assigned_requests(
     ngo=Depends(require_ngo),
     status: str | None = Query(None, description="Filter by status: assigned,in_progress,completed,delivered"),
+    ngo_latitude: float | None = Query(None, description="NGO GPS latitude for distance calculation"),
+    ngo_longitude: float | None = Query(None, description="NGO GPS longitude for distance calculation"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
@@ -567,18 +569,29 @@ async def list_assigned_requests(
         s = r["status"]
         status_counts[s] = status_counts.get(s, 0) + 1
 
-    # Enrich with distance and availability data
+    # Resolve NGO GPS: prefer live query params, fall back to stored metadata
+    n_lat = ngo_latitude
+    n_lon = ngo_longitude
     ngo_user = await db_admin.table("users").select("metadata").eq("id", ngo_id).maybe_single().async_execute()
-    ngo_lat = None
-    ngo_lon = None
-    if ngo_user.data and ngo_user.data.get("metadata"):
-        ngo_lat = ngo_user.data["metadata"].get("latitude")
-        ngo_lon = ngo_user.data["metadata"].get("longitude")
+    if n_lat is None or n_lon is None:
+        if ngo_user.data and ngo_user.data.get("metadata"):
+            n_lat = n_lat or ngo_user.data["metadata"].get("latitude")
+            n_lon = n_lon or ngo_user.data["metadata"].get("longitude")
+
+    # Store live GPS in metadata if provided (so future calls without GPS still work)
+    if ngo_latitude and ngo_longitude:
+        try:
+            meta = (ngo_user.data or {}).get("metadata") or {}
+            meta["latitude"] = ngo_latitude
+            meta["longitude"] = ngo_longitude
+            await db_admin.table("users").update({"metadata": meta}).eq("id", ngo_id).async_execute()
+        except Exception:
+            pass
 
     for r in requests:
         r["distance_km"] = None
-        if ngo_lat and ngo_lon and r.get("latitude") and r.get("longitude"):
-            r["distance_km"] = round(haversine_km(ngo_lat, ngo_lon, r["latitude"], r["longitude"]), 2)
+        if n_lat and n_lon and r.get("latitude") and r.get("longitude"):
+            r["distance_km"] = round(haversine_km(n_lat, n_lon, r["latitude"], r["longitude"]), 2)
 
         # Progress percentage
         current_idx = STATUS_ORDER.index(r["status"]) if r["status"] in STATUS_ORDER else 0
@@ -587,6 +600,14 @@ async def list_assigned_requests(
         total_steps = completed_idx - assigned_idx
         steps_done = max(0, current_idx - assigned_idx)
         r["progress_pct"] = min(100, round((steps_done / max(1, total_steps)) * 100))
+
+        # For completed/delivered requests, provide the actual completion timestamp
+        if r["status"] in ("completed", "closed"):
+            r["completed_at"] = r.get("delivery_confirmed_at") or r.get("updated_at")
+        elif r["status"] == "delivered":
+            r["completed_at"] = r.get("updated_at")
+        else:
+            r["completed_at"] = None
 
         # Compute this NGO's share of the request from fulfillment_entries (resource pooling)
         fulfillment_entries = r.get("fulfillment_entries") or []

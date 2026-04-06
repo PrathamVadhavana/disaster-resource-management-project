@@ -29,13 +29,26 @@ export default function NGOAssignedRequestsPage() {
     const [page, setPage] = useState(1)
     const [actionNote, setActionNote] = useState('')
     const [confirmAction, setConfirmAction] = useState<{ req: any; nextStatus: string } | null>(null)
+    const [gps, setGps] = useState<{ lat: number; lng: number } | null>(null)
+
+    // Auto-detect GPS on mount
+    useEffect(() => {
+        if (!navigator.geolocation) return
+        navigator.geolocation.getCurrentPosition(
+            pos => { setGps({ lat: pos.coords.latitude, lng: pos.coords.longitude }) },
+            () => { /* GPS denied or unavailable — distance will fall back to stored metadata */ },
+            { enableHighAccuracy: true, timeout: 10000 }
+        )
+    }, [])
 
     const { data, isLoading, refetch } = useQuery({
-        queryKey: ['ngo-assigned', tab, page],
+        queryKey: ['ngo-assigned', tab, page, gps?.lat, gps?.lng],
         queryFn: () => api.getNgoAssignedRequests({
             status: tab === 'all' ? undefined : tab,
             limit: 20,
             offset: (page - 1) * 20,
+            ngo_latitude: gps?.lat,
+            ngo_longitude: gps?.lng,
         }),
     })
 
@@ -72,6 +85,28 @@ export default function NGOAssignedRequestsPage() {
             (r.description || r.resource_type || r.victim_name || '').toLowerCase().includes(search.toLowerCase())
         )
         : requests
+
+    /** Format ETA / completion time for display */
+    const formatEta = (req: any) => {
+        // For completed/delivered/closed, show actual completion time
+        if (req.completed_at) {
+            const d = new Date(req.completed_at)
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+        // For in-progress, show estimated delivery if available
+        if (req.estimated_delivery) {
+            const d = new Date(req.estimated_delivery)
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+        return 'N/A'
+    }
+
+    /** Label for the ETA field depending on status */
+    const etaLabel = (req: any) => {
+        if (req.status === 'completed' || req.status === 'closed') return 'Completed At'
+        if (req.status === 'delivered') return 'Delivered At'
+        return 'ETA'
+    }
 
     if (isLoading) {
         return (
@@ -185,12 +220,14 @@ export default function NGOAssignedRequestsPage() {
                                     </div>
                                     <div>
                                         <p className="text-slate-400 mb-0.5 flex items-center gap-1"><Navigation className="w-3 h-3" /> Distance</p>
-                                        <p className="font-medium text-cyan-600">{req.distance_km !== null ? `${req.distance_km} km` : 'N/A'}</p>
+                                        <p className="font-medium text-cyan-600">
+                                            {req.distance_km !== null && req.distance_km !== undefined ? `${req.distance_km} km` : 'N/A'}
+                                        </p>
                                     </div>
                                     <div>
-                                        <p className="text-slate-400 mb-0.5 flex items-center gap-1"><Clock className="w-3 h-3" /> ETA</p>
+                                        <p className="text-slate-400 mb-0.5 flex items-center gap-1"><Clock className="w-3 h-3" /> {etaLabel(req)}</p>
                                         <p className="font-medium text-slate-700 dark:text-slate-300">
-                                            {req.estimated_delivery ? new Date(req.estimated_delivery).toLocaleDateString() : 'N/A'}
+                                            {formatEta(req)}
                                         </p>
                                     </div>
                                 </div>

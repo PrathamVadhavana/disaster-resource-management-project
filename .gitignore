@@ -82,3 +82,4 @@ backend/tmp_*.py
 backend/test_*.py
 backend/debug_*.py
 backend/check_*.py
+frontend/next-env.d.ts

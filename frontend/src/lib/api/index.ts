@@ -315,7 +315,7 @@ export const api = {
     getNgoAvailableRequests: (params?: { resource_type?: string; priority?: string; ngo_latitude?: number; ngo_longitude?: number; sort?: string; limit?: number; offset?: number }) =>
         apiFetch(`/api/ngo/requests/available${qs(params)}`),
 
-    getNgoAssignedRequests: (params?: { status?: string; limit?: number; offset?: number }) =>
+    getNgoAssignedRequests: (params?: { status?: string; limit?: number; offset?: number; ngo_latitude?: number; ngo_longitude?: number }) =>
         apiFetch(`/api/ngo/requests/assigned${qs(params)}`),
 
     claimNgoRequest: (requestId: string, data: { estimated_delivery?: string; notes?: string }) =>
