@@ -76,12 +76,6 @@ export function NGOSidebar() {
                     </div>
                     <span className="font-bold text-slate-900 dark:text-white text-sm">NGO Portal</span>
                     <div className="ml-auto flex items-center gap-2">
-                        {unreadCount > 0 && (
-                            <Link href="/ngo" className="relative">
-                                <Bell className="w-5 h-5 text-slate-500" />
-                                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{unreadCount > 9 ? '9+' : unreadCount}</span>
-                            </Link>
-                        )}
                         <NotificationBell />
                     </div>
                 </div>

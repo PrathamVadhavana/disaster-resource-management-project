@@ -21,6 +21,7 @@ export default function NGOInventoryPage() {
     const [form, setForm] = useState({
         category: 'Food', resource_type: '', title: '', description: '',
         total_quantity: 10, unit: 'units', address_text: '',
+        customCategory: '', customUnit: '',
     })
 
     const { data, isLoading, refetch } = useQuery({
@@ -36,11 +37,18 @@ export default function NGOInventoryPage() {
     }, [qc])
 
     const addMutation = useMutation({
-        mutationFn: () => api.addNgoInventoryItem(form),
+        mutationFn: () => {
+            const submitData = {
+                ...form,
+                category: form.category === 'Other' ? (form.customCategory || 'Other') : form.category,
+                unit: form.unit === 'other' ? (form.customUnit || 'units') : form.unit,
+            }
+            return api.addNgoInventoryItem(submitData)
+        },
         onSuccess: () => {
             qc.invalidateQueries({ queryKey: ['ngo-inventory'] })
             setShowAddModal(false)
-            setForm({ category: 'Food', resource_type: '', title: '', description: '', total_quantity: 10, unit: 'units', address_text: '' })
+            setForm({ category: 'Food', resource_type: '', title: '', description: '', total_quantity: 10, unit: 'units', address_text: '', customCategory: '', customUnit: '' })
         },
     })
 
@@ -294,10 +302,15 @@ export default function NGOInventoryPage() {
                         <form onSubmit={e => { e.preventDefault(); addMutation.mutate() }} className="space-y-4">
                             <div>
                                 <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Category</label>
-                                <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}
+                                <select value={form.category} onChange={e => setForm({ ...form, category: e.target.value, customCategory: '' })}
                                     className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
                                     {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                                 </select>
+                                {form.category === 'Other' && (
+                                    <input value={form.customCategory} onChange={e => setForm({ ...form, customCategory: e.target.value })}
+                                        placeholder="Enter custom category name" required
+                                        className="w-full h-10 px-3 mt-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+                                )}
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Resource Type</label>
@@ -326,7 +339,7 @@ export default function NGOInventoryPage() {
                                 </div>
                                 <div>
                                     <label className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5 block">Unit</label>
-                                    <select value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })}
+                                    <select value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value, customUnit: '' })}
                                         className="w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none">
                                         <option value="units">Units</option>
                                         <option value="kg">Kilograms</option>
@@ -334,7 +347,13 @@ export default function NGOInventoryPage() {
                                         <option value="boxes">Boxes</option>
                                         <option value="packs">Packs</option>
                                         <option value="cartons">Cartons</option>
+                                        <option value="other">Other</option>
                                     </select>
+                                    {form.unit === 'other' && (
+                                        <input value={form.customUnit} onChange={e => setForm({ ...form, customUnit: e.target.value })}
+                                            placeholder="Enter custom unit" required
+                                            className="w-full h-10 px-3 mt-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none" />
+                                    )}
                                 </div>
                             </div>
                             <div>

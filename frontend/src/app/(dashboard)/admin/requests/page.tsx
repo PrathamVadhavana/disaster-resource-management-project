@@ -433,9 +433,9 @@ export default function AdminRequestsPage() {
                                                 <div className="flex items-center gap-1.5">
                                                     <PriorityBadge priority={req.priority} />
                                                     {req.is_verified ? (
-                                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 ring-1 ring-inset ring-emerald-200 dark:ring-emerald-500/20" title="Field verified">✓</span>
+                                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 ring-1 ring-inset ring-emerald-200 dark:ring-emerald-500/20" title="Field verified">✓ Verified</span>
                                                     ) : (
-                                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400 ring-1 ring-inset ring-amber-200 dark:ring-amber-500/20" title="Not yet verified">?</span>
+                                                        <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-50 dark:bg-slate-500/10 text-slate-400 dark:text-slate-500 ring-1 ring-inset ring-slate-200 dark:ring-slate-500/20" title="Pending verification">— Pending</span>
                                                     )}
                                                 </div>
                                             </td>

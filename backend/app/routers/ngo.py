@@ -396,16 +396,18 @@ async def submit_availability(
         fulfillment_pct = min(100, round((total_fulfilled / max(total_requested, 1)) * 100))
 
         new_status = "under_review" if fulfillment_pct < 100 else "availability_submitted"
+        update_payload = {
+            "status": new_status,
+            "fulfillment_entries": fulfillment_entries,
+            "fulfillment_pct": fulfillment_pct,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        # Persist ETA to the dedicated column so the victim can see it
+        if body.estimated_delivery_time:
+            update_payload["estimated_delivery"] = body.estimated_delivery_time
         await (
             db_admin.table("resource_requests")
-            .update(
-                {
-                    "status": new_status,
-                    "fulfillment_entries": fulfillment_entries,
-                    "fulfillment_pct": fulfillment_pct,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                }
-            )
+            .update(update_payload)
             .eq("id", request_id)
             .async_execute()
         )
@@ -741,6 +743,46 @@ async def update_delivery_status(
     if body.new_status == "delivered":
         delivery_code = generate_delivery_code()
         updates["delivery_confirmation_code"] = delivery_code
+
+        # ── Stock deduction: deduct delivered quantity from NGO inventory ──
+        try:
+            delivered_qty = existing.data.get("quantity", 1)
+            resource_type = (existing.data.get("resource_type") or "").lower()
+            if resource_type and ngo_id:
+                inv_resp = (
+                    await db_admin.table("resources")
+                    .select("id, quantity")
+                    .eq("provider_id", ngo_id)
+                    .eq("type", resource_type)
+                    .eq("status", "available")
+                    .order("created_at", desc=True)
+                    .limit(10)
+                    .async_execute()
+                )
+                remaining_to_deduct = delivered_qty
+                for inv_item in inv_resp.data or []:
+                    if remaining_to_deduct <= 0:
+                        break
+                    current_qty = inv_item.get("quantity", 0) or 0
+                    deduct = min(current_qty, remaining_to_deduct)
+                    new_qty = max(0, current_qty - deduct)
+                    inv_update = {
+                        "quantity": new_qty,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    }
+                    if new_qty == 0:
+                        inv_update["status"] = "depleted"
+                    await (
+                        db_admin.table("resources")
+                        .update(inv_update)
+                        .eq("id", inv_item["id"])
+                        .async_execute()
+                    )
+                    remaining_to_deduct -= deduct
+                if remaining_to_deduct < delivered_qty:
+                    print(f"📉 Stock deducted: {delivered_qty - remaining_to_deduct} units of '{resource_type}' from NGO {ngo_id[:8]}")
+        except Exception as stock_err:
+            print(f"⚠️  Stock deduction failed (non-blocking): {stock_err}")
 
     resp = await db_admin.table("resource_requests").update(updates).eq("id", request_id).async_execute()
 

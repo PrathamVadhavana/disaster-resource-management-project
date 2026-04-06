@@ -102,9 +102,11 @@ export default function NGOApprovedRequestsPage() {
     })
 
     const filtered = search
-        ? requests.filter((r: any) =>
-            (r.description || r.resource_type || r.victim_name || r.address_text || '').toLowerCase().includes(search.toLowerCase())
-        )
+        ? requests.filter((r: any) => {
+            const term = search.toLowerCase()
+            return [r.id, r.description, r.resource_type, r.victim_name, r.address_text, r.victim_email]
+                .filter(Boolean).some(f => f.toLowerCase().includes(term))
+        })
         : requests
 
     if (isLoading) {

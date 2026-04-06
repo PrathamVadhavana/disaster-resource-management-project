@@ -81,9 +81,11 @@ export default function NGOAssignedRequestsPage() {
     const statusCounts = data?.status_counts || {}
 
     const filtered = search
-        ? requests.filter((r: any) =>
-            (r.description || r.resource_type || r.victim_name || '').toLowerCase().includes(search.toLowerCase())
-        )
+        ? requests.filter((r: any) => {
+            const term = search.toLowerCase()
+            return [r.id, r.description, r.resource_type, r.victim_name, r.address_text, r.victim_email]
+                .filter(Boolean).some(f => f.toLowerCase().includes(term))
+        })
         : requests
 
     /** Format ETA / completion time for display */

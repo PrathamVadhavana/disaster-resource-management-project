@@ -49,7 +49,7 @@ export function AdminDashboardOverview() {
     })
 
     const predictionList = Array.isArray(predictions) ? predictions : []
-    const orchestratorRunning = ingestion?.orchestrator?.is_running
+    const orchestratorRunning = ingestion?.orchestrator_running ?? ingestion?.orchestrator?.is_running
 
     const isLoading = eLoad || iLoad || pLoad
     const isError = false // Simplified error handling as dError is gone
