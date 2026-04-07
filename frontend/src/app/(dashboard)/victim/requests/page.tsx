@@ -97,7 +97,7 @@ export default function VictimRequestStatusPage() {
     const queryClient = useQueryClient()
     const [expanded, setExpanded] = useState<string | null>(null)
     const [page, setPage] = useState(1)
-    const pageSize = 20
+    const pageSize = 10
 
     const deleteMutation = useMutation({
         mutationFn: (id: string) => deleteResourceRequest(id),
@@ -197,7 +197,22 @@ export default function VictimRequestStatusPage() {
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-2 flex-wrap">
                                                 <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
-                                                    {req.resource_type || req.title || 'Resource Request'}
+                                                    {(() => {
+                                                        const rt = req.resource_type;
+                                                        // If resource_type is a meaningful category, show it
+                                                        if (rt && rt !== 'Custom' && rt !== 'Multiple') return rt;
+                                                        // For "Multiple", list the item types
+                                                        if (rt === 'Multiple' && req.items?.length) {
+                                                            const names = req.items.map((it: any) => it.custom_name || it.resource_type).filter(Boolean);
+                                                            return names.length ? names.join(', ') : 'Multiple Resources';
+                                                        }
+                                                        // For "Custom" or fallback, derive from items
+                                                        if (req.items?.length) {
+                                                            const firstName = req.items[0]?.custom_name || req.items[0]?.resource_type;
+                                                            if (firstName && firstName !== 'Custom') return firstName;
+                                                        }
+                                                        return rt || 'Resource Request';
+                                                    })()}
                                                 </h3>
                                                 <span className={cn(
                                                     'text-[10px] px-2 py-0.5 rounded-full font-semibold capitalize',
@@ -307,7 +322,7 @@ export default function VictimRequestStatusPage() {
                                                 <div className="space-y-1">
                                                     {req.items.map((item: any, i: number) => (
                                                         <div key={i} className="flex items-center justify-between py-1.5 px-3 rounded-lg bg-slate-50 dark:bg-white/5">
-                                                            <span className="text-xs text-slate-700 dark:text-slate-300">{item.name || item.type}</span>
+                                                            <span className="text-xs text-slate-700 dark:text-slate-300">{item.custom_name || item.resource_type || 'Unknown Item'}</span>
                                                             <span className="text-xs font-semibold text-slate-900 dark:text-white">×{item.quantity || 1}</span>
                                                         </div>
                                                     ))}
