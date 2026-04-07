@@ -426,10 +426,10 @@ export function RequestDetail({ requestId }: { requestId: string }) {
                                 <div className="flex items-start justify-between gap-4">
                                     <div>
                                         <p className="text-sm font-semibold text-slate-900 dark:text-white capitalize">
-                                            {event.action_type === 'status_change' ? `${event.details?.old_status || 'Pending'} → ${event.details?.new_status}` : event.action_type.replace(/_/g, ' ')}
+                                            {event.action_type === 'status_change' ? `${event.details?.old_status || 'Pending'} → ${event.details?.new_status}` : (event.action_type?.replace(/_/g, ' ') || 'Update')}
                                         </p>
                                         <p className="text-xs text-slate-500 mt-1">
-                                            {event.actor_role === 'victim' ? 'You' : event.actor_role === 'admin' ? 'NGO Liaison' : event.actor_role} — {event.details?.note || 'No notes'}
+                                            {event.actor_role === 'victim' ? 'You' : event.actor_role === 'admin' ? 'NGO Liaison' : (event.actor_role || 'System')} — {event.details?.note || 'No notes'}
                                         </p>
                                     </div>
                                     <span className="text-[10px] text-slate-400 whitespace-nowrap">

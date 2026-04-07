@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect } from 'react'
-import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, CircleMarker, Popup, useMap, Marker } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
@@ -18,8 +18,21 @@ interface Disaster {
     affected_population?: number
 }
 
+interface Resource {
+    id: string
+    name?: string
+    type?: string
+    status?: string
+    quantity?: number
+    unit?: string
+    latitude?: number
+    longitude?: number
+    disaster_id?: string
+}
+
 interface DisasterMapProps {
     disasters: Disaster[]
+    resources?: Resource[]
 }
 
 const SEVERITY_HEX: Record<string, string> = {
@@ -36,22 +49,58 @@ const SEVERITY_RADIUS: Record<string, number> = {
     low: 6,
 }
 
+const RESOURCE_TYPE_HEX: Record<string, string> = {
+    food: '#22c55e',
+    water: '#3b82f6',
+    medical: '#ef4444',
+    shelter: '#a855f7',
+    clothing: '#f59e0b',
+    equipment: '#6366f1',
+    transport: '#14b8a6',
+    personnel: '#ec4899',
+}
+
 /** Auto-fit the map bounds when disaster data changes */
-function FitBounds({ disasters }: { disasters: Disaster[] }) {
+function FitBounds({ disasters, resources }: { disasters: Disaster[]; resources?: Resource[] }) {
     const map = useMap()
 
     useEffect(() => {
-        if (disasters.length === 0) return
-        const bounds = L.latLngBounds(disasters.map((d) => [d.latitude, d.longitude]))
+        const points: [number, number][] = []
+        disasters.forEach((d) => points.push([d.latitude, d.longitude]))
+        resources?.forEach((r) => {
+            if (r.latitude != null && r.longitude != null) {
+                points.push([r.latitude, r.longitude])
+            }
+        })
+        if (points.length === 0) return
+        const bounds = L.latLngBounds(points)
         map.fitBounds(bounds, { padding: [40, 40], maxZoom: 8 })
-    }, [disasters, map])
+    }, [disasters, resources, map])
 
     return null
 }
 
-export default function DisasterMap({ disasters }: DisasterMapProps) {
+/** Create a custom diamond-shaped SVG icon for resources */
+function createResourceIcon(color: string) {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+        <rect x="4" y="4" width="16" height="16" rx="3" fill="${color}" fill-opacity="0.8" stroke="white" stroke-width="2"/>
+        <rect x="8" y="8" width="8" height="8" rx="1.5" fill="white" fill-opacity="0.6"/>
+    </svg>`
+    return L.divIcon({
+        html: svg,
+        className: 'resource-marker-icon',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+        popupAnchor: [0, -12],
+    })
+}
+
+export default function DisasterMap({ disasters, resources = [] }: DisasterMapProps) {
     const defaultCenter: [number, number] = [20, 0]
     const defaultZoom = 2
+    const deployedResources = resources.filter(
+        (r) => r.latitude != null && r.longitude != null && (r.status === 'allocated' || r.status === 'in_use' || r.status === 'deployed')
+    )
 
     return (
         <div className="rounded-2xl border border-slate-200 dark:border-white/10 overflow-hidden" style={{ height: 500 }}>
@@ -94,6 +143,18 @@ export default function DisasterMap({ disasters }: DisasterMapProps) {
                 .disaster-map .leaflet-control-attribution a {
                     color: #64748b !important;
                 }
+                .resource-marker-icon {
+                    background: transparent !important;
+                    border: none !important;
+                }
+                .map-legend {
+                    background: rgba(15,23,42,0.9);
+                    border: 1px solid rgba(255,255,255,0.1);
+                    border-radius: 8px;
+                    padding: 8px 12px;
+                    font-size: 11px;
+                    color: #94a3b8;
+                }
             `}} />
             <div className="disaster-map h-full w-full">
             <MapContainer
@@ -107,13 +168,17 @@ export default function DisasterMap({ disasters }: DisasterMapProps) {
                     attribution='&copy; <a href="https://carto.com/">CARTO</a>'
                     url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
                 />
-                {disasters.length > 0 && <FitBounds disasters={disasters} />}
+                {(disasters.length > 0 || deployedResources.length > 0) && (
+                    <FitBounds disasters={disasters} resources={deployedResources} />
+                )}
+
+                {/* Disaster zone markers */}
                 {disasters.map((d) => {
                     const color = SEVERITY_HEX[d.severity || 'low'] || '#94a3b8'
                     const radius = SEVERITY_RADIUS[d.severity || 'low'] || 7
                     return (
                         <CircleMarker
-                            key={d.id}
+                            key={`disaster-${d.id}`}
                             center={[d.latitude, d.longitude]}
                             radius={radius}
                             pathOptions={{
@@ -155,6 +220,45 @@ export default function DisasterMap({ disasters }: DisasterMapProps) {
                                 </div>
                             </Popup>
                         </CircleMarker>
+                    )
+                })}
+
+                {/* Deployed resource markers */}
+                {deployedResources.map((r) => {
+                    const resourceType = (r.type || 'equipment').toLowerCase()
+                    const color = RESOURCE_TYPE_HEX[resourceType] || '#6366f1'
+                    return (
+                        <Marker
+                            key={`resource-${r.id}`}
+                            position={[r.latitude!, r.longitude!]}
+                            icon={createResourceIcon(color)}
+                        >
+                            <Popup>
+                                <div className="space-y-1.5 min-w-[160px]">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide"
+                                            style={{ backgroundColor: `${color}20`, color }}>
+                                            Resource
+                                        </span>
+                                    </div>
+                                    <p className="font-semibold text-white text-sm leading-tight">{r.name || 'Unnamed Resource'}</p>
+                                    <div className="flex items-center gap-2 text-xs">
+                                        <span className="inline-block w-2 h-2 rounded-sm" style={{ backgroundColor: color }} />
+                                        <span className="capitalize text-slate-400">{resourceType}</span>
+                                        <span className="text-slate-500">•</span>
+                                        <span className="text-slate-400 capitalize">{r.status}</span>
+                                    </div>
+                                    {r.quantity != null && (
+                                        <p className="text-xs text-slate-400">
+                                            📦 {r.quantity} {r.unit || 'units'}
+                                        </p>
+                                    )}
+                                    <p className="text-[11px] text-slate-500">
+                                        {r.latitude!.toFixed(4)}, {r.longitude!.toFixed(4)}
+                                    </p>
+                                </div>
+                            </Popup>
+                        </Marker>
                     )
                 })}
             </MapContainer>

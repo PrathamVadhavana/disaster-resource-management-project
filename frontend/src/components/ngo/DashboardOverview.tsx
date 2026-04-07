@@ -10,7 +10,7 @@ import { subscribeToTable } from '@/lib/realtime'
 import {
     Loader2, AlertTriangle, Clock, CheckCircle2, TrendingUp,
     ArrowRight, Package, MapPin, Activity, ListOrdered,
-    Truck, Building2, Target, Route, Bell, Timer, Zap,
+    Truck, Building2, Target, Route, Timer, Zap,
 } from 'lucide-react'
 
 const STATUS_COLORS: Record<string, string> = {
@@ -53,12 +53,6 @@ export function NGODashboardOverview() {
         refetchInterval: 20000,
     })
 
-    const { data: notifData, isLoading: nLoad } = useQuery({
-        queryKey: ['ngo-notifications-feed'],
-        queryFn: () => api.getNgoNotifications({ limit: 10 }),
-        refetchInterval: 10000,
-    })
-
     const { data: disasters } = useQuery({
         queryKey: ['ngo-disasters'],
         queryFn: () => api.getDisasters({ status: 'active', limit: 50 }),
@@ -80,8 +74,6 @@ export function NGODashboardOverview() {
     const activeDisasters = disasterList.filter((d: any) => d.status === 'active')
     const criticalDisasters = activeDisasters.filter((d: any) => d.severity === 'critical')
     const recentActivity = auditData?.entries || []
-    const notifications = notifData?.notifications || []
-    const unreadCount = notifData?.unread_count || 0
 
     const isLoading = sLoad
 
@@ -138,12 +130,6 @@ export function NGODashboardOverview() {
                         Manage relief operations, track deployments, and coordinate resources in real-time.
                     </p>
                 </div>
-                {unreadCount > 0 && (
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20">
-                        <Bell className="w-4 h-4 text-red-500" />
-                        <span className="text-xs font-semibold text-red-600 dark:text-red-400">{unreadCount} new</span>
-                    </div>
-                )}
             </div>
 
             {/* KPI Cards */}
@@ -234,40 +220,6 @@ export function NGODashboardOverview() {
                         <p className="text-sm text-slate-400 text-center py-6">No activity recorded yet</p>
                     )}
                 </div>
-            </div>
-
-            {/* Notification Feed */}
-            <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
-                <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-                    <h2 className="font-semibold text-slate-900 dark:text-white flex items-center gap-2">
-                        <Bell className="w-4 h-4 text-amber-500" /> Notifications
-                        {unreadCount > 0 && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-red-500 text-white">{unreadCount}</span>
-                        )}
-                    </h2>
-                </div>
-                {notifications.length > 0 ? (
-                    <div className="divide-y divide-slate-100 dark:divide-white/5 max-h-64 overflow-y-auto">
-                        {notifications.map((n: any) => (
-                            <div key={n.id} className={cn(
-                                'flex items-start gap-3 px-5 py-3 transition-colors',
-                                !n.read ? 'bg-blue-50/50 dark:bg-blue-500/5' : 'hover:bg-slate-50 dark:hover:bg-white/[0.02]'
-                            )}>
-                                <div className={cn('w-2 h-2 rounded-full mt-2 shrink-0', !n.read ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-600')} />
-                                <div className="flex-1 min-w-0">
-                                    <p className="text-xs font-medium text-slate-800 dark:text-slate-200">{n.title}</p>
-                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-2">{n.message}</p>
-                                    <p className="text-[10px] text-slate-400 mt-1">{n.created_at ? new Date(n.created_at).toLocaleString() : ''}</p>
-                                </div>
-                                {n.priority === 'critical' && (
-                                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-100 dark:bg-red-500/10 text-red-600 font-bold">URGENT</span>
-                                )}
-                            </div>
-                        ))}
-                    </div>
-                ) : (
-                    <div className="p-8 text-center text-sm text-slate-400">No notifications yet</div>
-                )}
             </div>
 
             {/* Quick Actions */}
