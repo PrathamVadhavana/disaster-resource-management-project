@@ -37,6 +37,13 @@ from app.services.notification_service import (
 )
 from app.services.unified_resource_service import unified_resource_service
 
+# Import resource type validation from victim module
+try:
+    from app.routers.victim import VALID_RESOURCE_TYPES as _VALID_RT, resolve_resource_type_sync as _resolve_rt_sync
+except ImportError:
+    _VALID_RT = {"Food", "Water", "Medical", "Shelter", "Clothing", "Financial Aid", "Evacuation", "Volunteers", "Custom", "Multiple"}
+    _resolve_rt_sync = lambda rt: rt if rt in _VALID_RT else "Custom"
+
 router = APIRouter()
 security = HTTPBearer()
 
@@ -919,10 +926,27 @@ async def approve_reject_request(
         current_status = existing.data.get("status")
         previous_assignee = existing.data.get("assigned_to")
 
+        # ── Sanitize resource_type if it violates the DB CHECK constraint ──
+        # Requests may have been created with specific item names like
+        # "Rice (25 kg bags)" instead of valid categories. Fix it here so
+        # the subsequent .update() call doesn't fail.
+        existing_rt = existing.data.get("resource_type", "Custom")
+        if existing_rt not in _VALID_RT:
+            sanitized_rt = _resolve_rt_sync(existing_rt)
+            logger.info(
+                "Sanitizing resource_type for request %s: '%s' -> '%s'",
+                request_id, existing_rt, sanitized_rt,
+            )
+        else:
+            sanitized_rt = None  # no fix needed
+
         # Build update
         update_fields = {
             "updated_at": datetime.now(UTC).isoformat(),
         }
+        # Include sanitized resource_type if it was invalid
+        if sanitized_rt:
+            update_fields["resource_type"] = sanitized_rt
 
         # Status-to-fulfillment mapping for auto-updating fulfillment_pct
         _STATUS_FULFILLMENT_MAP = {

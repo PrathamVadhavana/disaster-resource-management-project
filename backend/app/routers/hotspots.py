@@ -290,19 +290,38 @@ async def assign_hotspot_resources(
     payload: AssignResourcePayload,
     user: dict = Depends(get_current_user),
 ):
-    """Assign volunteers, NGOs, or supplies to a hotspot cluster."""
+    """Assign volunteers, NGOs, or supplies to a hotspot cluster.
+
+    This endpoint:
+    1. Verifies the cluster exists and fetches its member request_ids
+    2. Updates all pending/approved resource_requests in the cluster to 'assigned'
+    3. Logs the allocation to allocation_log
+    4. Notifies affected victims and creates admin notifications
+    """
     if user.get("role") not in ("admin",):
         raise HTTPException(status_code=403, detail="Admin only")
 
-    # Verify the cluster exists
+    # ── Valid resource types for the resource_requests table ──
+    _VALID_RT = {
+        "Food", "Water", "Medical", "Shelter", "Clothing",
+        "Financial Aid", "Evacuation", "Volunteers", "Custom", "Multiple",
+    }
+    _RT_ALIAS = {
+        "Medical Team": "Medical", "Food Supplies": "Food",
+        "Shelter Materials": "Shelter", "Evacuation Support": "Evacuation",
+        "NGO Team": "Volunteers",
+    }
+
+    # Verify the cluster exists and get its request_ids
     try:
         resp = (
             await db_admin.table("hotspot_clusters")
-            .select("id, centroid_lat, centroid_lon, dominant_type")
+            .select("id, centroid_lat, centroid_lon, dominant_type, request_ids")
             .eq("id", cluster_id)
             .async_execute()
         )
-        if not (resp.data or []):
+        cluster_rows = resp.data or []
+        if not cluster_rows:
             raise HTTPException(status_code=404, detail="Hotspot cluster not found")
     except HTTPException:
         raise
@@ -310,12 +329,22 @@ async def assign_hotspot_resources(
         logger.error("Failed to fetch hotspot %s: %s", cluster_id, exc)
         raise HTTPException(status_code=500, detail="Could not verify hotspot")
 
-    # Log the allocation
+    cluster = cluster_rows[0]
+    request_ids = cluster.get("request_ids") or []
+    admin_id = user.get("id") or user.get("sub")
+    now_iso = datetime.now(UTC).isoformat()
+
+    # Resolve resource type to a valid DB value
+    resolved_type = _RT_ALIAS.get(payload.resource_type, payload.resource_type)
+    if resolved_type not in _VALID_RT:
+        resolved_type = "Custom"
+
+    # ── Log the allocation ──
     allocation_record = {
         "id": str(uuid.uuid4()),
-        "resource_type": payload.resource_type,
+        "resource_type": resolved_type,
         "quantity": payload.quantity,
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": now_iso,
     }
 
     try:
@@ -324,20 +353,149 @@ async def assign_hotspot_resources(
         logger.error("Failed to log allocation for hotspot %s: %s", cluster_id, exc)
         raise HTTPException(status_code=500, detail="Could not log resource allocation")
 
-    # Create a notification for the admin
+    # ── Update member resource_requests to 'assigned' status ──
+    requests_updated = 0
+    victims_notified = 0
+
+    if request_ids:
+        for rid in request_ids[:50]:  # cap to avoid huge operations
+            try:
+                # Fetch the request to check its current state
+                r_resp = (
+                    await db_admin.table("resource_requests")
+                    .select("id, status, victim_id, resource_type, priority")
+                    .eq("id", rid)
+                    .maybe_single()
+                    .async_execute()
+                )
+                if not r_resp.data:
+                    continue
+
+                req = r_resp.data
+                current_status = req.get("status", "")
+
+                # Only update requests that are pending or approved
+                if current_status not in ("pending", "approved"):
+                    continue
+
+                # Build update fields
+                update_fields = {
+                    "status": "approved" if current_status == "pending" else "assigned",
+                    "updated_at": now_iso,
+                    "admin_note": (
+                        f"Resources assigned via Hotspot #{cluster_id[:8]}: "
+                        f"{payload.quantity}x {payload.resource_type}"
+                        f"{(' — ' + payload.notes) if payload.notes else ''}"
+                    ),
+                }
+
+                # If there's a specific assignee, assign to them
+                if payload.assigned_to:
+                    update_fields["status"] = "assigned"
+                    update_fields["assigned_to"] = payload.assigned_to
+
+                # Auto-update fulfillment_pct based on status
+                _STATUS_PCT = {"approved": 10, "assigned": 25}
+                update_fields["fulfillment_pct"] = _STATUS_PCT.get(
+                    update_fields["status"], 0
+                )
+
+                # Sanitize resource_type if it's invalid
+                existing_rt = req.get("resource_type", "Custom")
+                if existing_rt not in _VALID_RT:
+                    # Try keyword-based resolution
+                    lower = existing_rt.lower()
+                    _KW = {
+                        "Food": ["rice", "wheat", "flour", "dal", "food", "meal", "ration"],
+                        "Water": ["water", "drink", "purif"],
+                        "Medical": ["medic", "first aid", "medicine", "health"],
+                        "Shelter": ["shelter", "tent", "blanket"],
+                        "Clothing": ["cloth", "garment", "shirt"],
+                    }
+                    fixed = "Custom"
+                    for cat, kws in _KW.items():
+                        if any(k in lower for k in kws):
+                            fixed = cat
+                            break
+                    update_fields["resource_type"] = fixed
+
+                await (
+                    db_admin.table("resource_requests")
+                    .update(update_fields)
+                    .eq("id", rid)
+                    .async_execute()
+                )
+                requests_updated += 1
+
+                # ── Notify the victim ──
+                victim_id = req.get("victim_id")
+                if victim_id:
+                    try:
+                        notif = {
+                            "id": str(uuid.uuid4()),
+                            "user_id": victim_id,
+                            "title": "📦 Resources Assigned to Your Request",
+                            "message": (
+                                f"An admin has assigned {payload.quantity}x {payload.resource_type} "
+                                f"to your {req.get('priority', 'medium')} priority request. "
+                                f"Your request status has been updated."
+                            ),
+                            "priority": "high",
+                            "data": {
+                                "type": "hotspot_resource_assignment",
+                                "request_id": rid,
+                                "hotspot_id": cluster_id,
+                                "resource_type": resolved_type,
+                                "quantity": payload.quantity,
+                            },
+                            "created_at": now_iso,
+                        }
+                        await db_admin.table("notifications").insert(notif).async_execute()
+                        victims_notified += 1
+                    except Exception as ne:
+                        logger.warning("Failed to notify victim %s: %s", victim_id, ne)
+
+                # ── Log to audit trail ──
+                try:
+                    audit = {
+                        "id": str(uuid.uuid4()),
+                        "request_id": rid,
+                        "action": f"status_changed_to_{update_fields['status']}",
+                        "actor_id": admin_id,
+                        "actor_role": "admin",
+                        "old_status": current_status,
+                        "new_status": update_fields["status"],
+                        "details": (
+                            f"Resources assigned via hotspot cluster #{cluster_id[:8]}: "
+                            f"{payload.quantity}x {payload.resource_type}"
+                        ),
+                        "created_at": now_iso,
+                    }
+                    await db_admin.table("request_audit_log").insert(audit).async_execute()
+                except Exception as ae:
+                    logger.warning("Failed to create audit log for request %s: %s", rid, ae)
+
+            except Exception as exc:
+                logger.warning("Failed to update request %s for hotspot %s: %s", rid, cluster_id, exc)
+
+    # ── Create admin notification ──
     try:
         notif = {
             "id": str(uuid.uuid4()),
-            "user_id": user.get("id") or user.get("sub"),
-            "title": f"Resources assigned to Hotspot",
-            "message": f"{payload.quantity}x {payload.resource_type} assigned to hotspot {cluster_id[:8]}",
+            "user_id": admin_id,
+            "title": "Resources assigned to Hotspot",
+            "message": (
+                f"{payload.quantity}x {payload.resource_type} assigned to hotspot {cluster_id[:8]}. "
+                f"{requests_updated} request(s) updated, {victims_notified} victim(s) notified."
+            ),
             "priority": "high",
             "data": {
                 "hotspot_id": cluster_id,
-                "resource_type": payload.resource_type,
+                "resource_type": resolved_type,
                 "quantity": payload.quantity,
+                "requests_updated": requests_updated,
             },
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": now_iso,
         }
         await db_admin.table("notifications").insert(notif).async_execute()
     except Exception as exc:
@@ -345,8 +503,13 @@ async def assign_hotspot_resources(
 
     return JSONResponse(
         content={
-            "message": f"Assigned {payload.quantity}x {payload.resource_type} to hotspot {cluster_id[:8]}",
+            "message": (
+                f"Assigned {payload.quantity}x {payload.resource_type} to hotspot {cluster_id[:8]}. "
+                f"{requests_updated} request(s) updated, {victims_notified} victim(s) notified."
+            ),
             "allocation_id": allocation_record["id"],
+            "requests_updated": requests_updated,
+            "victims_notified": victims_notified,
         }
     )
 

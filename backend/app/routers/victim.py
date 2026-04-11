@@ -86,6 +86,103 @@ def _safe_row(row: dict) -> dict:
     return row
 
 
+# ── Valid resource types matching the DB CHECK constraint ────────────────
+VALID_RESOURCE_TYPES = {
+    "Food",
+    "Water",
+    "Medical",
+    "Shelter",
+    "Clothing",
+    "Financial Aid",
+    "Evacuation",
+    "Volunteers",
+    "Custom",
+    "Multiple",
+}
+
+# Map common DB category variants / display names to valid resource types
+CATEGORY_ALIAS = {
+    "Clothes": "Clothing",
+    "Medical Team": "Medical",
+    "Food Supplies": "Food",
+    "Shelter Materials": "Shelter",
+    "Evacuation Support": "Evacuation",
+    "NGO Team": "Volunteers",
+    "Financial": "Financial Aid",
+    "Finance": "Financial Aid",
+    "Rescue": "Evacuation",
+}
+
+
+async def resolve_resource_type(raw_type: str) -> str:
+    """Resolve a resource type string to a valid DB enum value.
+    If it's already valid, return as-is. Otherwise, check aliases,
+    then look it up in the resources table to find the type.
+    Falls back to 'Custom'."""
+    if raw_type in VALID_RESOURCE_TYPES:
+        return raw_type
+    mapped = CATEGORY_ALIAS.get(raw_type)
+    if mapped:
+        return mapped
+    # Check if the raw_type *contains* a known type (e.g. "Rice (25 kg bags)" -> Food)
+    _TYPE_KEYWORDS = {
+        "Food": ["rice", "wheat", "flour", "dal", "grain", "meal", "bread", "food", "ration", "biscuit"],
+        "Water": ["water", "aqua", "drink", "purif"],
+        "Medical": ["medic", "first aid", "bandage", "medicine", "pharma", "health", "doctor", "nurse", "hospital"],
+        "Shelter": ["shelter", "tent", "tarp", "blanket", "mattress", "roof"],
+        "Clothing": ["cloth", "garment", "shirt", "trouser", "jacket", "sweater", "shoes"],
+        "Evacuation": ["evacu", "rescue", "transport", "vehicle", "boat"],
+        "Volunteers": ["volunteer", "helper", "manpower", "team"],
+        "Financial Aid": ["money", "cash", "fund", "financial", "donation"],
+    }
+    lower = raw_type.lower()
+    for category, keywords in _TYPE_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return category
+    # Try to look up the type from resources table by name
+    try:
+        r_resp = (
+            await db_admin.table("resources")
+            .select("type")
+            .eq("name", raw_type)
+            .maybe_single()
+            .async_execute()
+        )
+        if r_resp.data:
+            rtype = r_resp.data["type"]
+            return (
+                CATEGORY_ALIAS.get(rtype, rtype) if rtype in VALID_RESOURCE_TYPES or rtype in CATEGORY_ALIAS else "Custom"
+            )
+    except Exception:
+        pass
+    return "Custom"
+
+
+def resolve_resource_type_sync(raw_type: str) -> str:
+    """Synchronous version of resolve_resource_type for simple cases.
+    Does NOT do DB lookup — only checks valid types, aliases, and keywords."""
+    if raw_type in VALID_RESOURCE_TYPES:
+        return raw_type
+    mapped = CATEGORY_ALIAS.get(raw_type)
+    if mapped:
+        return mapped
+    _TYPE_KEYWORDS = {
+        "Food": ["rice", "wheat", "flour", "dal", "grain", "meal", "bread", "food", "ration", "biscuit"],
+        "Water": ["water", "aqua", "drink", "purif"],
+        "Medical": ["medic", "first aid", "bandage", "medicine", "pharma", "health"],
+        "Shelter": ["shelter", "tent", "tarp", "blanket", "mattress"],
+        "Clothing": ["cloth", "garment", "shirt", "trouser", "jacket"],
+        "Evacuation": ["evacu", "rescue", "transport", "vehicle"],
+        "Volunteers": ["volunteer", "helper", "manpower"],
+        "Financial Aid": ["money", "cash", "fund", "financial"],
+    }
+    lower = raw_type.lower()
+    for category, keywords in _TYPE_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return category
+    return "Custom"
+
+
 # ──────────────────────────────────────────────
 # CREATE
 # ──────────────────────────────────────────────
@@ -97,55 +194,14 @@ async def create_resource_request(
     """Create a new resource request for the authenticated victim"""
     victim_id = user["id"]
 
-    # Valid resource types matching the DB CHECK constraint
-    VALID_RESOURCE_TYPES = {
-        "Food",
-        "Water",
-        "Medical",
-        "Shelter",
-        "Clothing",
-        "Financial Aid",
-        "Evacuation",
-        "Volunteers",
-        "Custom",
-        "Multiple",
-    }
-    # Map common DB category variants to valid resource types
-    CATEGORY_ALIAS = {"Clothes": "Clothing"}
-
-    async def _resolve_resource_type(raw_type: str) -> str:
-        """Resolve a resource type string to a valid DB enum value.
-        If it's already valid, return as-is. Otherwise, look it up
-        in the resources table to find the type."""
-        if raw_type in VALID_RESOURCE_TYPES:
-            return raw_type
-        mapped = CATEGORY_ALIAS.get(raw_type)
-        if mapped:
-            return mapped
-        # Try to look up the type from resources table by name
-        try:
-            r_resp = (
-                await db_admin.table("resources")
-                .select("type")
-                .eq("name", raw_type)
-                .maybe_single()
-                .async_execute()
-            )
-            if r_resp.data:
-                rtype = r_resp.data["type"]
-                return (
-                    CATEGORY_ALIAS.get(rtype, rtype) if rtype in VALID_RESOURCE_TYPES or rtype in CATEGORY_ALIAS else "Custom"
-                )
-        except Exception:
-            pass
-        return "Custom"
+    # (VALID_RESOURCE_TYPES and resolve_resource_type are now module-level)
 
     # Process items — derive resource_type and quantity from items list
     items_list = _serialize_items(request_data.items) if request_data.items else []
     if items_list:
         total_qty = sum(i.get("quantity", 1) for i in items_list)
         raw_type = items_list[0]["resource_type"] if len(items_list) == 1 else "Multiple"
-        primary_type = await _resolve_resource_type(raw_type)
+        primary_type = await resolve_resource_type(raw_type)
     else:
         total_qty = request_data.quantity
         primary_type = request_data.resource_type.value if request_data.resource_type else "Custom"
@@ -580,7 +636,8 @@ async def update_resource_request(
         if "items" in update_dict and update_dict["items"]:
             items = update_dict["items"]
             update_dict["quantity"] = sum(i.get("quantity", 1) if isinstance(i, dict) else i.quantity for i in items)
-            update_dict["resource_type"] = items[0].get("resource_type", "Custom") if len(items) == 1 else "Multiple"
+            raw_rt = items[0].get("resource_type", "Custom") if len(items) == 1 else "Multiple"
+            update_dict["resource_type"] = await resolve_resource_type(raw_rt)
 
         if not update_dict:
             return JSONResponse(content=_safe_row(existing.data))

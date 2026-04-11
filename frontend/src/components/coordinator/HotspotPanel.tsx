@@ -130,7 +130,7 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
     const [modalMode, setModalMode] = useState<'detail' | 'map' | 'assign' | 'alert' | null>(null)
 
     // Assign form state
-    const [assignForm, setAssignForm] = useState({ resource_type: 'Volunteers', quantity: 1, notes: '' })
+    const [assignForm, setAssignForm] = useState({ resource_type: 'Food', quantity: 1, notes: '' })
 
     // Alert form state
     const [alertForm, setAlertForm] = useState({ channel: 'in_app', recipient_role: 'ngo', severity: 'high', subject: '', body: '' })
@@ -169,10 +169,12 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
     const assignMutation = useMutation({
         mutationFn: (data: { clusterId: string; resource_type: string; quantity: number; notes?: string }) =>
             api.assignHotspotResources(data.clusterId, { resource_type: data.resource_type, quantity: data.quantity, notes: data.notes }),
-        onSuccess: () => {
+        onSuccess: (data: any) => {
             setModalMode(null)
             setSelectedCluster(null)
+            setAssignForm({ resource_type: 'Food', quantity: 1, notes: '' })
             qc.invalidateQueries({ queryKey: ['hotspots'] })
+            qc.invalidateQueries({ queryKey: ['admin-requests'] })
         },
     })
 
@@ -673,8 +675,8 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                         onChange={e => setAssignForm(f => ({ ...f, resource_type: e.target.value }))}
                                         className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-white"
                                     >
-                                        {['Volunteers', 'Medical Team', 'Food Supplies', 'Water', 'Shelter Materials', 'Evacuation Support', 'NGO Team'].map(t => (
-                                            <option key={t} value={t}>{t}</option>
+                                        {['Food', 'Water', 'Medical', 'Shelter', 'Clothing', 'Financial Aid', 'Evacuation', 'Volunteers'].map(t => (
+                                            <option key={t} value={t}>{RESOURCE_ICONS[t] || '📦'} {t}</option>
                                         ))}
                                     </select>
                                 </div>
