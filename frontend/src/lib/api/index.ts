@@ -438,7 +438,7 @@ export const api = {
     getModelInfo: () =>
         apiFetch('/api/admin/analytics/model-info'),
 
-    predictSandbox: (data: any) =>
+    predictSandbox: (data: { prediction_type: string; features: any; run_ensemble?: boolean }) =>
         apiFetch('/api/predictions/sandbox', { method: 'POST', body: JSON.stringify(data) }),
 
     // ━━ NGO Stats (alias) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

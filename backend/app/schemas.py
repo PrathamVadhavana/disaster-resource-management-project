@@ -133,6 +133,7 @@ class Disaster(DisasterBase):
 class PredictionInput(BaseModel):
     location_id: str | None = "sandbox"
     prediction_type: PredictionType
+    run_ensemble: bool = False
     features: dict[str, Any] = Field(
         ..., description="Feature dict for ML model. Required fields vary by prediction type."
     )
@@ -151,13 +152,7 @@ class PredictionInput(BaseModel):
         else:
             required = []
 
-        # Only warn; don't block — the ML service has fallbacks
-        missing = [f for f in required if f not in v]
-        if missing:
-            # Add defaults for missing required features
-            for f in missing:
-                v.setdefault(f, 0)
-
+        # The ML service has its own robust fallbacks; do not overwrite input features here
         return v
 
 

@@ -721,7 +721,10 @@ async def list_all_requests(
         query = db_admin.table("resource_requests").select("*", count="exact")
 
         if status:
-            query = query.eq("status", status)
+            if "," in status:
+                query = query.in_("status", [s.strip() for s in status.split(",")])
+            else:
+                query = query.eq("status", status)
         if priority:
             query = query.eq("priority", priority)
         if resource_type:

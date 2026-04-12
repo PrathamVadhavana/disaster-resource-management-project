@@ -24,6 +24,8 @@ interface ClusterData {
     detected_at: string
     boundary: any
     request_ids?: string[]
+    trend?: 'growing' | 'stable' | 'receding' | 'new'
+    risk_score?: number
 }
 
 interface Insight {
@@ -101,6 +103,8 @@ function parseClusters(hotspots: any): ClusterData[] {
                 detected_at: p.detected_at ?? '',
                 boundary: f.geometry,
                 request_ids: p.request_ids,
+                trend: p.trend || 'stable',
+                risk_score: p.risk_score || 0,
             }
         })
         : Array.isArray(hotspots) ? hotspots : hotspots?.clusters || []
@@ -381,6 +385,18 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                                     )}>
                                                         {cluster.priority}
                                                     </span>
+                                                    {cluster.trend && (
+                                                        <span className={cn(
+                                                            "text-[9px] px-1.5 py-0.5 rounded-md font-bold uppercase flex items-center gap-1",
+                                                            cluster.trend === 'growing' ? 'bg-red-500/10 text-red-500' :
+                                                            cluster.trend === 'receding' ? 'bg-green-500/10 text-green-500' :
+                                                            'bg-slate-500/10 text-slate-500'
+                                                        )}>
+                                                            {cluster.trend === 'growing' ? <TrendingUp className="w-2.5 h-2.5" /> : 
+                                                             cluster.trend === 'receding' ? <Activity className="w-2.5 h-2.5" /> : null}
+                                                            {cluster.trend}
+                                                        </span>
+                                                    )}
                                                 </div>
                                                 {cluster.detected_at && (
                                                     <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
@@ -419,6 +435,21 @@ export default function HotspotPanel({ selectedDisasterId }: { selectedDisasterI
                                         <div>
                                             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">People</p>
                                             <p className="text-xs text-slate-700 dark:text-slate-300 tabular-nums font-semibold">{cluster.total_people}</p>
+                                        </div>
+                                        <div>
+                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Risk Score</p>
+                                            <div className="flex items-center gap-2">
+                                                <div className="flex-1 bg-slate-100 dark:bg-white/10 rounded-full h-1 overflow-hidden min-w-[40px]">
+                                                    <div 
+                                                        className={cn(
+                                                            "h-full rounded-full",
+                                                            (cluster.risk_score || 0) > 70 ? 'bg-red-500' : (cluster.risk_score || 0) > 40 ? 'bg-orange-500' : 'bg-green-500'
+                                                        )} 
+                                                        style={{ width: `${cluster.risk_score || 0}%` }} 
+                                                    />
+                                                </div>
+                                                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">{(cluster.risk_score || 0).toFixed(0)}</span>
+                                            </div>
                                         </div>
                                     </div>
 

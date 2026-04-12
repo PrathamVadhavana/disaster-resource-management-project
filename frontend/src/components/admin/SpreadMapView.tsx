@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, memo, useMemo, useRef } from 'react'
 import Map, { Source, Layer, Marker, Popup, NavigationControl, ViewStateChangeEvent, MapRef } from 'react-map-gl/maplibre'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { cn } from '@/lib/utils'
+import { motion, AnimatePresence } from 'framer-motion'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface VictimMarkerData {
@@ -16,6 +17,7 @@ export interface VictimMarkerData {
     description: string
     head_count: number
     disaster_id?: string
+    address_text?: string
 }
 
 export interface SpreadMapViewProps {
@@ -58,14 +60,20 @@ const EpicenterMarker = memo(function EpicenterMarker() {
     return (
         <div style={{ position: 'relative', width: 40, height: 40, pointerEvents: 'none', transform: 'translate(-50%, -50%)' }}>
             <svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="20" cy="20" r="18" fill="none" stroke="#ef4444" strokeWidth="2" strokeDasharray="4 2" opacity="0.6">
+                <defs>
+                    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+                        <feGaussianBlur stdDeviation="3" result="blur" />
+                        <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                    </filter>
+                </defs>
+                <circle cx="20" cy="20" r="18" fill="none" stroke="#ef4444" strokeWidth="2" strokeDasharray="4 2" opacity="0.6" filter="url(#glow)">
                     <animateTransform attributeName="transform" type="rotate" from="0 20 20" to="360 20 20" dur="8s" repeatCount="indefinite"/>
                 </circle>
-                <circle cx="20" cy="20" r="12" fill="none" stroke="#ef4444" strokeWidth="1.5" opacity="0.3">
+                <circle cx="20" cy="20" r="12" fill="none" stroke="#ef4444" strokeWidth="1.5" opacity="0.3" filter="url(#glow)">
                     <animate attributeName="r" values="8;16;8" dur="2s" repeatCount="indefinite"/>
                     <animate attributeName="opacity" values="0.4;0.1;0.4" dur="2s" repeatCount="indefinite"/>
                 </circle>
-                <circle cx="20" cy="20" r="8" fill="#ef4444" opacity="0.8"/>
+                <circle cx="20" cy="20" r="8" fill="#ef4444" opacity="0.8" filter="url(#glow)"/>
                 <circle cx="20" cy="20" r="4" fill="white"/>
             </svg>
         </div>
@@ -73,8 +81,7 @@ const EpicenterMarker = memo(function EpicenterMarker() {
 })
 
 // ─── Victim Marker Component (Interactive) ───────────────────────────────────
-function VictimMarkerItem({ marker }: { marker: VictimMarkerData }) {
-    const [showPopup, setShowPopup] = useState(false)
+function VictimMarkerItem({ marker, isActive, onToggle, onClose }: { marker: VictimMarkerData, isActive: boolean, onToggle: () => void, onClose: () => void }) {
     const priorityColor = PRIORITY_COLORS[marker.priority] || PRIORITY_COLORS.medium
     const resourceIcon = RESOURCE_ICONS[marker.resource_type] || RESOURCE_ICONS.other
 
@@ -86,15 +93,24 @@ function VictimMarkerItem({ marker }: { marker: VictimMarkerData }) {
                 anchor="bottom"
                 onClick={e => {
                     e.originalEvent.stopPropagation()
-                    setShowPopup(p => !p)
+                    onToggle()
                 }}
                 style={{ zIndex: marker.priority === 'critical' ? 1000 : 0, cursor: 'pointer' }}
             >
-                <div style={{ position: 'relative', width: 32, height: 38, transform: 'translate(0, 0)' }}>
+                <motion.div 
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.95 }}
+                    style={{ position: 'relative', width: 32, height: 38, transform: 'translate(0, 0)' }}
+                >
                     <svg width="32" height="38" viewBox="0 0 32 38" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <filter id={`drop-shadow-${marker.id}`} x="-20%" y="-20%" width="140%" height="140%">
+                                <feDropShadow dx="0" dy="2" stdDeviation="2" floodOpacity="0.5" floodColor={priorityColor} />
+                            </filter>
+                        </defs>
                         <path d="M16 0C7.16 0 0 7.16 0 16c0 12 16 22 16 22s16-10 16-22C32 7.16 24.84 0 16 0z"
-                              fill={priorityColor} opacity="0.9"/>
-                        <circle cx="16" cy="14" r="10" fill="white" opacity="0.9"/>
+                              fill={priorityColor} opacity="0.95" filter={`url(#drop-shadow-${marker.id})`}/>
+                        <circle cx="16" cy="14" r="10" fill="white" opacity="0.95"/>
                     </svg>
                     <span style={{
                         position: 'absolute',
@@ -105,37 +121,47 @@ function VictimMarkerItem({ marker }: { marker: VictimMarkerData }) {
                         lineHeight: 1,
                         pointerEvents: 'none',
                     }}>{resourceIcon}</span>
-                </div>
+                </motion.div>
             </Marker>
             
-            {showPopup && (
+            {isActive && (
                 <Popup
                     longitude={marker.longitude}
                     latitude={marker.latitude}
                     anchor="bottom"
-                    offset={[0, -40]}
-                    onClose={() => setShowPopup(false)}
+                    offset={[0, -42]}
+                    onClose={onClose}
+                    closeButton={false}
                     closeOnClick={true}
-                    className="victim-popup"
-                    maxWidth="240px"
+                    className="custom-glass-popup"
+                    maxWidth="280px"
                     style={{ zIndex: 2000 }}
                 >
-                    <div style={{ fontFamily: 'Inter, system-ui, sans-serif', fontSize: '12px', lineHeight: 1.5, padding: '4px' }}>
+                    <motion.div 
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        transition={{ duration: 0.2, ease: "easeOut" }}
+                        className="bg-slate-900/80 backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-xl"
+                        style={{ fontFamily: 'Inter, system-ui, sans-serif', padding: '12px' }}
+                    >
                         <div style={{
                             display: 'flex',
                             alignItems: 'center',
-                            gap: '6px',
-                            borderBottom: '1px solid #e2e8f0',
-                            paddingBottom: '6px',
-                            marginBottom: '6px',
+                            gap: '10px',
+                            borderBottom: '1px solid rgba(255,255,255,0.1)',
+                            paddingBottom: '8px',
+                            marginBottom: '8px',
                         }}>
-                            <span style={{ fontSize: '18px' }}>{resourceIcon}</span>
+                            <div className="flex items-center justify-center w-8 h-8 rounded-full bg-white/10 text-lg shadow-inner">
+                                {resourceIcon}
+                            </div>
                             <div>
-                                <div style={{ fontWeight: 700, textTransform: 'capitalize', fontSize: '13px', color: '#0f172a' }}>
+                                <div style={{ fontWeight: 600, textTransform: 'capitalize', fontSize: '14px', color: '#f8fafc' }}>
                                     {marker.resource_type}
                                 </div>
                                 <div style={{
-                                    fontSize: '10px',
+                                    fontSize: '11px',
                                     color: priorityColor,
                                     fontWeight: 700,
                                     textTransform: 'uppercase',
@@ -146,27 +172,28 @@ function VictimMarkerItem({ marker }: { marker: VictimMarkerData }) {
                             </div>
                         </div>
                         {marker.description && (
-                            <p style={{ color: '#64748b', margin: '0 0 4px 0', fontSize: '11px' }}>
+                            <p style={{ color: '#cbd5e1', margin: '0 0 8px 0', fontSize: '12px', lineHeight: 1.4 }}>
                                 {marker.description}
                             </p>
                         )}
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#94a3b8' }}>
-                            <span>👥 {marker.head_count} {marker.head_count > 1 ? 'people' : 'person'}</span>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
+                            <span style={{ color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                                {marker.head_count} {marker.head_count > 1 ? 'people' : 'person'}
+                            </span>
                             <span style={{
-                                padding: '1px 6px',
-                                borderRadius: '4px',
-                                background: marker.status === 'pending' ? '#fef3c7' : '#dcfce7',
-                                color: marker.status === 'pending' ? '#92400e' : '#166534',
+                                padding: '2px 8px',
+                                borderRadius: '6px',
+                                background: marker.status === 'pending' ? 'rgba(245, 158, 11, 0.2)' : 'rgba(34, 197, 94, 0.2)',
+                                color: marker.status === 'pending' ? '#fcd34d' : '#86efac',
+                                border: `1px solid ${marker.status === 'pending' ? 'rgba(245,158,11,0.3)' : 'rgba(34,197,94,0.3)'}`,
                                 fontWeight: 600,
                                 textTransform: 'capitalize',
                             }}>
                                 {marker.status.replace(/_/g, ' ')}
                             </span>
                         </div>
-                        <div style={{ fontSize: '9px', color: '#cbd5e1', marginTop: '4px', fontFamily: 'monospace' }}>
-                            {marker.latitude.toFixed(4)}°, {marker.longitude.toFixed(4)}°
-                        </div>
-                    </div>
+                    </motion.div>
                 </Popup>
             )}
         </>
@@ -233,6 +260,18 @@ const HEATMAP_COLORS = [
     1.0, '#fcffa4'
 ]
 
+const glassPopupStyles = `
+.custom-glass-popup .maplibregl-popup-content {
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+}
+.custom-glass-popup .maplibregl-popup-tip {
+    border-top-color: rgba(15, 23, 42, 0.8) !important;
+}
+`
+
 // ─── Main Component ──────────────────────────────────────────────────────────
 function SpreadMapView({
     center,
@@ -256,6 +295,7 @@ function SpreadMapView({
     })
 
     const [is3D, setIs3D] = useState(true)
+    const [activePopupId, setActivePopupId] = useState<string | null>(null)
 
     // Reset center on demand if it drastically moved. Usually controlled by user though.
     useEffect(() => {
@@ -396,9 +436,18 @@ function SpreadMapView({
 
                 {/* Victim request markers */}
                 {showMarkers && victimMarkers.map((marker) => (
-                    <VictimMarkerItem key={marker.id} marker={marker} />
+                    <VictimMarkerItem 
+                        key={marker.id} 
+                        marker={marker} 
+                        isActive={activePopupId === marker.id}
+                        onToggle={() => setActivePopupId(activePopupId === marker.id ? null : marker.id)}
+                        onClose={() => setActivePopupId(null)}
+                    />
                 ))}
             </Map>
+
+            {/* Context styles for Popup */}
+            <style dangerouslySetInnerHTML={{ __html: glassPopupStyles }} />
 
             {/* Subtle vignette overlay for premium look */}
             <div
@@ -410,32 +459,43 @@ function SpreadMapView({
             />
 
             {/* Victim markers count badge */}
-            {showMarkers && victimMarkers.length > 0 && (
-                <div className="absolute top-3 left-3 z-[1000] bg-slate-900/80 backdrop-blur-sm rounded-lg px-3 py-2 border border-white/10 shadow-xl">
-                    <div className="flex items-center gap-2">
-                        <span className="relative flex h-2.5 w-2.5">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-orange-500"></span>
-                        </span>
-                        <span className="text-[11px] font-bold text-white tracking-wide">
-                            {victimMarkers.length} ACTIVE {victimMarkers.length === 1 ? 'REQUEST' : 'REQUESTS'}
-                        </span>
-                    </div>
-                </div>
-            )}
+            <AnimatePresence>
+                {showMarkers && victimMarkers.length > 0 && (
+                    <motion.div 
+                        initial={{ opacity: 0, y: -20, scale: 0.9 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -20, scale: 0.9 }}
+                        className="absolute top-4 left-4 z-[1000] bg-slate-900/60 backdrop-blur-md rounded-xl px-4 py-3 border border-white/10 shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
+                    >
+                        <div className="flex items-center gap-3">
+                            <span className="relative flex h-3 w-3">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"></span>
+                            </span>
+                            <span className="text-xs font-bold text-white tracking-widest uppercase">
+                                {victimMarkers.length} Active {victimMarkers.length === 1 ? 'Request' : 'Requests'}
+                            </span>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
             
             {/* 2D/3D Toggle Button */}
-            <div className="absolute top-3 right-3 z-[1000]">
+            <motion.div 
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute top-4 right-4 z-[1000]"
+            >
                 <button
                     onClick={toggle3D}
-                    className="bg-slate-900/80 hover:bg-slate-800 backdrop-blur-sm rounded-lg px-3 py-2 border border-white/10 shadow-xl transition-all flex items-center gap-2 group cursor-pointer"
+                    className="bg-slate-900/60 hover:bg-slate-800/80 backdrop-blur-md rounded-xl px-4 py-3 border border-white/10 shadow-[0_4px_24px_rgba(0,0,0,0.4)] transition-all flex items-center gap-3 group cursor-pointer"
                 >
-                    <div className={cn("w-2 h-2 rounded-full", is3D ? "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.8)]" : "bg-blue-400")} />
-                    <span className="text-[10px] font-bold text-white uppercase tracking-wider group-hover:text-orange-200 transition-colors">
-                        {is3D ? '3D EXTRUSION ACTIVE' : '2D HEATMAP ACTIVE'}
+                    <div className={cn("w-2.5 h-2.5 rounded-full transition-all duration-300", is3D ? "bg-orange-500 shadow-[0_0_12px_rgba(249,115,22,0.9)]" : "bg-blue-400 shadow-[0_0_12px_rgba(96,165,250,0.9)]")} />
+                    <span className="text-xs font-bold text-white uppercase tracking-widest group-hover:text-orange-200 transition-colors">
+                        {is3D ? '3D Extrusion' : '2D Heatmap'}
                     </span>
                 </button>
-            </div>
+            </motion.div>
         </div>
     )
 }

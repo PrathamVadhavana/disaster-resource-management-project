@@ -63,6 +63,11 @@ _SCORE_LABEL: dict[str, str] = {
     "1": "low",
 }
 
+# Adaptive EPS based on density multipliers (Improvisation 4)
+_DEFAULT_EPS_M = 500.0
+_DENSE_EPS_M = 300.0
+_SPARSE_EPS_M = 800.0
+
 
 # ── Geo helpers ───────────────────────────────────────────────────────────────
 
@@ -194,8 +199,25 @@ def _compute_clusters(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         total_people = sum(int(r.get("head_count", 1)) for r in cluster_requests)
 
-        scores = [_PRIORITY_SCORE.get(str(r.get("priority", "medium")).lower(), 2.0) for r in cluster_requests]
-        avg_score = sum(scores) / len(scores)
+        # ── Weighted Priority (Improvisation 3) ──────────────────────────────
+        # Instead of simple average, we weight by head_count to highlight
+        # mass-impact areas.
+        weighted_sum = 0.0
+        total_hc = 0
+        for r in cluster_requests:
+            hc = max(1, int(r.get("head_count", 1)))
+            p_score = _PRIORITY_SCORE.get(str(r.get("priority", "medium")).lower(), 2.0)
+            weighted_sum += p_score * hc
+            total_hc += hc
+
+        avg_score = weighted_sum / total_hc if total_hc > 0 else 2.0
+        
+        # ── Risk Score (Improvisation 6 - basic) ─────────────────────────────
+        # Compute a 0-100 risk score based on density, headcount and severity.
+        density_factor = min(1.0, len(cluster_requests) / 20.0)
+        severity_factor = min(1.0, avg_score / 4.0)
+        population_factor = min(1.0, total_hc / 50.0)
+        risk_score = round((density_factor * 0.3 + severity_factor * 0.4 + population_factor * 0.3) * 100, 1)
 
         boundary = _convex_hull_geojson([(r["latitude"], r["longitude"]) for r in cluster_requests])
 
@@ -210,6 +232,7 @@ def _compute_clusters(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "priority_label": _priority_label(avg_score),
                 "boundary": boundary,
                 "request_ids": [r["id"] for r in cluster_requests],
+                "risk_score": risk_score,
             }
         )
 
@@ -242,29 +265,47 @@ def _write_hotspot_to_db(cluster: dict[str, Any], doc_id: str) -> None:
     logger.info("Hotspot doc written: %s", doc_id)
 
 
-def _find_nearest_ngos(lat: float, lon: float, limit: int = 3) -> list[dict[str, Any]]:
+def _find_nearest_ngos(lat: float, lon: float, limit: int = 3, required_type: str | None = None) -> list[dict[str, Any]]:
     """Find the *limit* nearest NGOs with status 'active' / 'verified'.
 
     NGO user records are expected to have ``latitude`` and ``longitude``
-    fields (set during onboarding).  Falls back gracefully if no NGOs
-    have coordinates.  Cached for 5 minutes to reduce database reads.
+    fields (set during onboarding).  Optional ``required_type`` filters for
+    NGOs whose ``metadata.specialization`` matches the hotspot needs (Improvisation 1).
     """
     from app.core.query_cache import TTL_MEDIUM
     from app.core.query_cache import cache_get as mem_get
     from app.core.query_cache import cache_set as mem_set
 
-    cache_key = "clustering:ngo_list"
+    cache_key = f"clustering:ngo_list:{required_type or 'all'}"
     ngos = mem_get(cache_key)
     if ngos is None:
         try:
             resp = (
                 db_admin.table("users")
-                .select("id, email, full_name, organization, latitude, longitude")
+                .select("id, email, full_name, organization, latitude, longitude, metadata")
                 .eq("role", "ngo")
                 .limit(500)
                 .execute()
             )
-            ngos = resp.data or []
+            all_ngos = resp.data or []
+            
+            # Capability Filtering (Improvisation 1)
+            if required_type:
+                def matches(n):
+                    meta = n.get("metadata") or {}
+                    specialization = meta.get("specialization") or meta.get("category") or ""
+                    if isinstance(specialization, list):
+                        return required_type in specialization
+                    return required_type.lower() in str(specialization).lower() or not specialization
+                
+                ngos = [n for n in all_ngos if matches(n)]
+                # If no capable NGOs found, fall back to all active ones
+                if not ngos:
+                    logger.info("No specialized NGOs for %s, falling back to all", required_type)
+                    ngos = all_ngos
+            else:
+                ngos = all_ngos
+                
             mem_set(cache_key, ngos, TTL_MEDIUM)
         except Exception as exc:
             logger.error("Failed to query NGOs: %s", exc)
@@ -286,10 +327,14 @@ def _find_nearest_ngos(lat: float, lon: float, limit: int = 3) -> list[dict[str,
 
 def _send_hotspot_alert(cluster: dict[str, Any], doc_id: str) -> None:
     """Push a ``hotspot_alert`` document to ``ngo_alerts/{ngo_id}`` for each
-    of the nearest NGOs.  The NGO dashboard uses an ``onSnapshot`` listener
-    on this collection to display real-time alerts.
+    of the nearest SUVs. Capability matching is applied via _find_nearest_ngos.
     """
-    nearest = _find_nearest_ngos(cluster["centroid_lat"], cluster["centroid_lon"], limit=3)
+    nearest = _find_nearest_ngos(
+        cluster["centroid_lat"], 
+        cluster["centroid_lon"], 
+        limit=3,
+        required_type=cluster["dominant_type"]
+    )
     if not nearest:
         logger.info("No NGOs to alert for hotspot %s", doc_id)
         return
@@ -325,9 +370,19 @@ async def _persist_cluster(cluster: dict[str, Any]) -> str:
     doc_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
 
+    # ── Inject Metadata into JSONB Boundary ──
+    # Since we can't easily add new columns to the DB, we leverage the existing
+    # JSONB 'boundary' field to store our advanced clustering metadata.
+    boundary = cluster["boundary"]
+    if isinstance(boundary, dict):
+        boundary["_meta"] = {
+            "trend": cluster.get("trend", "stable"),
+            "risk_score": cluster.get("risk_score", 0.0),
+        }
+
     record = {
         "id": doc_id,
-        "boundary": cluster["boundary"],
+        "boundary": boundary,
         "centroid_lat": cluster["centroid_lat"],
         "centroid_lon": cluster["centroid_lon"],
         "request_count": cluster["request_count"],
@@ -345,7 +400,7 @@ async def _persist_cluster(cluster: dict[str, Any]) -> str:
 
     try:
         await db_admin.table("hotspot_clusters").insert(record).async_execute()
-        logger.info("Cluster %s persisted (%d requests)", doc_id, cluster["request_count"])
+        logger.info("Cluster %s persisted (%d requests, trend=%s)", doc_id, cluster["request_count"], record["trend"])
     except Exception as exc:
         logger.error("Failed to persist cluster: %s", exc)
 
@@ -394,11 +449,17 @@ async def run_clustering() -> list[dict[str, Any]]:
 
     # 3. Mark previously active clusters as 'resolved' if they are no
     #    longer detected (single batch query instead of N updates).
+    old_clusters = []
     try:
         old_resp = await (
-            db_admin.table("hotspot_clusters").select("id").eq("status", "active").limit(500).async_execute()
+            db_admin.table("hotspot_clusters")
+            .select("id, centroid_lat, centroid_lon, request_count, total_people")
+            .eq("status", "active")
+            .limit(500)
+            .async_execute()
         )
-        old_ids = [r["id"] for r in (old_resp.data or [])]
+        old_clusters = old_resp.data or []
+        old_ids = [r["id"] for r in old_clusters]
         if old_ids:
             now_iso = datetime.now(UTC).isoformat()
             # Batch resolve: update all old clusters at once using in_ filter
@@ -417,6 +478,30 @@ async def run_clustering() -> list[dict[str, Any]]:
                 )
     except Exception as exc:
         logger.warning("Could not expire old clusters: %s", exc)
+
+    # 3.5 Temporal Trend Detection (Improvisation 2)
+    # Compare each new cluster to the nearest old cluster to detect trend
+    for cluster in clusters:
+        cluster["trend"] = "new"  # default
+        if not old_clusters:
+            continue
+            
+        # Find nearest previous cluster within 1km
+        closest = None
+        min_dist = 1000.0
+        for old in old_clusters:
+            d = _haversine_m(cluster["centroid_lat"], cluster["centroid_lon"], old["centroid_lat"], old["centroid_lon"])
+            if d < min_dist:
+                min_dist = d
+                closest = old
+                
+        if closest:
+            if cluster["request_count"] > closest["request_count"]:
+                cluster["trend"] = "growing"
+            elif cluster["request_count"] < closest["request_count"]:
+                cluster["trend"] = "receding"
+            else:
+                cluster["trend"] = "stable"
 
     # 4. Persist new clusters + NGO alerts
     new_clusters: list[dict[str, Any]] = []
@@ -491,6 +576,11 @@ def build_geojson_feature_collection() -> dict[str, Any]:
             except Exception:
                 boundary = {"type": "Point", "coordinates": [row.get("centroid_lon", 0), row.get("centroid_lat", 0)]}
 
+        # Extract metadata from JSONB if present
+        meta = boundary.get("_meta", {}) if isinstance(boundary, dict) else {}
+        trend = meta.get("trend") or row.get("trend", "stable")
+        risk_score = meta.get("risk_score") or row.get("risk_score", 0.0)
+
         feature = {
             "type": "Feature",
             "id": row.get("id"),
@@ -506,6 +596,8 @@ def build_geojson_feature_collection() -> dict[str, Any]:
                 "dominant_type": row.get("dominant_type", "Unknown"),
                 "avg_priority": row.get("avg_priority", 0),
                 "priority_label": row.get("priority_label", "medium"),
+                "trend": trend,
+                "risk_score": risk_score,
                 "detected_at": row.get("detected_at"),
                 "status": row.get("status", "active"),
             },

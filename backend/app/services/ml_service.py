@@ -168,6 +168,10 @@ class MLService:
             logger.warning("  ✘ spread_model.pkl not found — using fallback")
             self.models["spread"] = None
 
+        # Clean Up Spread keys if they are None (causes NaN in UI)
+        if self.models.get("spread_lower") is None: self.models.pop("spread_lower", None)
+        if self.models.get("spread_upper") is None: self.models.pop("spread_upper", None)
+
         # Impact
         if imp_path.exists():
             self.models["impact"] = joblib.load(imp_path)
@@ -305,34 +309,42 @@ class MLService:
         elif pres <= 985 and self._severity_index(floor) < self._severity_index("high"):
             floor = "high"
 
-        if dtype == "wildfire":
-            if temp >= 42 and hum <= 30:
+        # Temperature-based exhaustion and risk
+        if temp >= 45:
+            if self._severity_index(floor) < self._severity_index("critical"):
                 floor = "critical"
-            elif (
-                temp >= 35
-                and hum <= 40
-                and self._severity_index(floor) < self._severity_index("high")
-            ):
+        elif temp >= 38 and self._severity_index(floor) < self._severity_index("high"):
+            floor = "high"
+
+        if dtype == "wildfire":
+            if temp >= 42 or (temp >= 35 and hum <= 20) or wind >= 60:
+                floor = "critical"
+            elif temp >= 30 or (temp >= 25 and hum <= 40) or wind >= 40:
                 floor = "high"
+            elif temp >= 22:
+                floor = "medium"
 
-        if dtype in {"hurricane", "cyclone"} and self._severity_index(
-            floor
-        ) < self._severity_index("high"):
+        if dtype in {"hurricane", "cyclone", "tornado"}:
+            if wind >= 130 or pres <= 950:
+                floor = "critical"
+            elif wind >= 75 or pres <= 980:
+                floor = "high"
+            elif wind >= 35:
+                floor = "medium"
+
+        if dtype == "flood" and (hum >= 85 or wind >= 60):
             floor = "high"
+        
+        if dtype == "tsunami":
+            floor = "critical" # Tsunamis in the sandbox are always high-impact
 
-        if (
-            dtype == "flood"
-            and hum >= 85
-            and wind >= 60
-            and self._severity_index(floor) < self._severity_index("high")
-        ):
-            floor = "high"
-
-        return (
+        # Hard enforcement: If atmospheric conditions are extreme, never allow "low"
+        final_severity = (
             floor
             if self._severity_index(predicted) < self._severity_index(floor)
             else predicted
         )
+        return final_severity
 
     def _record_prediction_event(
         self, prediction_type: str, model_version: str, confidence: float
@@ -509,6 +521,10 @@ class MLService:
         if _tft_forecaster is not None:
             try:
                 result = _tft_forecaster.predict_from_features(features)
+                # Apply guardrail to TFT output too!
+                if "predicted_severity" in result:
+                    result["predicted_severity"] = self._apply_severity_guardrail(result["predicted_severity"], features)
+                
                 confidence = self._clip01(float(result.get("confidence_score") or 0.0))
                 result["confidence_score"] = round(confidence, 4)
                 result.setdefault("confidence_band", self._confidence_band(confidence))
@@ -590,19 +606,38 @@ class MLService:
             ci_width = (
                 (upper - lower) if (lower is not None and upper is not None) else None
             )
-            confidence = (
-                max(0.0, min(1.0, 1 - (ci_width / max(predicted_area, 1)) * 0.5))
-                if ci_width
-                else 0.7
-            )
             confidence = self._calibrate_regression_confidence(
                 model_key="spread",
-                base_confidence=confidence,
+                base_confidence=0.85, # Base confidence for regression ML
                 interval_width=ci_width,
                 predicted_value=predicted_area,
             )
         else:
+            # ── Chain Inference: If weather is present, use it to bias the spread ──
+            sev_bias = 1.0
+            sev_label = "medium"
+            if "temperature" in features or "wind_speed" in features:
+                # Get a severity score to influence the spread
+                sev_res = await self.predict_severity(features)
+                sev_label = sev_res.get("predicted_severity", "medium")
+                sev_bias = 0.8 + (self._severity_index(sev_label) * 0.5) # Aggressive scale
+
             predicted_area, confidence = self._fallback_spread(features)
+            
+            def _safe_float(value: Any, default: float) -> float:
+                try: return float(value)
+                except: return default
+
+            # Aggressive scaling for extreme weather
+            temp = _safe_float(features.get("temperature", 25), 25.0)
+            wind = _safe_float(features.get("wind_speed", 0), 0.0)
+            
+            if temp > 40 or wind > 60:
+                predicted_area *= 3.0
+            elif temp > 32 or wind > 35:
+                predicted_area *= 1.8
+            
+            predicted_area *= sev_bias
             lower = upper = None
             confidence = self._calibrate_regression_confidence(
                 model_key="spread",
@@ -622,6 +657,10 @@ class MLService:
             result["ci_lower_km2"] = round(lower, 2)
         if upper is not None:
             result["ci_upper_km2"] = round(upper, 2)
+
+        # Propagate severity context if available
+        if 'sev_label' in locals():
+            result["predicted_severity"] = sev_label
 
         self._record_prediction_event(
             "spread", str(result.get("model_version") or self.model_version), confidence
@@ -649,20 +688,63 @@ class MLService:
                 predicted_value=max(magnitude, 1.0),
             )
         else:
+            # ── Chain Inference: Force a realistic severity score if missing ──
+            sev_label = "medium"
+            if "severity_score" not in features and ("temperature" in features or "wind_speed" in features):
+                sev_res = await self.predict_severity(features)
+                sev_label = sev_res.get("predicted_severity", "medium")
+                # Map label to 0-1 scale: low=0.2, med=0.5, high=0.8, crit=1.0
+                features["severity_score"] = [0.2, 0.5, 0.8, 1.0][self._severity_index(sev_label)]
+            elif "severity_score" in features:
+                # Map back to a label if possible for the multiplier logic
+                scores = [0.2, 0.5, 0.8, 1.0]
+                idx = 0
+                closest_diff = 1.0
+                for i, s in enumerate(scores):
+                    diff = abs(float(features["severity_score"]) - s)
+                    if diff < closest_diff:
+                        closest_diff = diff
+                        idx = i
+                sev_label = SEVERITY_ORDER[idx]
+
             fb = self._fallback_impact(features)
             casualties = fb["casualties"]
             damage = fb["economic_damage"]
+            pop = float(features.get("affected_population", features.get("population", 10000)))
+            
+            # Massive escalation for Critical/High severity stressors
+            # 48C Wildfire = Exponential catastrophic impact
+            sev_idx = self._severity_index(sev_label)
+            
+            # Use exponential multipliers: Low=0.2, Med=1.0, High=5.0, Crit=20.0
+            sev_multiplier = [0.2, 1.0, 5.0, 20.0][sev_idx]
+            
+            def _safe_float(value: Any, default: float) -> float:
+                try: return float(value)
+                except: return default
+
+            # Additional stressor bias (Wind/Heat)
+            temp_val = _safe_float(features.get("temperature", 25), 25.0)
+            wind_val = _safe_float(features.get("wind_speed", 0), 0.0)
+            
+            temp_bias = max(1.0, (temp_val - 22) / 8.0)
+            wind_bias = max(1.0, wind_val / 35.0)
+            
+            casualties = min(int(pop), int(casualties * sev_multiplier * temp_bias * wind_bias))
+            damage *= (sev_multiplier * temp_bias * wind_bias)
+
             confidence = self._calibrate_regression_confidence(
                 model_key="impact",
                 base_confidence=fb["confidence"],
                 interval_width=None,
-                predicted_value=max(casualties + damage, 1.0),
+                predicted_value=max(float(casualties + damage), 1.0),
             )
 
         confidence = self._clip01(confidence)
         result = {
             "predicted_casualties": casualties,
             "predicted_damage_usd": round(damage, 2),
+            "predicted_severity": locals().get('sev_label', features.get('severity_label', 'medium')), 
             "confidence_score": round(confidence, 4),
             "confidence_band": self._confidence_band(confidence),
             "model_version": self.model_version,
@@ -676,16 +758,171 @@ class MLService:
         self,
         prediction_type: PredictionType,
         features: dict[str, Any],
+        run_ensemble: bool = False,
     ) -> dict[str, Any]:
-        """General prediction method that routes to specific predictors."""
+        """General prediction method with ensemble and XAI support."""
+        # 1. Base Prediction
         if prediction_type == PredictionType.SEVERITY:
-            return await self.predict_severity(features)
+            base_result = await self.predict_severity(features)
         elif prediction_type == PredictionType.SPREAD:
-            return await self.predict_spread(features)
+            base_result = await self.predict_spread(features)
         elif prediction_type == PredictionType.IMPACT:
-            return await self.predict_impact(features)
+            base_result = await self.predict_impact(features)
         else:
             raise ValueError(f"Unknown prediction type: {prediction_type}")
+
+        # 2. XAI: Feature Importance (Simulation-driven attribution)
+        importance = self._calculate_feature_importance(prediction_type, features)
+        base_result["feature_importance"] = importance
+
+        # 3. Decision Support: Resource Recommendations
+        if prediction_type == PredictionType.IMPACT or (
+            "predicted_casualties" in base_result
+            or "predicted_damage_usd" in base_result
+        ):
+            cas = base_result.get("predicted_casualties", 0)
+            dmg = base_result.get("predicted_damage_usd", 0)
+            sev = base_result.get("predicted_severity", "medium")
+            base_result["recommendations"] = self._suggest_resources(cas, dmg, sev, features)
+
+        # 4. Ensemble Logic (Comparison with secondary models)
+        if run_ensemble:
+            base_result["ensemble"] = await self._run_ensemble_comparison(
+                prediction_type, features, base_result
+            )
+
+        return base_result
+
+    def _calculate_feature_importance(
+        self, prediction_type: PredictionType, features: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Calculate relative contribution of each feature to the result."""
+        typed_features = {}
+        if prediction_type == PredictionType.SEVERITY:
+            typed_features = self._build_severity_features(features).to_dict("records")[0]
+        elif prediction_type == PredictionType.SPREAD:
+            typed_features = self._build_spread_features(features).to_dict("records")[0]
+        elif prediction_type == PredictionType.IMPACT:
+            typed_features = self._build_impact_features(features).to_dict("records")[0]
+
+        # In a real scenario, we'd use model.feature_importances_ or SHAP.
+        # Here we use a weighted attribution based on the raw values and model type.
+        importance_list = []
+        for key, val in typed_features.items():
+            if key.startswith("dtype_"):
+                continue
+            
+            # Use relative scale: how much does this variable deviate from its nominal baseline?
+            nominal = 0.0
+            if "temp" in key: nominal = 25.0
+            if "pres" in key: nominal = 1013.0
+            if "hum" in key: nominal = 50.0
+            if "pop" in key: nominal = 5000.0
+            if "area" in key: nominal = 100.0
+
+            # Absolute deviation normalized by a typical range
+            range_val = 50.0 # Wide default range
+            if "pres" in key: range_val = 50.0
+            if "wind" in key: range_val = 100.0
+            if "pop" in key: range_val = 10000.0
+
+            deviation = abs(float(val) - nominal) / range_val
+            weight = 0.5
+            if "temp" in key: weight = 0.95 # Higher sensitivity
+            if "wind" in key: weight = 0.9
+            if "pop" in key: weight = 0.8
+            if "area" in key: weight = 0.85
+            
+            score = (deviation + 0.1) * weight
+            importance_list.append({"feature": key.replace("_", " "), "score": score})
+
+        # Normalize to 100%
+        total = sum(d["score"] for d in importance_list) or 1
+        for d in importance_list:
+            d["percentage"] = round((d["score"] / total) * 100, 1)
+        
+        return sorted(importance_list, key=lambda x: x["percentage"], reverse=True)
+
+    def _suggest_resources(
+        self, casualties: int, damage_usd: float, severity: str, features: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Map predicted impact to specific resource requirements."""
+        pop = float(features.get("affected_population", features.get("population", 5000)))
+        sev_idx = self._severity_index(severity) or 2  # default medium
+        multiplier = 1.0 + (sev_idx * 0.25)
+
+        # Heuristic calculations for standard disaster kits
+        recs = [
+            {
+                "type": "Water",
+                "quantity": int(pop * 3.5 * multiplier),
+                "unit": "Liters",
+                "priority": "Critical" if sev_idx >= 2 else "High",
+                "reason": "Sustainment baseline (3.5L/person/day) scaled by severity."
+            },
+            {
+                "type": "Emergency Food",
+                "quantity": int(pop * 2 * multiplier),
+                "unit": "Rations",
+                "priority": "High",
+                "reason": "48-hour emergency supply for affected population."
+            },
+            {
+                "type": "Medical Kits",
+                "quantity": int(max(casualties * 1.5, pop * 0.05)),
+                "unit": "Units",
+                "priority": "Critical" if casualties > 0 else "Medium",
+                "reason": "Trauma and basic care kits based on casualty forecasts."
+            }
+        ]
+
+        if "wildfire" in str(features.get("disaster_type", "")).lower():
+            recs.append({
+                "type": "Air Filtration",
+                "quantity": int(pop * 0.1),
+                "unit": "Masks",
+                "priority": "Medium",
+                "reason": "Smoke inhalation protection for fringe zones."
+            })
+
+        if damage_usd > 10.0:  # >10M USD damage
+            recs.append({
+                "type": "Mobile Shelter",
+                "quantity": int(pop * 0.15),
+                "unit": "Beds",
+                "priority": "High",
+                "reason": "Infrastructure damage implies significant housing loss."
+            })
+
+        return recs
+
+    async def _run_ensemble_comparison(
+        self, prediction_type: PredictionType, features: dict[str, Any], base_result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Compare loaded ML model vs rule-based fallback to detect outliers."""
+        if "fallback" in str(base_result.get("model_version", "")).lower():
+            return {"status": "skipped", "reason": "Base is already fallback"}
+
+        # Run fallback manually
+        if prediction_type == PredictionType.SEVERITY:
+            f_val, f_conf = self._fallback_severity(features)
+            match = f_val == base_result.get("predicted_severity")
+        elif prediction_type == PredictionType.SPREAD:
+            f_val, f_conf = self._fallback_spread(features)
+            # 20% tolerance for match
+            match = abs(float(f_val) - float(base_result.get("predicted_area_km2", 0))) < (float(f_val) * 0.2)
+        else:
+            f_obj = self._fallback_impact(features)
+            f_val = f_obj["casualties"]
+            match = abs(f_val - base_result.get("predicted_casualties", 0)) < 10
+
+        return {
+            "primary_model": base_result.get("model_version", "unknown"),
+            "fallback_model": "rule-v1",
+            "agreement": "High" if match else "Low",
+            "fallback_value": f_val,
+            "variance": "Actionable" if not match else "Nominal"
+        }
 
     # ── Model info ────────────────────────────────────────────────────────
 
@@ -759,10 +996,21 @@ class MLService:
 
     @staticmethod
     def _fallback_impact(features: dict[str, Any]):
-        pop = features.get("population", features.get("affected_population", 10000))
-        sev = features.get("severity_score", 0.5)
-        cas = int(pop * sev * 0.005)
-        dmg = (pop * 5000 * sev) / 1_000_000
+        pop = float(features.get("population", features.get("affected_population", 10000)))
+        sev = float(features.get("severity_score", 0.5))
+        
+        # Base rates that scale with severity
+        # Low: 0.1%, Med: 0.5%, High: 2%, Crit: 5% (before multipliers)
+        rate = 0.005
+        if sev >= 0.9: rate = 0.05
+        elif sev >= 0.7: rate = 0.02
+        elif sev <= 0.3: rate = 0.001
+        
+        cas = int(pop * rate)
+        # Damage: $10k per high-severity person, $2k per medium
+        dmg_per_capita = 4000 * (sev ** 1.5)
+        dmg = (pop * dmg_per_capita) / 1_000_000
+        
         return {"casualties": cas, "economic_damage": dmg, "confidence": 0.40}
 
     # ── Build Training Data from Supabase ─────────────────────────────────────

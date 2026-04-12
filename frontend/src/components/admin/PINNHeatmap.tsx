@@ -10,7 +10,7 @@ import {
     Layers, Wind, Activity, ArrowRight, Maximize2, Minimize2,
     AlertTriangle, ChevronDown, Info, Gauge, Repeat, Download,
     Users, Eye, EyeOff, Zap, Droplets, Mountain, BarChart2,
-    CloudLightning, Waves, TreePine
+    CloudLightning, Waves, TreePine, Shirt
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import dynamic from 'next/dynamic'
@@ -156,7 +156,19 @@ export function gridToCanvasDataUrl(
     return canvas.toDataURL('image/png')
 }
 
-// ─── Disaster type icons & colors ────────────────────────────────────────────
+// ─── Resource type icons & colors ────────────────────────────────────────────
+const RESOURCE_TYPE_META: Record<string, { icon: any; color: string; bg: string }> = {
+    food: { icon: Activity, color: 'text-amber-500', bg: 'bg-amber-500/10' },
+    water: { icon: Droplets, color: 'text-blue-500', bg: 'bg-blue-500/10' },
+    medical: { icon: Activity, color: 'text-red-500', bg: 'bg-red-500/10' },
+    shelter: { icon: Mountain, color: 'text-purple-500', bg: 'bg-purple-500/10' },
+    personnel: { icon: Users, color: 'text-teal-500', bg: 'bg-teal-500/10' },
+    equipment: { icon: Zap, color: 'text-orange-600', bg: 'bg-orange-500/10' },
+    evacuation: { icon: Wind, color: 'text-cyan-500', bg: 'bg-cyan-500/10' },
+    clothing: { icon: Shirt, color: 'text-pink-500', bg: 'bg-pink-500/10' },
+    other: { icon: CloudLightning, color: 'text-slate-500', bg: 'bg-slate-500/10' },
+}
+
 const DISASTER_TYPE_META: Record<string, { icon: any; color: string; bg: string }> = {
     earthquake: { icon: Mountain, color: 'text-amber-500', bg: 'bg-amber-500/10' },
     flood: { icon: Droplets, color: 'text-blue-500', bg: 'bg-blue-500/10' },
@@ -168,20 +180,6 @@ const DISASTER_TYPE_META: Record<string, { icon: any; color: string; bg: string 
     landslide: { icon: Mountain, color: 'text-stone-500', bg: 'bg-stone-500/10' },
     volcano: { icon: Flame, color: 'text-orange-600', bg: 'bg-orange-500/10' },
     other: { icon: CloudLightning, color: 'text-slate-500', bg: 'bg-slate-500/10' },
-}
-
-// ─── Types ──────────────────────────────────────────────────────────────────
-interface ActiveDisaster {
-    id: string
-    title: string
-    type: string
-    severity: string
-    locations?: { latitude: number; longitude: number; name: string }
-    latitude?: number
-    longitude?: number
-    location_name?: string
-    status?: string
-    affected_population?: number
 }
 
 interface PINNHeatmapProps {
@@ -234,81 +232,111 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
         setShowDisasterPicker(false)
     }, [])
 
-    // Fetch active disasters
-    const { data: disastersRaw } = useQuery({
-        queryKey: ['disasters-for-spread'],
+    // Fetch active requests instead of disasters
+    const { data: requestsRaw } = useQuery({
+        queryKey: ['requests-for-spread'],
         queryFn: async () => {
-            const data = await api.getDisasters({ status: 'active,monitoring', limit: 50 })
-            return (Array.isArray(data) ? data : data?.disasters ?? []) as ActiveDisaster[]
+            // Fetch more requests but filter locally for maximum reliability
+            const data = await api.getAdminRequests({ page_size: 100 } as any)
+            return (data?.requests || data || []) as VictimMarkerData[]
         },
         staleTime: 60000,
         refetchOnWindowFocus: false,
     })
 
-    const disasters = disastersRaw || []
+    const requests = Array.isArray(requestsRaw) ? requestsRaw : []
 
-    // Group disasters by type for the picker
-    const disastersByType = useMemo(() => {
-        const groups: Record<string, ActiveDisaster[]> = {}
-        const filteredDisasters = filterType
-            ? disasters.filter(d => d.type === filterType)
-            : disasters
-        for (const d of filteredDisasters) {
-            const type = d.type || 'other'
-            if (!groups[type]) groups[type] = []
-            groups[type].push(d)
-        }
-        return groups
-    }, [disasters, filterType])
+    // Fetch disasters to map disaster types to requests
+    const { data: disastersRaw } = useQuery({
+        queryKey: ['disasters-for-spread-requests'],
+        queryFn: async () => {
+            const data = await api.getDisasters({ limit: 100 })
+            return (Array.isArray(data) ? data : data?.disasters ?? []) as any[]
+        },
+        staleTime: 60000,
+        refetchOnWindowFocus: false,
+    })
 
-    // Unique disaster types for filter tabs
-    // Ensure all standard types are available for filtering even if not present in the current data
-    const ALL_TYPES = ['earthquake', 'flood', 'hurricane', 'wildfire', 'other']
+    const disasters = Array.isArray(disastersRaw) ? disastersRaw : []
 
-    const disasterTypes = useMemo(() => {
-        const types = new Set<string>(ALL_TYPES)
-        disasters.forEach(d => { if (d.type) types.add(d.type.toLowerCase()) })
-        return Array.from(types).sort()
+    // Map disaster_id -> disaster info
+    const disasterInfoMap = useMemo(() => {
+        const mapping: Record<string, { name: string; type: string }> = {}
+        disasters.forEach(d => {
+            if (d.id) mapping[d.id] = {
+                name: d.locations?.name || d.location_name || d.name || 'Unknown Zone',
+                type: (d.type || 'other').toLowerCase()
+            }
+        })
+        return mapping
     }, [disasters])
 
-    // Auto-select most critical active disaster if none provided on MOUNT
-    const activeDisaster = useMemo(() => {
-        if (!selectedDisasterId && status === 'success' && disasters.length > 0 && !disasterId) {
-             // We don't auto-set here to keep selectedDisasterId null if user wants "All Disasters"
-             // But we need a way to distinguish initial mount from explicit null choice.
-             // For now, let's just say: if no ID, show ALL.
-             return null
-        }
-        return disasters.find(d => d.id === selectedDisasterId) || null
-    }, [disasters, selectedDisasterId, disasterId])
+    const activeRequests = useMemo(() => {
+        return requests.filter(r => 
+            (r.status === 'pending' || r.status === 'in_progress') && 
+            r.latitude !== null && r.latitude !== undefined &&
+            r.longitude !== null && r.longitude !== undefined
+        )
+    }, [requests])
 
-    // Resolve lat/lon from disaster or prop
+    // Group requests by resource type for better categorization
+    const requestsByResource = useMemo(() => {
+        const groups: Record<string, VictimMarkerData[]> = {}
+        for (const r of activeRequests) {
+            // Filter by resource type if a filter is active
+            if (filterType) {
+                if (r.resource_type?.toLowerCase() !== filterType.toLowerCase()) continue
+            }
+
+            const groupKey = (r.resource_type || 'other').toLowerCase()
+            if (!groups[groupKey]) groups[groupKey] = []
+            groups[groupKey].push(r)
+        }
+        return groups
+    }, [activeRequests, filterType])
+
+    // Unique resource types for filter tabs
+    const requestTypes = useMemo(() => {
+        const types = new Set<string>()
+        activeRequests.forEach(r => {
+            if (r.resource_type) types.add(r.resource_type.toLowerCase())
+        })
+        return Array.from(types).sort()
+    }, [activeRequests])
+
+    // Auto-select active request
+    const activeRequest = useMemo(() => {
+        if (!selectedDisasterId && requests.length > 0 && !disasterId) return null
+        return requests.find(r => r.id === selectedDisasterId) || null
+    }, [requests, selectedDisasterId, disasterId])
+
+    // Resolve lat/lon from request or prop
     const resolvedLat = useMemo(() => {
         if (latitude) return latitude
-        if (activeDisaster?.locations?.latitude) return activeDisaster.locations.latitude
-        if (activeDisaster?.latitude) return activeDisaster.latitude
-        // Use New Delhi as absolute fallback, but backend now auto-centers correctly
+        if (activeRequest?.latitude) return activeRequest.latitude
         return 28.6
-    }, [latitude, activeDisaster])
+    }, [latitude, activeRequest])
 
     const resolvedLon = useMemo(() => {
         if (longitude) return longitude
-        if (activeDisaster?.locations?.longitude) return activeDisaster.locations.longitude
-        if (activeDisaster?.longitude) return activeDisaster.longitude
+        if (activeRequest?.longitude) return activeRequest.longitude
         return 77.2
-    }, [longitude, activeDisaster])
+    }, [longitude, activeRequest])
+
+    const currentDisasterId = useMemo(() => activeRequest?.disaster_id || disasterId, [activeRequest, disasterId])
 
     const horizonValues = [6, 12, 24]
 
     // Fetch heatmap data
     const { data, isLoading } = useQuery({
-        queryKey: ['pinn-heatmap', resolvedLat, resolvedLon, selectedDisasterId],
+        queryKey: ['pinn-heatmap', resolvedLat, resolvedLon, currentDisasterId, filterType],
         queryFn: () => getSpreadHeatmap({
             latitude: resolvedLat,
             longitude: resolvedLon,
             horizons: horizonValues,
             resolution: 60,
-            disaster_id: selectedDisasterId || undefined,
+            disaster_id: currentDisasterId || undefined,
+            resource_type: filterType || undefined
         }),
         staleTime: 60000,
         refetchInterval: 120000,
@@ -681,25 +709,25 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        {/* Disaster selector */}
+                        {/* Request selector */}
                         <div className="relative">
                             <button
                                 onClick={() => setShowDisasterPicker(!showDisasterPicker)}
                                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-orange-300 dark:hover:border-orange-500/30 transition-colors"
                             >
-                                {activeDisaster ? (
+                                {activeRequest ? (
                                     <>
                                         {(() => {
-                                            const meta = DISASTER_TYPE_META[activeDisaster.type] || DISASTER_TYPE_META.other
+                                            const meta = RESOURCE_TYPE_META[activeRequest.resource_type?.toLowerCase() || 'other'] || RESOURCE_TYPE_META.other
                                             const TypeIcon = meta.icon
                                             return <TypeIcon className={cn("w-3.5 h-3.5", meta.color)} />
                                         })()}
-                                        <span className="max-w-[120px] truncate">{activeDisaster.title || activeDisaster.type}</span>
+                                        <span className="max-w-[120px] truncate">{activeRequest.resource_type || 'Unknown'} - {activeRequest.head_count} Ppl</span>
                                     </>
                                 ) : (
                                     <>
-                                        <AlertTriangle className="w-3 h-3 text-orange-500" />
-                                        <span>Select Disaster</span>
+                                        <Users className="w-3 h-3 text-orange-500" />
+                                        <span>Select Request</span>
                                     </>
                                 )}
                                 <ChevronDown className={cn("w-3 h-3 transition-transform", showDisasterPicker && "rotate-180")} />
@@ -709,7 +737,7 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                                     <div className="fixed inset-0 z-10" onClick={() => setShowDisasterPicker(false)} />
                                     <div className="absolute right-0 top-full mt-1 w-80 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl shadow-2xl z-20 overflow-hidden">
                                         {/* Type filter tabs */}
-                                        {disasterTypes.length > 1 && (
+                                        {requestTypes.length > 0 && (
                                             <div className="p-2 border-b border-slate-100 dark:border-white/5 flex flex-wrap gap-1">
                                                 <button
                                                     onClick={() => setFilterType(null)}
@@ -720,12 +748,12 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                                                             : "bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-600"
                                                     )}
                                                 >
-                                                    All ({disasters.length})
+                                                    All ({activeRequests.length})
                                                 </button>
-                                                {disasterTypes.map(type => {
-                                                    const meta = DISASTER_TYPE_META[type] || DISASTER_TYPE_META.other
+                                                {requestTypes.map(type => {
+                                                    const meta = RESOURCE_TYPE_META[type] || RESOURCE_TYPE_META.other
                                                     const TypeIcon = meta.icon
-                                                    const count = disasters.filter(d => d.type === type).length
+                                                    const count = activeRequests.filter(r => r.resource_type?.toLowerCase() === type).length
                                                     return (
                                                         <button
                                                             key={type}
@@ -737,7 +765,7 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                                                                     : cn("text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-600", meta.bg)
                                                             )}
                                                         >
-                                                            <TypeIcon className="w-3.5 h-3.5" />
+                                                            <TypeIcon className="w-3 h-3" />
                                                             {type} ({count})
                                                         </button>
                                                     )
@@ -745,7 +773,7 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                                             </div>
                                         )}
 
-                                        {/* "All Disasters" option */}
+                                        {/* "All Requests" option */}
                                         <button
                                             onClick={() => handleSelectDisaster(null)}
                                             className={cn(
@@ -755,61 +783,65 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                                         >
                                             <div className="flex items-center gap-2">
                                                 <div className="w-6 h-6 rounded-full bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center">
-                                                    <Zap className="w-3 h-3 text-white" />
+                                                    <Users className="w-3 h-3 text-white" />
                                                 </div>
-                                                <span className="font-bold text-slate-900 dark:text-white">All Disasters</span>
+                                                <span className="font-bold text-slate-900 dark:text-white">All Requests</span>
                                                 <span className="text-[10px] text-slate-400 ml-auto">Global view</span>
                                             </div>
                                             <p className="text-[11px] text-slate-500 mt-0.5 ml-8">
-                                                Show all victim requests across all disasters
+                                                Show all victim requests across all areas
                                             </p>
                                         </button>
 
-                                        {/* Disaster list grouped by type */}
+                                        {/* Request list grouped by Resource Type */}
                                         <div className="max-h-64 overflow-y-auto py-1">
-                                            {Object.keys(disastersByType).length === 0 ? (
+                                            {Object.keys(requestsByResource).length === 0 ? (
                                                 <div className="px-4 py-8 text-center bg-slate-50/50 dark:bg-white/[0.01]">
                                                     <div className="w-12 h-12 rounded-full border-2 border-slate-200 dark:border-white/10 flex items-center justify-center mx-auto mb-3">
                                                         <Activity className="w-6 h-6 text-slate-300 dark:text-slate-600" />
                                                     </div>
-                                                    <p className="text-sm font-bold text-slate-600 dark:text-slate-400">No Active Disaster Found</p>
+                                                    <p className="text-sm font-bold text-slate-600 dark:text-slate-400">No Pending Requests Found</p>
                                                 </div>
                                             ) : (
-                                                Object.entries(disastersByType).map(([type, typeDisasters]) => {
-                                                    const meta = DISASTER_TYPE_META[type] || DISASTER_TYPE_META.other
-                                                    const TypeIcon = meta.icon
+                                                Object.entries(requestsByResource).map(([resourceKey, typeRequests]) => {
+                                                    const meta = RESOURCE_TYPE_META[resourceKey] || RESOURCE_TYPE_META.other
+                                                    const ResourceIcon = meta.icon
                                                     return (
-                                                        <div key={type}>
-                                                            {!filterType && Object.keys(disastersByType).length > 1 && (
-                                                                <div className="px-4 py-1.5 flex items-center gap-1.5 bg-slate-50 dark:bg-white/[0.02]">
-                                                                    <TypeIcon className={cn("w-3 h-3", meta.color)} />
-                                                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                                                        {type} ({typeDisasters.length})
-                                                                    </span>
-                                                                </div>
-                                                            )}
-                                                            {typeDisasters.map(d => {
-                                                                const sevColor = d.severity === 'critical' ? 'bg-red-500' :
-                                                                    d.severity === 'high' ? 'bg-orange-500' :
-                                                                        d.severity === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
-                                                                const sevTextColor = d.severity === 'critical' ? 'text-red-600 dark:text-red-400' :
-                                                                    d.severity === 'high' ? 'text-orange-600 dark:text-orange-400' :
-                                                                        d.severity === 'medium' ? 'text-yellow-600 dark:text-yellow-400' : 'text-green-600 dark:text-green-400'
+                                                        <div key={resourceKey}>
+                                                            <div className="px-4 py-1.5 flex items-center gap-1.5 bg-slate-50 dark:bg-white/[0.02]">
+                                                                <ResourceIcon className={cn("w-3 h-3", meta.color)} />
+                                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                                                    {resourceKey} ({typeRequests.length})
+                                                                </span>
+                                                            </div>
+                                                            {typeRequests.map(r => {
+                                                                const dInfo = r.disaster_id ? disasterInfoMap[r.disaster_id] : null
+                                                                const sevTextColor = r.priority === 'critical' ? 'text-red-600 dark:text-red-400' :
+                                                                    r.priority === 'high' ? 'text-orange-600 dark:text-orange-400' :
+                                                                        r.priority === 'medium' ? 'text-yellow-600 dark:text-yellow-400' : 'text-green-600 dark:text-green-400'
+                                                                
                                                                 return (
                                                                     <button
-                                                                        key={d.id}
-                                                                        onClick={() => handleSelectDisaster(d.id)}
+                                                                        key={r.id}
+                                                                        onClick={() => handleSelectDisaster(r.id)}
                                                                         className={cn(
                                                                             "w-full text-left px-4 py-2.5 text-sm transition-all hover:bg-slate-50 dark:hover:bg-white/5",
-                                                                            selectedDisasterId === d.id && "bg-orange-50 dark:bg-orange-500/10 border-l-2 border-orange-500"
+                                                                            selectedDisasterId === r.id && "bg-orange-50 dark:bg-orange-500/10 border-l-2 border-orange-500"
                                                                         )}
                                                                     >
-                                                                        <div className="flex items-center gap-2">
-                                                                            <span className={cn("w-2 h-2 rounded-full shrink-0", sevColor)} />
-                                                                            <span className="font-medium text-slate-900 dark:text-white truncate flex-1">
-                                                                                {d.title || d.type}
-                                                                            </span>
-                                                                            <span className={cn("text-[10px] font-bold uppercase", sevTextColor)}>{d.severity}</span>
+                                                                        <div className="flex flex-col gap-1">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <div className="min-w-[12px]">
+                                                                                    <MapPin className="w-3 h-3 text-slate-400" />
+                                                                                </div>
+                                                                                <span className="font-medium text-slate-900 dark:text-white truncate flex-1">
+                                                                                    {r.head_count} {r.head_count === 1 ? 'Person' : 'People'} - {dInfo?.name || r.address_text || `Coord: [${r.latitude.toFixed(3)}, ${r.longitude.toFixed(3)}]`}
+                                                                                </span>
+                                                                                <span className={cn("text-[10px] font-bold uppercase", sevTextColor)}>{r.priority}</span>
+                                                                            </div>
+                                                                            {r.description && (
+                                                                                <span className="text-xs text-slate-500 truncate pl-5">{r.description}</span>
+                                                                            )}
                                                                         </div>
                                                                     </button>
                                                                 )
@@ -859,18 +891,18 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
 
                 {/* Sub-header / Status bar */}
                 <div className="flex items-center gap-4 px-6 py-2 bg-slate-50/50 dark:bg-white/[0.01] text-[11px]">
-                    {activeDisaster ? (
+                    {activeRequest ? (
                         <>
                             <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-400 font-medium">
                                 <MapPin className="w-3 h-3 text-slate-400" />
-                                <span>{activeDisaster.locations?.name || activeDisaster.location_name || 'Designated Zone'}</span>
+                                <span className="max-w-[400px] truncate">{activeRequest.description || 'Request Location'}</span>
                             </div>
                             <div className={cn(
                                 "px-1.5 py-0.5 rounded font-black uppercase text-[9px] tracking-widest",
-                                activeDisaster.severity === 'critical' ? 'bg-red-500 text-white' :
-                                    activeDisaster.severity === 'high' ? 'bg-orange-500 text-white' : 'bg-yellow-500 text-white'
+                                activeRequest.priority === 'critical' ? 'bg-red-500 text-white' :
+                                    activeRequest.priority === 'high' ? 'bg-orange-500 text-white' : 'bg-yellow-500 text-white'
                             )}>
-                                {activeDisaster.severity}
+                                {activeRequest.priority}
                             </div>
                             <div className="text-slate-400 italic">
                                 Learning Physics: Diffusion D={currentPhysics?.diffusion?.toFixed(3) || '0.000'}
@@ -944,18 +976,18 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                     </div>
                 )}
 
-                {/* Tactical Intelligence — Always present, switches to hover data when active */}
-                {(hoveredCell || centerTacticalData) && (
+                {/* Tactical Intelligence — Interaction driven, appears only when targeting clusters */}
+                {hoveredCell && hoveredCell.val > 0.05 && (
                     <div className="absolute top-4 right-4 z-[1005] bg-slate-900/90 backdrop-blur-md text-white rounded-xl p-4 shadow-2xl border border-white/10 min-w-[220px] pointer-events-none transition-all duration-300">
                         <div className="flex items-center justify-between mb-3 pb-2 border-b border-white/10">
                             <div className="flex items-center gap-2">
-                                <div className={cn("w-3 h-3 rounded-full", (hoveredCell || centerTacticalData)!.val > 0.4 ? "animate-pulse bg-red-500" : "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.4)]")} />
+                                <div className={cn("w-3 h-3 rounded-full", hoveredCell.val > 0.4 ? "animate-pulse bg-red-500" : "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.4)]")} />
                                 <span className="font-black text-[10px] uppercase tracking-widest text-slate-300">
-                                    {hoveredCell ? 'Target Intelligence' : 'Sector Insight (Peak)'}
+                                    Target Intelligence
                                 </span>
                             </div>
                             <span className="text-[10px] tabular-nums text-slate-500">
-                                {(hoveredCell || centerTacticalData)!.lat.toFixed(3)}°, {(hoveredCell || centerTacticalData)!.lon.toFixed(3)}°
+                                {hoveredCell.lat.toFixed(3)}°, {hoveredCell.lon.toFixed(3)}°
                             </span>
                         </div>
 
@@ -965,10 +997,10 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                                 <div className="flex items-center gap-2">
                                     <div className="w-16 h-1.5 rounded-full bg-white/5 overflow-hidden">
                                         <div className="h-full bg-gradient-to-r from-orange-500 to-red-500 transition-all duration-500" 
-                                             style={{ width: `${(hoveredCell || centerTacticalData)!.val * 100}%` }} />
+                                             style={{ width: `${hoveredCell.val * 100}%` }} />
                                     </div>
                                     <span className="text-xs font-black tabular-nums">
-                                        {((hoveredCell || centerTacticalData)!.val * 100).toFixed(0)}%
+                                        {(hoveredCell.val * 100).toFixed(0)}%
                                     </span>
                                 </div>
                             </div>
@@ -976,25 +1008,25 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
                             <div className="flex items-center justify-between">
                                 <span className="text-[9px] text-slate-400 uppercase font-black tracking-tight">Population Density</span>
                                 <span className="text-xs font-bold text-slate-200">
-                                    ~{getAreaDensity((hoveredCell || centerTacticalData)!.lat, (hoveredCell || centerTacticalData)!.lon).toLocaleString(undefined, { maximumFractionDigits: 0 })} / km²
+                                    ~{getAreaDensity(hoveredCell.lat, hoveredCell.lon).toLocaleString(undefined, { maximumFractionDigits: 0 })} / km²
                                 </span>
                             </div>
 
                             <div className="pt-2 mt-2 border-t border-white/5 flex items-center justify-between">
                                 <span className={cn(
                                     "text-[9px] uppercase font-black flex items-center gap-1",
-                                    (hoveredCell || centerTacticalData)!.tti != null && (hoveredCell || centerTacticalData)!.tti! <= currentTime ? "text-red-400" : "text-orange-400"
+                                    hoveredCell.tti != null && hoveredCell.tti! <= currentTime ? "text-red-400" : "text-orange-400"
                                 )}>
                                     <Zap className="w-3 h-3" /> TTI ADVISORY
                                 </span>
                                 <span className={cn(
                                     "px-2 py-0.5 rounded font-black text-[10px] tracking-wider",
-                                    (hoveredCell || centerTacticalData)!.tti != null && (hoveredCell || centerTacticalData)!.tti! <= currentTime 
+                                    hoveredCell.tti != null && hoveredCell.tti! <= currentTime 
                                         ? "bg-red-600 text-white animate-pulse" 
                                         : "bg-slate-800 text-slate-300"
                                 )}>
-                                    {(hoveredCell || centerTacticalData)!.tti != null 
-                                        ? ((hoveredCell || centerTacticalData)!.tti! <= currentTime ? 'IMPACTED' : `T+${(hoveredCell || centerTacticalData)!.tti!.toFixed(1)}h`)
+                                    {hoveredCell.tti != null 
+                                        ? (hoveredCell.tti! <= currentTime ? 'IMPACTED' : `T+${hoveredCell.tti!.toFixed(1)}h`)
                                         : 'NOMINAL'}
                                 </span>
                             </div>

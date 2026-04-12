@@ -52,6 +52,7 @@ interface MoEPrediction {
         gate_probs: number[][]
         expert_usage: number[]
         load_balance_loss: number
+        attribution?: Record<string, number>
     }
     cached: boolean
 }
@@ -306,24 +307,51 @@ export function MoEDashboard() {
                         </div>
 
                         {/* Expert Routing Visualization */}
-                        <div className="rounded-xl border border-slate-100 dark:border-white/5 p-4 bg-slate-50 dark:bg-white/[0.01]">
-                            <h5 className="text-xs font-bold text-slate-500 mb-3">Expert Routing</h5>
-                            <div className="grid grid-cols-5 gap-2">
-                                {prediction.expert_routing.expert_usage.map((usage, idx) => (
-                                    <div key={idx} className="text-center">
-                                        <div className={cn(
-                                            "w-full h-16 rounded-lg mb-1 flex items-center justify-center text-white font-bold",
-                                            EXPERT_COLORS[moeStatus?.experts?.[idx] || ''] || 'bg-slate-400'
-                                        )}>
-                                            {(usage * 100).toFixed(0)}%
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            <div className="rounded-xl border border-slate-100 dark:border-white/5 p-4 bg-slate-50 dark:bg-white/[0.01]">
+                                <h5 className="text-xs font-bold text-slate-500 mb-3 uppercase tracking-wider">Expert Routing Confidence</h5>
+                                <div className="grid grid-cols-5 gap-2">
+                                    {prediction.expert_routing.expert_usage.map((usage, idx) => (
+                                        <div key={idx} className="text-center">
+                                            <div className={cn(
+                                                "w-full h-16 rounded-lg mb-1 flex items-center justify-center text-white font-mono text-xs font-bold transition-all hover:scale-105",
+                                                EXPERT_COLORS[moeStatus?.experts?.[idx] || ''] || 'bg-slate-400'
+                                            )}>
+                                                {(usage * 100).toFixed(0)}%
+                                            </div>
+                                            <span className="text-[10px] text-slate-400 capitalize truncate block">{moeStatus?.experts?.[idx]}</span>
                                         </div>
-                                        <span className="text-[10px] text-slate-400 capitalize">{moeStatus?.experts?.[idx]}</span>
-                                    </div>
-                                ))}
+                                    ))}
+                                </div>
+                                <p className="text-[10px] text-slate-400 mt-2">
+                                    Load Balance Loss: {prediction.expert_routing.load_balance_loss.toFixed(4)}
+                                </p>
                             </div>
-                            <p className="text-[10px] text-slate-400 mt-2">
-                                Load Balance Loss: {prediction.expert_routing.load_balance_loss.toFixed(4)}
-                            </p>
+
+                            {/* IMPROVISATION: Decision Attribution */}
+                            <div className="rounded-xl border border-slate-100 dark:border-white/5 p-4 bg-slate-50 dark:bg-white/[0.01]">
+                                <div className="flex items-center justify-between mb-3">
+                                    <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Decision Attribution</h5>
+                                    <Zap className="w-3 h-3 text-yellow-500" />
+                                </div>
+                                <div className="space-y-2">
+                                    {prediction.expert_routing.attribution && Object.entries(prediction.expert_routing.attribution).map(([feature, weight]) => (
+                                        <div key={feature} className="flex items-center gap-2">
+                                            <span className="text-[10px] text-slate-500 w-12 uppercase">{feature}</span>
+                                            <div className="flex-1 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
+                                                <div 
+                                                    className="h-full bg-purple-500 transition-all duration-500" 
+                                                    style={{ width: `${weight * 100}%` }}
+                                                />
+                                            </div>
+                                            <span className="text-[10px] font-mono text-slate-400">{(weight * 100).toFixed(0)}%</span>
+                                        </div>
+                                    ))}
+                                    {!prediction.expert_routing.attribution && (
+                                        <p className="text-[10px] text-slate-400 italic">No attribution data available for this version.</p>
+                                    )}
+                                </div>
+                            </div>
                         </div>
 
                         {/* Prediction Outputs */}

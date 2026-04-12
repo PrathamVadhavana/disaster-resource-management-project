@@ -157,7 +157,16 @@ async def ml_sandbox(
 ):
     """Run ML prediction without saving to database (Sandbox mode)"""
     try:
-        ml_result = await ml_service.predict(prediction_input.prediction_type, prediction_input.features)
+        print(f"\n[SANDBOX DEBUG] Type: {prediction_input.prediction_type} | Features: {prediction_input.features}")
+        
+        if not prediction_input.features:
+            raise HTTPException(status_code=400, detail="Features are required for sandbox inference")
+            
+        ml_result = await ml_service.predict(
+            prediction_input.prediction_type, 
+            prediction_input.features,
+            run_ensemble=prediction_input.run_ensemble
+        )
         return {
             "prediction_type": prediction_input.prediction_type.value,
             "features": prediction_input.features,
@@ -165,5 +174,7 @@ async def ml_sandbox(
             "timestamp": datetime.utcnow().isoformat(),
             "mode": "sandbox (no-save)",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sandbox prediction failed: {str(e)}")

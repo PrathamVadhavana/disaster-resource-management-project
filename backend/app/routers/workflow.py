@@ -169,13 +169,14 @@ async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
         .async_execute()
     )
     resource_resp = await db_admin.table("resources").select("*").limit(5000).async_execute()
-    ngo_resp = await db_admin.table("users").select("id, metadata").eq("role", "ngo").limit(2000).async_execute()
+    # Fetch potential responders (NGOs & Donors) instead of just NGOs
+    responder_resp = await db_admin.table("users").select("id, metadata, role").in_("role", ["ngo", "donor"]).limit(2000).async_execute()
 
     all_requests = request_resp.data or []
     all_disasters = disaster_resp.data or []
     all_locations = location_resp.data or []
     all_resources = resource_resp.data or []
-    all_ngos = ngo_resp.data or []
+    all_responders = responder_resp.data or []
 
     disaster_map = {row["id"]: row for row in all_disasters if row.get("id")}
     location_map = {row["id"]: row for row in all_locations if row.get("id")}
@@ -208,22 +209,39 @@ async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
     urgent_request_count = sum(1 for row in relevant_requests if _priority_score(row) >= 8.0)
     requested_units = sum(max(_safe_float(row.get("quantity"), 1.0), 1.0) for row in relevant_requests)
 
-    requested_types = Counter((row.get("resource_type") or "other") for row in relevant_requests)
-    available_resources = [
-        row
-        for row in all_resources
-        if row.get("status") == "available"
-        and (
-            not disaster_id
-            or row.get("disaster_id") in (None, "", disaster_id)
-        )
-    ]
-    available_units = sum(
-        _safe_float(row.get("quantity"), 0.0)
-        for row in available_resources
-        if not requested_types or (row.get("type") or "other") in requested_types
-    )
-    availability_pct = 100.0 if requested_units <= 0 else round(min((available_units / requested_units) * 100.0, 100.0), 2)
+    # ── Real-time Demand/Supply Capacity Calculation ──────────────────────
+    # Instead of 'stock stacking', we measure 'Network Capacity' based on nearby responders.
+    target_points: list[tuple[float, float]] = []
+    for row in relevant_requests:
+        lat, lon = _point_from_row(row, location_map, disaster_map)
+        if lat is not None and lon is not None:
+            target_points.append((lat, lon))
+
+    responder_points: list[tuple[float, float]] = []
+    for resp in all_responders:
+        m = resp.get("metadata") or {}
+        rlat, rlon = m.get("latitude"), m.get("longitude")
+        if rlat is not None and rlon is not None:
+            responder_points.append((_safe_float(rlat), _safe_float(rlon)))
+
+    # Calculate proximity readiness: how many responders are within 50km reach
+    responders_near_impact = 0
+    if target_points and responder_points:
+        for t_lat, t_lon in target_points:
+            # Check if ANY responder is within 50km of this specific victim cluster
+            if any(_haversine_km(t_lat, t_lon, r_lat, r_lon) <= 50 for r_lat, r_lon in responder_points):
+                responders_near_impact += 1
+
+    # Ratio of requests currently being serviced vs total pending
+    assigned_count = sum(1 for r in relevant_requests if r.get("status") in {"assigned", "in_progress", "delivered"})
+    fulfillment_rate = (assigned_count / len(relevant_requests)) if relevant_requests else 1.0
+
+    # Availability % is now "Network Readiness": 50% based on proximity, 50% on current assignment momentum
+    proximity_score = (responders_near_impact / len(target_points)) if target_points else 1.0
+    availability_pct = round(_clamp((proximity_score * 0.5 + fulfillment_rate * 0.5) * 100.0, 5.0, 100.0), 2)
+    
+    # Available units refers to 'In-Transit/Assigned' units in this model
+    available_units = sum(_safe_float(r.get("quantity"), 0.0) for r in relevant_requests if r.get("status") in {"assigned", "in_progress"})
 
     now = datetime.now(UTC)
     response_times: list[float] = []
@@ -279,39 +297,34 @@ async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
     )
 
     ngo_points: list[tuple[float, float]] = []
-    for ngo in all_ngos:
-        metadata = ngo.get("metadata") or {}
+    # ── Resolve Responder & Victim Locations ──────────────────────────────
+    responder_points: list[tuple[float, float]] = []
+    for resp in all_responders:
+        metadata = resp.get("metadata") or {}
         if metadata.get("latitude") is not None and metadata.get("longitude") is not None:
-            ngo_points.append((_safe_float(metadata.get("latitude")), _safe_float(metadata.get("longitude"))))
+            responder_points.append((_safe_float(metadata.get("latitude")), _safe_float(metadata.get("longitude"))))
             continue
         location_id = metadata.get("location_id")
         if location_id and location_id in location_map:
             location = location_map[location_id]
             if location.get("latitude") is not None and location.get("longitude") is not None:
-                ngo_points.append((_safe_float(location.get("latitude")), _safe_float(location.get("longitude"))))
+                responder_points.append((_safe_float(location.get("latitude")), _safe_float(location.get("longitude"))))
 
-    if not ngo_points:
-        for resource in available_resources:
-            location = location_map.get(resource.get("location_id"))
-            if location and location.get("latitude") is not None and location.get("longitude") is not None:
-                ngo_points.append((_safe_float(location.get("latitude")), _safe_float(location.get("longitude"))))
+    # Fallback to resource locations if responder profiles are missing coordinates
+    if not responder_points:
+        relevant_resource_rows = [r for r in all_resources if not disaster_id or r.get("disaster_id") == disaster_id]
+        for res in relevant_resource_rows:
+            loc = location_map.get(res.get("location_id"))
+            if loc and loc.get("latitude") is not None and loc.get("longitude") is not None:
+                responder_points.append((_safe_float(loc.get("latitude")), _safe_float(loc.get("longitude"))))
 
-    target_points: list[tuple[float, float]] = []
-    for row in relevant_requests:
-        lat, lon = _point_from_row(row, location_map, disaster_map)
-        if lat is not None and lon is not None:
-            target_points.append((lat, lon))
-    if not target_points:
-        for row in relevant_disasters:
-            lat, lon = _point_from_row(row, location_map, disaster_map)
-            if lat is not None and lon is not None:
-                target_points.append((lat, lon))
-
+    # Calculate proximity: Median distance from requests to nearest responder (NGO/Donor)
     nearest_distances: list[float] = []
-    if ngo_points:
-        for lat, lon in target_points:
-            nearest_distances.append(min(_haversine_km(lat, lon, ngo_lat, ngo_lon) for ngo_lat, ngo_lon in ngo_points))
-    ngo_proximity_km = round(_clamp(_median(nearest_distances, 25.0), 1.0, 500.0), 2)
+    if responder_points and target_points:
+        for t_lat, t_lon in target_points:
+            nearest_distances.append(min(_haversine_km(t_lat, t_lon, r_lat, r_lon) for r_lat, r_lon in responder_points))
+    
+    responder_proximity_km = round(_clamp(_median(nearest_distances, 25.0), 1.0, 500.0), 2)
 
     dominant_severity = _severity_label(weather_severity)
     model_observation = {
@@ -319,7 +332,7 @@ async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
         "disaster_type": disaster_type_score,
         "response_time_hours": round(response_time_hours, 2),
         "resource_availability": round(_clamp(availability_pct / 10.0, 0.1, 10.0), 2),
-        "ngo_proximity_km": ngo_proximity_km,
+        "ngo_proximity_km": responder_proximity_km,
         "resource_quality_score": resource_quality_score,
         "casualties": float(max(casualties, 0)),
         "economic_damage_usd": max(economic_damage_usd, 0.0),
@@ -329,7 +342,7 @@ async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
         "disaster_type": dominant_disaster_type,
         "response_time_hours": round(response_time_hours, 2),
         "resource_availability": round(availability_pct, 2),
-        "ngo_proximity_km": ngo_proximity_km,
+        "ngo_proximity_km": responder_proximity_km,
         "resource_quality_score": round(resource_quality_score * 10.0, 2),
         "casualties": float(max(casualties, 0)),
         "economic_damage_usd": max(economic_damage_usd, 0.0),
@@ -350,9 +363,9 @@ async def _load_ai_observation_context(disaster_id: str | None = None) -> dict:
             "available_resource_units": round(available_units, 2),
             "availability_pct": availability_pct,
             "active_disaster_count": len(relevant_disasters),
-            "responders_considered": len(ngo_points),
+            "responders_considered": len(responder_points),
         },
-        "derived_from": "Supabase victim requests, disasters, resources, locations, and NGO profiles",
+        "derived_from": "Real-time Supply network (NGOs/Donors) vs Demand metrics",
     }
 
 
@@ -1455,19 +1468,22 @@ async def get_spread_heatmap(
     try:
         from app.database import db_admin
         query = db_admin.table("resource_requests").select(
-            "id, latitude, longitude, status, priority, resource_type, description, created_at, disaster_id, head_count"
+            "id, latitude, longitude, status, priority, resource_type, description, created_at, disaster_id, head_count, address_text"
         )
         
+        # If no disaster, find the latest top 1000 requests globally to see active zones
         # If no disaster, find the latest top 1000 requests globally to see active zones
         if disaster_id:
             query = query.eq("disaster_id", disaster_id)
         else:
             query = query.order("created_at", desc=True).limit(1000)
+
+        # Apply resource categorization filter
+        resource_type = body.get("resource_type") or body.get("resourceType")
+        if resource_type:
+            query = query.eq("resource_type", resource_type)
             
-        query = query.in_("status", [
-            "pending", "under_review", "approved", "availability_submitted", 
-            "assigned", "in_progress"
-        ])
+        query = query.in_("status", ["pending", "in_progress"])
             
         req_resp = await query.async_execute()
         
@@ -1476,17 +1492,15 @@ async def get_spread_heatmap(
         
         import random
         for r in (req_resp.data or []):
-            # Count for global totals regardless of coordinates
-            global_active_count += 1
-            global_people_count += max(1, int(r.get("head_count") or 1))
-            
             r_lat = r.get("latitude")
             r_lon = r.get("longitude")
             
             if r_lat is None or r_lon is None:
-                # Give it a generic slightly randomized location near the map center so it stays visible
-                r_lat = float(center_lat) + random.uniform(-0.08, 0.08)
-                r_lon = float(center_lon) + random.uniform(-0.08, 0.08)
+                continue
+                
+            # Count for totals only if they have coordinates
+            global_active_count += 1
+            global_people_count += max(1, int(r.get("head_count") or 1))
                 
             try:
                 lat_f, lon_f = float(r_lat), float(r_lon)
