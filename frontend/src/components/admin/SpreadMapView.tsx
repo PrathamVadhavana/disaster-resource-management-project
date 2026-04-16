@@ -219,7 +219,7 @@ function gridToGeoJSON(grid: number[][], bounds: SpreadMapViewProps['bounds']) {
     const dLon = (maxLon - minLon) / (cols - 1)
 
     // Higher threshold: Only render cells > 0.15 intensity for performance
-    const THRESHOLD = 0.15 
+    const THRESHOLD = 0.25 
 
     for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
