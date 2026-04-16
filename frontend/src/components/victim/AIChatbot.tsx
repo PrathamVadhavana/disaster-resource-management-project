@@ -57,6 +57,7 @@ export function AIChatbot() {
     const [requestReady, setRequestReady] = useState(false)
     const [submitted, setSubmitted] = useState(false)
     const [error, setError] = useState('')
+    const [isProcessingSubmit, setIsProcessingSubmit] = useState(false)
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -80,7 +81,7 @@ export function AIChatbot() {
                 role: 'assistant',
                 content: data.assistant_message,
                 timestamp: new Date(),
-                extractedData: data.extracted_data,
+                extractedData: { ...(data.extracted_data || {}), ...(data.metadata || {}) },
                 requestReady: data.request_ready,
             }
             setMessages(prev => [...prev, assistantMsg])
@@ -168,8 +169,40 @@ export function AIChatbot() {
         )
     }, [chatMutation])
 
-    const handleSubmitRequest = useCallback(() => {
+    const handleSubmitRequest = useCallback(async () => {
         if (!extractedData) return
+
+        setIsProcessingSubmit(true)
+        
+        let finalLat = extractedData.latitude || undefined
+        let finalLon = extractedData.longitude || undefined
+        let finalAddress = extractedData.address_text || undefined
+
+        try {
+            // First attempt to extract GPS from chat if user clicked GPS button
+            const gpsMsg = messages.slice().reverse().find(m => m.role === 'user' && (m.content.includes('GPS:') || m.content.includes('GPS coordinates are:')))
+            if (gpsMsg && (!finalLat || !finalLon)) {
+                const match = gpsMsg.content.match(/(-?\d+\.\d+),\s*(-?\d+\.\d+)/)
+                if (match) {
+                    finalLat = parseFloat(match[1])
+                    finalLon = parseFloat(match[2])
+                }
+            }
+
+            // If still no lat/lon but we have an address_text, try forward geocoding via Nominatim
+            if ((!finalLat || !finalLon) && finalAddress && finalAddress !== 'GPS_PENDING') {
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(finalAddress)}&format=json&limit=1`)
+                const data = await res.json()
+                if (data && data.length > 0) {
+                    finalLat = parseFloat(data[0].lat)
+                    finalLon = parseFloat(data[0].lon)
+                }
+            }
+        } catch (e) {
+            console.error('Failed to parse or geocode location:', e)
+        } finally {
+            setIsProcessingSubmit(false)
+        }
 
         // Map extracted data to request payload
         const resourceTypes = extractedData.resource_types || ['Custom']
@@ -182,9 +215,9 @@ export function AIChatbot() {
             items,
             priority: (extractedData.priority || 'medium') as RequestPriority,
             description: extractedData.description || messages.filter(m => m.role === 'user').map(m => m.content).join(' | '),
-            latitude: extractedData.latitude || undefined,
-            longitude: extractedData.longitude || undefined,
-            address_text: extractedData.address_text || undefined,
+            latitude: finalLat,
+            longitude: finalLon,
+            address_text: finalAddress,
             disaster_type: extractedData.disaster_type || undefined,
         }
 
@@ -395,10 +428,10 @@ export function AIChatbot() {
                     )}
                     <button
                         onClick={handleSubmitRequest}
-                        disabled={submitMutation.isPending}
+                        disabled={submitMutation.isPending || isProcessingSubmit}
                         className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-semibold text-sm shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                     >
-                        {submitMutation.isPending ? (
+                        {submitMutation.isPending || isProcessingSubmit ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
                         ) : (
                             <CheckCircle2 className="w-4 h-4" />

@@ -289,6 +289,7 @@ export interface ChatbotResponse {
     } | null
     request_ready: boolean
     message_count: number
+    metadata?: Record<string, any>
 }
 
 /**
@@ -311,7 +312,7 @@ export async function sendChatMessage(
     message: string,
     sessionId: string | null,
 ): Promise<ChatbotResponse> {
-    const raw = await apiFetch<ChatbotResponse>('/api/nlp/chatbot', {
+    const raw = await apiFetch<ChatbotResponse>('/api/victim/chatbot/message', {
         method: 'POST',
         body: JSON.stringify({
             message,

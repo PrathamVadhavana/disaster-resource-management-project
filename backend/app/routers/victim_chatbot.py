@@ -66,7 +66,7 @@ class ChatResponse(BaseModel):
     message_count: int = 0
     smart_defaults: dict | None = None
     urgency_context: dict | None = None
-
+    metadata: dict | None = None
 
 class SessionDataResponse(BaseModel):
     session_id: str
@@ -161,6 +161,7 @@ async def chat_message(
             "message_count": len(result.get("metadata", {})),
             "smart_defaults": smart_defaults,
             "urgency_context": urgency_context,
+            "metadata": result.get("metadata", {}),
         }
     )
 

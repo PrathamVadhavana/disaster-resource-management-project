@@ -3,7 +3,8 @@
  *
  * Provides authentication, database, and storage through the Supabase JS client.
  */
-import { createClient, type SupabaseClient, type Session, type User } from '@supabase/supabase-js'
+import { createBrowserClient } from '@supabase/ssr'
+import type { SupabaseClient, Session, User } from '@supabase/supabase-js'
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -12,7 +13,7 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 let _supabase: SupabaseClient | null = null
 export function getSupabaseClient(): SupabaseClient {
     if (!_supabase) {
-        _supabase = createClient(supabaseUrl, supabaseAnonKey)
+        _supabase = createBrowserClient(supabaseUrl, supabaseAnonKey)
     }
     return _supabase
 }
