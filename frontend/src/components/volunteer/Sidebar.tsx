@@ -8,16 +8,18 @@ import { useTheme } from 'next-themes'
 import {
     LayoutDashboard, MapPin, ClipboardList, Award, UserCircle,
     LogOut, ChevronLeft, Menu, Sun, Moon, HandHeart, ShieldCheck,
+    PackageCheck,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 
 const navItems = [
-    { href: '/volunteer', label: 'Overview', icon: LayoutDashboard },
-    { href: '/volunteer/assignments', label: 'My Assignments', icon: ClipboardList },
-    { href: '/volunteer/triage', label: 'Field Triage', icon: ShieldCheck },
-    { href: '/volunteer/deployments', label: 'Deployment Map', icon: MapPin },
+    { href: '/volunteer',              label: 'Overview',        icon: LayoutDashboard },
+    { href: '/volunteer/assignments',  label: 'Available Tasks', icon: ClipboardList },
+    { href: '/volunteer/deliveries',   label: 'My Deliveries',   icon: PackageCheck },
+    { href: '/volunteer/triage',       label: 'Field Triage',    icon: ShieldCheck },
+    { href: '/volunteer/deployments',  label: 'Deployment Log',  icon: MapPin },
     { href: '/volunteer/certifications', label: 'Certifications', icon: Award },
-    { href: '/volunteer/profile', label: 'Profile', icon: UserCircle },
+    { href: '/volunteer/profile',      label: 'Profile',         icon: UserCircle },
 ]
 
 export function VolunteerSidebar() {

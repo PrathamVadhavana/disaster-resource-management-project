@@ -1,4 +1,4 @@
-    /**
+/**
  * Centralised API client — barrel export consumed by every dashboard module.
  *
  * Usage:  import { api } from '@/lib/api'
@@ -36,7 +36,6 @@ async function apiFetch<T = any>(
     const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
     if (!res.ok) {
         if (res.status === 401) {
-            // Try refreshing the session once
             try {
                 const sb = getSupabaseClient()
                 const { data } = await sb.auth.refreshSession()
@@ -54,8 +53,8 @@ async function apiFetch<T = any>(
             throw err
         }
         const body = await res.json().catch(() => ({}))
-        const msg = (typeof body?.detail === 'string') 
-            ? body.detail 
+        const msg = (typeof body?.detail === 'string')
+            ? body.detail
             : `API error ${res.status}`
         const err = new Error(msg) as any
         err.status = res.status
@@ -63,7 +62,6 @@ async function apiFetch<T = any>(
         err.body = body
         throw err
     }
-    // 204 No Content
     if (res.status === 204) return undefined as unknown as T
     return res.json()
 }
@@ -148,7 +146,6 @@ export const api = {
         apiFetch('/api/admin/platform-stats'),
 
     // ━━ Coordinator (Phase 5) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Situation reports
     generateSitrep: (reportType: string = 'on_demand', generatedBy: string = 'user') =>
         apiFetch('/api/ml/sitreps/generate', { method: 'POST', body: JSON.stringify({ report_type: reportType, generated_by: generatedBy }) }),
 
@@ -161,14 +158,12 @@ export const api = {
     getSitrep: (id: string) =>
         apiFetch(`/api/ml/sitreps/${id}`),
 
-    // Natural language queries
     askCoordinatorQuery: (query: string, userId?: string, sessionId?: string, context?: Array<{question: string, answer: string}>) =>
         apiFetch('/api/ml/query', { method: 'POST', body: JSON.stringify({ query, user_id: userId, session_id: sessionId, context }) }),
 
     getQueryHistory: (params?: { user_id?: string; session_id?: string; limit?: number }) =>
         apiFetch(`/api/ml/query-history${qs(params)}`),
 
-    // Anomaly alerts
     getAnomalyAlerts: (params?: { status?: string; severity?: string; limit?: number }) =>
         apiFetch(`/api/ml/anomalies${qs(params)}`),
 
@@ -181,7 +176,6 @@ export const api = {
     resolveAnomaly: (alertId: string, status: string = 'resolved') =>
         apiFetch(`/api/ml/anomalies/${alertId}/resolve`, { method: 'PATCH', body: JSON.stringify({ status }) }),
 
-    // Outcome tracking
     getAccuracySummary: () =>
         apiFetch('/api/ml/accuracy-summary'),
 
@@ -222,8 +216,31 @@ export const api = {
     getActiveDeployment: () =>
         apiFetch('/api/volunteer/ops/active'),
 
+    // kept for any legacy references
     getVolunteerAvailableAssignments: () =>
-        apiFetch('/api/volunteer/assignments/available'),
+        apiFetch('/api/volunteer/tasks/available/disasters'),
+
+    // new task-based endpoints
+    getVolunteerAvailableTasks: (params?: { resource_type?: string; latitude?: number; longitude?: number }) =>
+        apiFetch(`/api/volunteer/tasks/available${qs(params)}`),
+
+    getVolunteerAvailableDisasters: () =>
+        apiFetch('/api/volunteer/tasks/available/disasters'),
+
+    acceptDeliveryTask: (requestId: string, data: { estimated_arrival?: string; notes?: string }) =>
+        apiFetch(`/api/volunteer/tasks/${requestId}/accept`, { method: 'POST', body: JSON.stringify(data) }),
+
+    declineDeliveryTask: (requestId: string) =>
+        apiFetch(`/api/volunteer/tasks/${requestId}/decline`, { method: 'POST' }),
+
+    getVolunteerAssignedRequests: (params?: { status?: string }) =>
+        apiFetch(`/api/volunteer/requests/assigned${qs(params)}`),
+
+    updateDeliveryStatus: (requestId: string, data: { new_status: string; notes?: string; proof_url?: string; delivery_code?: string; delivery_latitude?: number; delivery_longitude?: number }) =>
+        apiFetch(`/api/volunteer/requests/${requestId}/delivery`, { method: 'PUT', body: JSON.stringify(data) }),
+
+    getVolunteerOpsHistory: (params?: { status?: string; limit?: number }) =>
+        apiFetch(`/api/volunteer/ops/history${qs(params)}`),
 
     checkInVolunteer: (data: { disaster_id: string; task_description: string; latitude?: number; longitude?: number }) =>
         apiFetch('/api/volunteer/ops/check-in', { method: 'POST', body: JSON.stringify(data) }),
@@ -438,7 +455,7 @@ export const api = {
     getModelInfo: () =>
         apiFetch('/api/admin/analytics/model-info'),
 
-    predictSandbox: (data: { prediction_type: string; features: any; run_ensemble?: boolean }) =>
+    predictSandbox: (data: any) =>
         apiFetch('/api/predictions/sandbox', { method: 'POST', body: JSON.stringify(data) }),
 
     // ━━ NGO Stats (alias) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -537,37 +554,24 @@ export const api = {
     // ━━ Unified DisasterGPT Streaming ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     streamUnifiedQuery: async function* (data: { query: string; disaster_id?: string; mode?: string; top_k?: number; max_tokens?: number; temperature?: number }) {
         const token = await getAccessToken()
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-        }
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (token) headers['Authorization'] = `Bearer ${token}`
-
-        const res = await fetch(`${API_BASE}/api/llm/unified`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(data),
-        })
+        const res = await fetch(`${API_BASE}/api/llm/unified`, { method: 'POST', headers, body: JSON.stringify(data) })
         if (!res.ok) throw new Error(`Stream error ${res.status}`)
         if (!res.body) return
-
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
-
         while (true) {
             const { done, value } = await reader.read()
             if (done) break
             buffer += decoder.decode(value, { stream: true })
-
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
-
             for (const line of lines) {
                 if (line.startsWith('data: ')) {
                     const payload = line.slice(6).trim()
-                    if (payload) {
-                        try { yield JSON.parse(payload) } catch { yield payload }
-                    }
+                    if (payload) { try { yield JSON.parse(payload) } catch { yield payload } }
                 }
             }
         }
@@ -576,37 +580,24 @@ export const api = {
     // ━━ DisasterGPT Streaming ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     streamLLMQuery: async function* (data: { query: string; disaster_id?: string; top_k?: number; max_tokens?: number; temperature?: number }) {
         const token = await getAccessToken()
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-        }
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (token) headers['Authorization'] = `Bearer ${token}`
-
-        const res = await fetch(`${API_BASE}/api/llm/stream`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(data),
-        })
+        const res = await fetch(`${API_BASE}/api/llm/stream`, { method: 'POST', headers, body: JSON.stringify(data) })
         if (!res.ok) throw new Error(`Stream error ${res.status}`)
         if (!res.body) return
-
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
-
         while (true) {
             const { done, value } = await reader.read()
             if (done) break
             buffer += decoder.decode(value, { stream: true })
-
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
-
             for (const line of lines) {
                 if (line.startsWith('data: ')) {
                     const payload = line.slice(6).trim()
-                    if (payload) {
-                        try { yield JSON.parse(payload) } catch { yield payload }
-                    }
+                    if (payload) { try { yield JSON.parse(payload) } catch { yield payload } }
                 }
             }
         }
@@ -645,37 +636,24 @@ export const api = {
 
     streamAgentQuery: async function* (data: { query: string; disaster_id?: string }) {
         const token = await getAccessToken()
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-        }
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
         if (token) headers['Authorization'] = `Bearer ${token}`
-
-        const res = await fetch(`${API_BASE}/api/ml/agent/stream`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(data),
-        })
+        const res = await fetch(`${API_BASE}/api/ml/agent/stream`, { method: 'POST', headers, body: JSON.stringify(data) })
         if (!res.ok) throw new Error(`Agent stream error ${res.status}`)
         if (!res.body) return
-
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
-
         while (true) {
             const { done, value } = await reader.read()
             if (done) break
             buffer += decoder.decode(value, { stream: true })
-
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
-
             for (const line of lines) {
                 if (line.startsWith('data: ')) {
                     const payload = line.slice(6).trim()
-                    if (payload) {
-                        try { yield JSON.parse(payload) } catch { yield payload }
-                    }
+                    if (payload) { try { yield JSON.parse(payload) } catch { yield payload } }
                 }
             }
         }
@@ -706,55 +684,42 @@ export const api = {
         apiFetch('/api/admin/sitrep/schedule'),
 
     // ━━ Disaster-Aware Enhancements ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    
-    // Per-disaster anomaly detection
     getDisasterAnomalies: (disasterId: string, params?: { status?: string; severity?: string; limit?: number }) =>
         apiFetch(`/api/ml/anomalies/disaster/${disasterId}${qs(params)}`),
 
-    // Disaster-specific outcome tracking
     getDisasterOutcomes: (disasterId: string, params?: { limit?: number }) =>
         apiFetch(`/api/ml/outcomes/disaster/${disasterId}${qs(params)}`),
 
-    // Disaster-specific hotspots
     getDisasterHotspots: (disasterId: string) =>
         apiFetch(`/api/hotspots/disaster/${disasterId}`),
 
-    // Disaster-specific severity forecast
     getDisasterSeverityForecast: (disasterId: string, params?: { horizon_hours?: number }) =>
         apiFetch(`/api/ml/forecast/disaster/${disasterId}${qs(params)}`),
 
-    // Disaster-specific spread prediction
     getDisasterSpreadPrediction: (disasterId: string, params?: { time_hours?: number }) =>
         apiFetch(`/api/ml/pinn/disaster/${disasterId}${qs(params)}`),
 
-    // Disaster-specific situation report
     generateDisasterSitrep: (disasterId: string, reportType: string = 'disaster_focused') =>
         apiFetch('/api/ml/sitreps/generate', { method: 'POST', body: JSON.stringify({ disaster_id: disasterId, report_type: reportType, generated_by: 'user' }) }),
 
     getDisasterSitrep: (disasterId: string, params?: { limit?: number }) =>
         apiFetch(`/api/ml/sitreps/disaster/${disasterId}${qs(params)}`),
 
-    // Disaster-specific query history
     getDisasterQueryHistory: (disasterId: string, params?: { limit?: number }) =>
         apiFetch(`/api/ml/query-history/disaster/${disasterId}${qs(params)}`),
 
-    // Victim disaster context
     getVictimDisasterContext: (victimId: string) =>
         apiFetch(`/api/victim/disaster-context/${victimId}`),
 
-    // Disaster resource recommendations
     getDisasterResourceRecommendations: (disasterId: string) =>
         apiFetch(`/api/ml/recommendations/disaster/${disasterId}`),
 
-    // Nearby resources for victim
     getNearbyResources: (latitude: number, longitude: number, params?: { radius_km?: number; category?: string; limit?: number }) =>
         apiFetch(`/api/resources/nearby${qs({ latitude, longitude, ...params })}`),
 
-    // Real-time disaster updates
     getDisasterUpdates: (disasterId: string, params?: { since?: string; limit?: number }) =>
         apiFetch(`/api/disasters/${disasterId}/updates${qs(params)}`),
 
-    // Disaster evacuation routes
     getEvacuationRoutes: (disasterId: string, latitude: number, longitude: number) =>
         apiFetch(`/api/disasters/${disasterId}/evacuation-routes${qs({ latitude, longitude })}`),
 

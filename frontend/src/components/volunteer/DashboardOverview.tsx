@@ -7,7 +7,8 @@ import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import {
     Loader2, MapPin, Shield, Clock, CheckCircle2,
-    ArrowRight, AlertTriangle, Zap, Award, HandHeart, ClipboardList, ShieldCheck, Rocket
+    ArrowRight, AlertTriangle, Zap, Award, HandHeart,
+    ClipboardList, ShieldCheck, Rocket, PackageCheck, Truck
 } from 'lucide-react'
 import { VerificationHub } from './VerificationHub'
 
@@ -34,8 +35,6 @@ export function VolunteerDashboardOverview() {
     const activeDisasters = disasterList.filter((d: any) => d.status === 'active')
     const criticalDisasters = activeDisasters.filter((d: any) => d.severity === 'critical' || d.severity === 'high')
 
-    // Compute volunteer status from profile metadata
-    const volunteerStatus = (profile?.metadata as any)?.availability || 'Available'
     const activeCerts = volunteerStats?.certifications_count || 0
     const activeDeployment = activeDeploymentData?.active_deployment
 
@@ -58,10 +57,12 @@ export function VolunteerDashboardOverview() {
     }
 
     const statCards = [
-        { label: 'Impact Score', value: volunteerStats?.impact_score || 0, icon: Zap, bgColor: 'from-amber-400 to-orange-500' },
-        { label: 'Hours Contributed', value: volunteerStats?.total_hours_contributed || 0, icon: Clock, bgColor: 'from-blue-500 to-blue-600' },
-        { label: 'Deployments', value: volunteerStats?.completed_deployments || 0, icon: Rocket, bgColor: 'from-emerald-500 to-emerald-600' },
-        { label: 'Certifications', value: activeCerts, icon: Award, bgColor: 'from-purple-500 to-indigo-600' },
+        { label: 'Impact Score',       value: volunteerStats?.impact_score || 0,              icon: Zap,          bgColor: 'from-amber-400 to-orange-500' },
+        { label: 'Hours Contributed',  value: volunteerStats?.total_hours_contributed || 0,   icon: Clock,        bgColor: 'from-blue-500 to-blue-600' },
+        { label: 'Deployments',        value: volunteerStats?.completed_deployments || 0,     icon: Rocket,       bgColor: 'from-emerald-500 to-emerald-600' },
+        { label: 'Certifications',     value: activeCerts,                                     icon: Award,        bgColor: 'from-purple-500 to-indigo-600' },
+        { label: 'Deliveries Done',    value: volunteerStats?.completed_deliveries || 0,      icon: PackageCheck, bgColor: 'from-teal-500 to-cyan-600' },
+        { label: 'Total Tasks',        value: volunteerStats?.total_delivery_tasks || 0,      icon: Truck,        bgColor: 'from-slate-500 to-slate-600' },
     ]
 
     return (
@@ -77,7 +78,7 @@ export function VolunteerDashboardOverview() {
             </div>
 
             {/* Stat Cards */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
                 {statCards.map((card) => {
                     const Icon = card.icon
                     return (
@@ -94,6 +95,22 @@ export function VolunteerDashboardOverview() {
                 })}
             </div>
 
+            {/* Active deployment banner */}
+            {activeDeployment && (
+                <div className="rounded-2xl bg-blue-600 text-white p-5">
+                    <div className="flex items-center gap-3">
+                        <span className="w-2.5 h-2.5 rounded-full bg-white animate-pulse shrink-0" />
+                        <div>
+                            <p className="font-semibold text-sm">Currently Deployed</p>
+                            <p className="text-blue-100 text-sm">{activeDeployment.task_description || 'General volunteer support'}</p>
+                        </div>
+                        <Link href="/volunteer/deployments" className="ml-auto px-3 py-1.5 rounded-lg bg-white/20 hover:bg-white/30 text-sm font-medium transition-colors">
+                            View
+                        </Link>
+                    </div>
+                </div>
+            )}
+
             {/* Readiness Banner */}
             <div className="rounded-2xl bg-gradient-to-r from-purple-600 to-indigo-600 p-6 text-white">
                 <div className="flex items-start gap-4">
@@ -107,11 +124,9 @@ export function VolunteerDashboardOverview() {
                                 ? `${criticalDisasters.length} high-priority disaster${criticalDisasters.length > 1 ? 's' : ''} need volunteers. Stand by for deployment.`
                                 : 'No urgent deployments at this time. Keep your profile and certifications up to date.'}
                         </p>
-                        <div className="flex items-center gap-3 mt-3">
-                            <div className="flex items-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                                <span className="text-sm font-medium">Available</span>
-                            </div>
+                        <div className="flex items-center gap-1.5 mt-3">
+                            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                            <span className="text-sm font-medium">Available</span>
                         </div>
                     </div>
                 </div>
@@ -122,7 +137,7 @@ export function VolunteerDashboardOverview() {
                 <div className="px-5 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
                     <h2 className="font-semibold text-slate-900 dark:text-white">Active Disaster Zones</h2>
                     <Link href="/volunteer/deployments" className="text-sm text-purple-600 dark:text-purple-400 hover:underline flex items-center gap-1">
-                        View Map <ArrowRight className="w-3.5 h-3.5" />
+                        View History <ArrowRight className="w-3.5 h-3.5" />
                     </Link>
                 </div>
                 {activeDisasters.length ? (
@@ -158,16 +173,22 @@ export function VolunteerDashboardOverview() {
                 )}
             </div>
 
-            {/* Field Verification Hub (Phase 6) */}
+            {/* Field Verification Hub */}
             <VerificationHub />
 
             {/* Quick Actions */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <Link href="/volunteer/assignments" className="group rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 hover:border-purple-300 dark:hover:border-purple-500/30 hover:shadow-md transition-all">
                     <ClipboardList className="w-6 h-6 text-purple-500 mb-2" />
-                    <h4 className="text-sm font-semibold text-slate-900 dark:text-white">My Assignments</h4>
-                    <p className="text-xs text-slate-500 mt-1">View your current and past deployment assignments.</p>
-                    <div className="flex items-center gap-1 text-xs text-purple-500 mt-3 group-hover:translate-x-1 transition-transform">View <ArrowRight className="w-3 h-3" /></div>
+                    <h4 className="text-sm font-semibold text-slate-900 dark:text-white">Available Tasks</h4>
+                    <p className="text-xs text-slate-500 mt-1">Browse and accept delivery tasks from approved victim requests.</p>
+                    <div className="flex items-center gap-1 text-xs text-purple-500 mt-3 group-hover:translate-x-1 transition-transform">Browse <ArrowRight className="w-3 h-3" /></div>
+                </Link>
+                <Link href="/volunteer/deliveries" className="group rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 hover:border-teal-300 dark:hover:border-teal-500/30 hover:shadow-md transition-all">
+                    <PackageCheck className="w-6 h-6 text-teal-500 mb-2" />
+                    <h4 className="text-sm font-semibold text-slate-900 dark:text-white">My Deliveries</h4>
+                    <p className="text-xs text-slate-500 mt-1">Track and update status of your accepted delivery tasks.</p>
+                    <div className="flex items-center gap-1 text-xs text-teal-500 mt-3 group-hover:translate-x-1 transition-transform">Track <ArrowRight className="w-3 h-3" /></div>
                 </Link>
                 <Link href="/volunteer/certifications" className="group rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 hover:border-amber-300 dark:hover:border-amber-500/30 hover:shadow-md transition-all">
                     <Award className="w-6 h-6 text-amber-500 mb-2" />
