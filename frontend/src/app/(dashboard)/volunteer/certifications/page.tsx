@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { Award, Plus, Trash2, Loader2, Calendar } from 'lucide-react'
+import { Award, Plus, Trash2, Loader2, Calendar, ChevronLeft, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { format } from 'date-fns'
 
@@ -18,7 +18,11 @@ export default function VolunteerCertificationsPage() {
     })
 
     const addMut = useMutation({
-        mutationFn: () => api.createCertification(newCert),
+        mutationFn: () => api.createCertification({
+            ...newCert,
+            date_obtained: newCert.date_obtained || null,
+            expiry_date: newCert.expiry_date || null,
+        }),
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['certifications'] })
             setIsAdding(false)
@@ -31,11 +35,17 @@ export default function VolunteerCertificationsPage() {
         onSuccess: () => queryClient.invalidateQueries({ queryKey: ['certifications'] })
     })
 
+    // Must be before any early return to satisfy Rules of Hooks
+    const [certPage, setCertPage] = useState(1)
+
     if (isLoading) {
         return <div className="flex h-64 items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-blue-500" /></div>
     }
 
     const certList = Array.isArray(certs) ? certs : []
+    const CERTS_PER_PAGE = 6
+    const certTotalPages = Math.max(1, Math.ceil(certList.length / CERTS_PER_PAGE))
+    const pagedCerts = certList.slice((certPage - 1) * CERTS_PER_PAGE, certPage * CERTS_PER_PAGE)
 
     return (
         <div className="space-y-6">
@@ -104,6 +114,11 @@ export default function VolunteerCertificationsPage() {
                             {addMut.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save Certificate'}
                         </button>
                     </div>
+                    {addMut.isError && (
+                        <p className="text-xs text-red-500 mt-2">
+                            {(addMut.error as any)?.message || 'Failed to create certification. Please try again.'}
+                        </p>
+                    )}
                 </div>
             )}
 
@@ -115,7 +130,7 @@ export default function VolunteerCertificationsPage() {
                         <p className="text-sm text-slate-500 mt-1">Add your credentials to unlock higher-tier deployments.</p>
                     </div>
                 ) : (
-                    certList.map((cert: any) => (
+                    pagedCerts.map((cert: any) => (
                         <div key={cert.id} className="relative group p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 shadow-sm hover:shadow-lg transition-all overflow-hidden flex flex-col">
                             <div className="absolute -right-4 -top-4 w-24 h-24 bg-blue-500/10 rounded-full blur-2xl pointer-events-none group-hover:bg-blue-500/20 transition-all opacity-0 group-hover:opacity-100"></div>
 
@@ -164,6 +179,30 @@ export default function VolunteerCertificationsPage() {
                     ))
                 )}
             </div>
+
+            {/* Pagination */}
+            {certTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                    <p className="text-xs text-slate-400">{certList.length} certification{certList.length !== 1 ? 's' : ''}</p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setCertPage(p => Math.max(1, p - 1))}
+                            disabled={certPage <= 1}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            <ChevronLeft className="w-3 h-3" /> Prev
+                        </button>
+                        <span className="text-xs font-bold text-slate-500">{certPage} / {certTotalPages}</span>
+                        <button
+                            onClick={() => setCertPage(p => Math.min(certTotalPages, p + 1))}
+                            disabled={certPage >= certTotalPages}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            Next <ChevronRight className="w-3 h-3" />
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

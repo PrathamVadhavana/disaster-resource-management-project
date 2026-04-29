@@ -5,7 +5,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import {
     PackageCheck, Search, MapPin, Loader2, ChevronDown, ChevronUp,
-    Truck, CheckCircle2, AlertTriangle, X, Upload, KeyRound
+    Truck, CheckCircle2, AlertTriangle, X, Upload, KeyRound,
+    ChevronLeft, ChevronRight
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -70,6 +71,13 @@ export default function VolunteerDeliveriesPage() {
         })
     }, [requests, search, statusFilter])
 
+    // Pagination
+    const [delPage, setDelPage] = useState(1)
+    const DEL_PER_PAGE = 8
+    const delTotalPages = Math.max(1, Math.ceil(filtered.length / DEL_PER_PAGE))
+    const pagedFiltered = filtered.slice((delPage - 1) * DEL_PER_PAGE, delPage * DEL_PER_PAGE)
+    useMemo(() => { setDelPage(1) }, [search, statusFilter])
+
     const stats = {
         total: requests.length,
         active: requests.filter((r: any) => ['assigned', 'in_progress', 'volunteered'].includes(r.status)).length,
@@ -130,7 +138,7 @@ export default function VolunteerDeliveriesPage() {
 
             {/* Delivery Cards */}
             <div className="space-y-3">
-                {filtered.map((req: any) => {
+                {pagedFiltered.map((req: any) => {
                     const myStatus = req.my_entry?.status || req.status
                     const sc = STATUS_CONFIG[myStatus] || STATUS_CONFIG.assigned
                     const icon = RESOURCE_ICONS[req.resource_type?.toLowerCase()] || '📦'
@@ -221,6 +229,30 @@ export default function VolunteerDeliveriesPage() {
                     <PackageCheck className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600 mb-3" />
                     <p className="text-sm font-medium text-slate-900 dark:text-white">No deliveries yet</p>
                     <p className="text-xs text-slate-500 mt-1">Accept tasks from the Assignments page to see them here</p>
+                </div>
+            )}
+
+            {/* Pagination */}
+            {delTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                    <p className="text-xs text-slate-400">{filtered.length} deliver{filtered.length !== 1 ? 'ies' : 'y'}</p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setDelPage(p => Math.max(1, p - 1))}
+                            disabled={delPage <= 1}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            <ChevronLeft className="w-3 h-3" /> Prev
+                        </button>
+                        <span className="text-xs font-bold text-slate-500">{delPage} / {delTotalPages}</span>
+                        <button
+                            onClick={() => setDelPage(p => Math.min(delTotalPages, p + 1))}
+                            disabled={delPage >= delTotalPages}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            Next <ChevronRight className="w-3 h-3" />
+                        </button>
+                    </div>
                 </div>
             )}
 

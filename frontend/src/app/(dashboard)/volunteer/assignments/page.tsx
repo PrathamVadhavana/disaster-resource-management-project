@@ -6,7 +6,7 @@ import { api } from '@/lib/api'
 import {
     Package, Search, MapPin, Clock, AlertTriangle,
     CheckCircle2, Loader2, ChevronRight, Calendar,
-    CheckCheck, X, Filter
+    CheckCheck, X, Filter, ChevronLeft
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -64,6 +64,15 @@ export default function VolunteerTasksPage() {
             return matchSearch && matchResource
         })
     }, [tasks, search, resourceFilter])
+
+    // Pagination
+    const [taskPage, setTaskPage] = useState(1)
+    const TASKS_PER_PAGE = 8
+    const taskTotalPages = Math.max(1, Math.ceil(filtered.length / TASKS_PER_PAGE))
+    const pagedTasks = filtered.slice((taskPage - 1) * TASKS_PER_PAGE, taskPage * TASKS_PER_PAGE)
+
+    // Reset page when filters change
+    useMemo(() => { setTaskPage(1) }, [search, resourceFilter])
 
     const stats = {
         total: tasks.length,
@@ -129,7 +138,7 @@ export default function VolunteerTasksPage() {
 
             {/* Task Cards */}
             <div className="space-y-3">
-                {filtered.map((task: any) => {
+                {pagedTasks.map((task: any) => {
                     const ps = PRIORITY_STYLES[task.priority] || PRIORITY_STYLES.medium
                     const icon = RESOURCE_ICONS[task.resource_type?.toLowerCase()] || '📦'
                     return (
@@ -194,6 +203,30 @@ export default function VolunteerTasksPage() {
                     <Package className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600 mb-3" />
                     <p className="text-sm font-medium text-slate-900 dark:text-white">No tasks found</p>
                     <p className="text-xs text-slate-500 mt-1">Tasks appear when victims raise requests and admin approves them</p>
+                </div>
+            )}
+
+            {/* Pagination */}
+            {taskTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                    <p className="text-xs text-slate-400">{filtered.length} task{filtered.length !== 1 ? 's' : ''}</p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setTaskPage(p => Math.max(1, p - 1))}
+                            disabled={taskPage <= 1}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            <ChevronLeft className="w-3 h-3" /> Prev
+                        </button>
+                        <span className="text-xs font-bold text-slate-500">{taskPage} / {taskTotalPages}</span>
+                        <button
+                            onClick={() => setTaskPage(p => Math.min(taskTotalPages, p + 1))}
+                            disabled={taskPage >= taskTotalPages}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            Next <ChevronRight className="w-3 h-3" />
+                        </button>
+                    </div>
                 </div>
             )}
 

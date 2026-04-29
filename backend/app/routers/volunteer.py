@@ -36,6 +36,10 @@ class VolunteerProfileUpdate(BaseModel):
     assets: list[str] | None = None
     availability_status: str | None = None
     bio: str | None = None
+    # Extra fields stored in users.metadata
+    experience: str | None = None
+    emergency_contact: str | None = None
+    languages: list[str] | None = None
 
 
 class CheckInBody(BaseModel):
@@ -102,21 +106,45 @@ async def get_volunteer_profile(volunteer=Depends(require_volunteer)):
     """Get the volunteer's extended profile (skills, availability, etc.)."""
     user_id = str(volunteer.get("id"))
     resp = await db_admin.table("volunteer_profiles").select("*").eq("user_id", user_id).maybe_single().async_execute()
-    if not resp.data:
-        profile = {"user_id": user_id, "skills": [], "assets": [], "availability_status": "available"}
-        insert_resp = await db_admin.table("volunteer_profiles").insert(profile).async_execute()
-        return insert_resp.data[0] if insert_resp.data else profile
-    return resp.data
+    profile_data = resp.data
+    if not profile_data:
+        profile_data = {"user_id": user_id, "skills": [], "assets": [], "availability_status": "available"}
+        insert_resp = await db_admin.table("volunteer_profiles").insert(profile_data).async_execute()
+        profile_data = insert_resp.data[0] if insert_resp.data else profile_data
+
+    # Merge extra fields from users.metadata
+    try:
+        user_resp = await db_admin.table("users").select("metadata").eq("id", user_id).maybe_single().async_execute()
+        meta = (user_resp.data or {}).get("metadata") or {}
+        vol_meta = meta.get("volunteer_extra", {})
+        if isinstance(profile_data, dict):
+            profile_data["experience"] = vol_meta.get("experience", "")
+            profile_data["emergency_contact"] = vol_meta.get("emergency_contact", "")
+            profile_data["languages"] = vol_meta.get("languages", [])
+    except Exception:
+        pass
+
+    return profile_data
 
 
 @router.put("/profile")
 async def update_volunteer_profile(data: VolunteerProfileUpdate, volunteer=Depends(require_volunteer)):
     """Update the volunteer's extended profile."""
     user_id = str(volunteer.get("id"))
-    update_data = {k: v for k, v in data.dict().items() if v is not None}
+    raw = data.dict()
+
+    # Separate DB-native fields from extra fields
+    extra_fields = {}
+    for key in ("experience", "emergency_contact", "languages"):
+        val = raw.pop(key, None)
+        if val is not None:
+            extra_fields[key] = val
+
+    update_data = {k: v for k, v in raw.items() if v is not None}
     update_data["updated_at"] = datetime.now(UTC).isoformat()
 
-    existing = await db_admin.table("volunteer_profiles").select("id").eq("user_id", user_id).maybe_single().async_execute()
+    # Upsert volunteer_profiles row  (PK is user_id, not id)
+    existing = await db_admin.table("volunteer_profiles").select("user_id").eq("user_id", user_id).maybe_single().async_execute()
     if not existing.data:
         update_data["user_id"] = user_id
         resp = await db_admin.table("volunteer_profiles").insert(update_data).async_execute()
@@ -125,7 +153,82 @@ async def update_volunteer_profile(data: VolunteerProfileUpdate, volunteer=Depen
 
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to update profile")
-    return resp.data[0]
+
+    # Store extra fields in users.metadata.volunteer_extra
+    if extra_fields:
+        try:
+            user_resp = await db_admin.table("users").select("metadata").eq("id", user_id).maybe_single().async_execute()
+            meta = (user_resp.data or {}).get("metadata") or {}
+            vol_meta = meta.get("volunteer_extra", {})
+            vol_meta.update(extra_fields)
+            meta["volunteer_extra"] = vol_meta
+            await db_admin.table("users").update({"metadata": meta, "updated_at": datetime.now(UTC).isoformat()}).eq("id", user_id).async_execute()
+        except Exception:
+            pass  # Non-critical — profile core fields already saved
+
+    result = resp.data[0]
+    result.update(extra_fields)
+    return result
+
+
+# ── Triage: Nearby unverified requests with victim details ────────────────────
+
+
+@router.get("/triage/nearby")
+async def get_triage_requests(
+    volunteer=Depends(require_volunteer),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(6, ge=1, le=50),
+):
+    """Return unverified resource requests enriched with victim details."""
+    user_id = str(volunteer.get("id"))
+    offset = (page - 1) * page_size
+
+    # Count total unverified requests
+    count_resp = (
+        await db_admin.table("resource_requests")
+        .select("id", count="exact")
+        .eq("is_verified", False)
+        .async_execute()
+    )
+    total = count_resp.count if count_resp.count is not None else len(count_resp.data or [])
+
+    # Fetch page of unverified requests
+    resp = (
+        await db_admin.table("resource_requests")
+        .select("id, victim_id, resource_type, description, priority, quantity, latitude, longitude, address_text, status, created_at")
+        .eq("is_verified", False)
+        .order("created_at", desc=True)
+        .range(offset, offset + page_size - 1)
+        .async_execute()
+    )
+    requests = resp.data or []
+
+    # Enrich with victim details from users table
+    victim_ids = list({r["victim_id"] for r in requests if r.get("victim_id")})
+    victim_map = {}
+    if victim_ids:
+        v_resp = (
+            await db_admin.table("users")
+            .select("id, full_name, email")
+            .in_("id", victim_ids)
+            .async_execute()
+        )
+        victim_map = {v["id"]: v for v in (v_resp.data or [])}
+
+    for req in requests:
+        victim = victim_map.get(req.get("victim_id"), {})
+        req["victim_name"] = victim.get("full_name", "Unknown")
+        req["victim_email"] = victim.get("email", "")
+        req["location_name"] = req.get("address_text") or "Nearby Zone"
+
+    return {
+        "requests": requests,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, -(-total // page_size)),  # ceil division
+    }
 
 
 # ── Available tasks ───────────────────────────────────────────────────────────

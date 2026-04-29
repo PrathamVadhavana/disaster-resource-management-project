@@ -6,7 +6,7 @@ import { api } from '@/lib/api'
 import {
     Rocket, Search, MapPin, Calendar, Clock,
     CheckCircle2, Loader2, ChevronDown, ChevronUp,
-    LogOut, AlertTriangle, X
+    LogOut, AlertTriangle, X, ChevronLeft, ChevronRight
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -82,6 +82,13 @@ export default function VolunteerDeploymentsPage() {
             return matchSearch && matchStatus
         })
     }, [ops, search, statusFilter])
+
+    // Pagination
+    const [opsPage, setOpsPage] = useState(1)
+    const OPS_PER_PAGE = 8
+    const opsTotalPages = Math.max(1, Math.ceil(filtered.length / OPS_PER_PAGE))
+    const pagedOps = filtered.slice((opsPage - 1) * OPS_PER_PAGE, opsPage * OPS_PER_PAGE)
+    useMemo(() => { setOpsPage(1) }, [search, statusFilter])
 
     const stats = {
         total: ops.length,
@@ -249,7 +256,7 @@ export default function VolunteerDeploymentsPage() {
 
             {/* Ops list */}
             <div className="space-y-3">
-                {filtered.map((op: any) => {
+                {pagedOps.map((op: any) => {
                     const sc = STATUS_COLORS[op.status] || STATUS_COLORS.completed
                     const isExpanded = expanded === op.id
                     return (
@@ -326,6 +333,30 @@ export default function VolunteerDeploymentsPage() {
                     <Rocket className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600 mb-3" />
                     <p className="text-sm font-medium text-slate-900 dark:text-white">No deployments yet</p>
                     <p className="text-xs text-slate-500 mt-1">Check into a disaster zone to start logging your deployments</p>
+                </div>
+            )}
+
+            {/* Pagination */}
+            {opsTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                    <p className="text-xs text-slate-400">{filtered.length} deployment{filtered.length !== 1 ? 's' : ''}</p>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setOpsPage(p => Math.max(1, p - 1))}
+                            disabled={opsPage <= 1}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            <ChevronLeft className="w-3 h-3" /> Prev
+                        </button>
+                        <span className="text-xs font-bold text-slate-500">{opsPage} / {opsTotalPages}</span>
+                        <button
+                            onClick={() => setOpsPage(p => Math.min(opsTotalPages, p + 1))}
+                            disabled={opsPage >= opsTotalPages}
+                            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 text-xs font-semibold text-slate-600 dark:text-slate-300 disabled:opacity-40 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
+                        >
+                            Next <ChevronRight className="w-3 h-3" />
+                        </button>
+                    </div>
                 </div>
             )}
         </div>

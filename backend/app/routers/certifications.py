@@ -71,13 +71,17 @@ async def list_certifications(user_id: str = Depends(get_current_user_id)):
 @router.post("/certifications")
 async def create_certification(body: CertificationCreate, user_id: str = Depends(get_current_user_id)):
     """Add a new certification."""
-    status = _compute_status(body.expiry_date)
+    # Normalise empty strings to None so PostgreSQL accepts them as NULL dates
+    date_obtained = body.date_obtained if body.date_obtained else None
+    expiry_date = body.expiry_date if body.expiry_date else None
+
+    status = _compute_status(expiry_date)
     row = {
         "user_id": user_id,
         "name": body.name,
         "issuer": body.issuer or "Self-reported",
-        "date_obtained": body.date_obtained,
-        "expiry_date": body.expiry_date,
+        "date_obtained": date_obtained,
+        "expiry_date": expiry_date,
         "status": status,
     }
     resp = await db_admin.table("volunteer_certifications").insert(row).async_execute()

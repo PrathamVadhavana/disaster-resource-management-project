@@ -192,6 +192,9 @@ export const api = {
         apiFetch(`/api/ml/evaluation-reports/generate${qs(params)}`, { method: 'POST' }),
 
     // ━━ Volunteer ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    getTriageRequests: (params?: { page?: number; page_size?: number }) =>
+        apiFetch(`/api/volunteer/triage/nearby${qs(params)}`),
+
     getCertifications: () =>
         apiFetch('/api/volunteer/certifications'),
 

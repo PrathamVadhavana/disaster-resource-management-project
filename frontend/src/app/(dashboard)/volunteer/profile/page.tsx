@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth-provider'
 import {
@@ -34,6 +34,8 @@ export default function VolunteerProfilePage() {
     const [saved, setSaved] = useState(false)
     const [switchError, setSwitchError] = useState('')
     const [switchMessage, setSwitchMessage] = useState('')
+    const [saveError, setSaveError] = useState('')
+    const queryClient = useQueryClient()
 
     // Profile fields from auth
     const [fullName, setFullName] = useState('')
@@ -64,19 +66,21 @@ export default function VolunteerProfilePage() {
 
     useEffect(() => {
         if (profileData && typeof profileData === 'object') {
+            const d = profileData as any
             setVolProfile({
-                skills: profileData.skills ?? [],
-                availability: profileData.availability ?? 'On-call',
-                experience: profileData.experience ?? '',
-                emergencyContact: profileData.emergencyContact ?? '',
-                languages: profileData.languages ?? [],
-                bio: profileData.bio ?? '',
+                skills: d.skills ?? [],
+                availability: d.availability_status ?? d.availability ?? 'On-call',
+                experience: d.experience ?? '',
+                emergencyContact: d.emergency_contact ?? d.emergencyContact ?? '',
+                languages: d.languages ?? [],
+                bio: d.bio ?? '',
             })
         }
     }, [profileData])
 
     const handleSave = async () => {
         setSaving(true)
+        setSaveError('')
         try {
             // Update basic profile via auth
             await updateProfile({ full_name: fullName, phone, organization })
@@ -91,11 +95,15 @@ export default function VolunteerProfilePage() {
                 languages: volProfile.languages,
             })
 
+            // Refetch to ensure UI is in sync
+            queryClient.invalidateQueries({ queryKey: ['volunteer-profile'] })
+
             setSaved(true)
             setEditing(false)
             setTimeout(() => setSaved(false), 3000)
-        } catch (e) {
+        } catch (e: any) {
             console.error('Failed to save profile:', e)
+            setSaveError(e?.message || 'Failed to save profile. Please try again.')
         } finally {
             setSaving(false)
         }
@@ -158,6 +166,13 @@ export default function VolunteerProfilePage() {
                     )}
                 </div>
             </div>
+
+            {/* Save error display */}
+            {saveError && (
+                <div className="rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 p-3 text-sm text-red-600 dark:text-red-400">
+                    {saveError}
+                </div>
+            )}
 
             {/* Avatar & Basic Info */}
             <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
