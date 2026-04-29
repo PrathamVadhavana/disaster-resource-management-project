@@ -197,6 +197,7 @@ async def notify_request_status_change(
     admin_id: str | None = None,
     rejection_reason: str | None = None,
     admin_note: str | None = None,
+    actor_role: str | None = None,
 ):
     """Send notification to victim and create audit trail entry for a status change."""
     template = NOTIFICATION_TEMPLATES.get(new_status)
@@ -219,12 +220,15 @@ async def notify_request_status_change(
     if admin_note:
         details = f"{details or ''}\n[Admin Note] {admin_note}".strip()
 
+    # Resolve actor role: use explicit param, fall back to "admin" if admin_id, else "system"
+    resolved_role = actor_role or ("admin" if admin_id else "system")
+
     # Audit trail
     await create_audit_entry(
         request_id=request_id,
         action=f"status_changed_to_{new_status}",
         actor_id=admin_id,
-        actor_role="admin" if admin_id else "system",
+        actor_role=resolved_role,
         old_status=old_status,
         new_status=new_status,
         details=details,

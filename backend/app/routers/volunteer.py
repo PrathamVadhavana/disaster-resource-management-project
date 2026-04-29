@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.database import db_admin
 from app.dependencies import require_verified_volunteer, require_volunteer
-from app.services.notification_service import generate_delivery_code, notify_all_admins
+from app.services.notification_service import generate_delivery_code, notify_all_admins, notify_request_status_change
 
 router = APIRouter()
 security = HTTPBearer()
@@ -270,7 +270,7 @@ async def list_available_tasks(
     location_ids = list({disaster_map.get(t.get("disaster_id"), {}).get("location_id") for t in tasks if disaster_map.get(t.get("disaster_id"), {}).get("location_id")})
     location_map = {}
     if location_ids:
-        loc_resp = await db_admin.table("locations").select("id, name, region").in_("id", location_ids).async_execute()
+        loc_resp = await db_admin.table("locations").select("id, name, city").in_("id", location_ids).async_execute()
         location_map = {loc["id"]: loc for loc in (loc_resp.data or [])}
 
     for task in tasks:
@@ -575,6 +575,21 @@ async def update_delivery_status(
         description=f"Volunteer '{vol_name}' updated delivery to '{body.new_status}' for request {request_id[:8]}...",
         metadata={"new_status": body.new_status, "proof_url": body.proof_url},
     )
+
+    # Audit trail + victim notification with correct actor_role
+    try:
+        await notify_request_status_change(
+            request_id=request_id,
+            victim_id=req.get("victim_id", ""),
+            resource_type=req.get("resource_type", "resources"),
+            old_status=current_status,
+            new_status=body.new_status,
+            admin_id=user_id,
+            admin_note=body.notes,
+            actor_role="volunteer",
+        )
+    except Exception:
+        pass
 
     if body.new_status == "delivered":
         await notify_all_admins(

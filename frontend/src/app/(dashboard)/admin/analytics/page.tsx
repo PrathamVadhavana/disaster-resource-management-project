@@ -69,7 +69,7 @@ function MetricCard({
                             </span>
                         </div>
                     )}
-                    {sub && !trend && <p className="text-[11px] text-slate-400 mt-0.5">{sub}</p>}
+                    {sub && !trend && <div className="text-[11px] text-slate-400 mt-0.5">{sub}</div>}
                 </div>
                 <div className={cn('w-10 h-10 rounded-xl bg-gradient-to-br flex items-center justify-center', gradient)}>
                     <Icon className="w-5 h-5 text-white" />

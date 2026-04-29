@@ -7,7 +7,7 @@ import {
     ShieldCheck, Camera, MapPin,
     CheckCircle2, AlertCircle, XCircle,
     Loader2, ClipboardList, Info, Zap,
-    ChevronLeft, ChevronRight, Clock, Mail, User, ImageIcon
+    ChevronLeft, ChevronRight, Clock, Mail, User, ImageIcon, Eye
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -20,6 +20,7 @@ export function VerificationHub() {
     const [notes, setNotes] = useState('')
     const [view, setView] = useState<'verify' | 'assignments'>('verify')
     const [page, setPage] = useState(1)
+    const [expandedIds, setExpandedIds] = useState<string[]>([])
 
     // Photo upload state
     const [photoUrl, setPhotoUrl] = useState<string | null>(null)
@@ -174,40 +175,59 @@ export function VerificationHub() {
                                                         × {req.quantity || '?'}
                                                     </span>
                                                 </h4>
-                                                <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[400px]">
+                                            <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[400px]">
                                                     {req.description || 'No description provided'}
                                                 </p>
-
-                                                {/* Victim details row */}
-                                                <div className="flex items-center gap-4 mt-2 flex-wrap text-[11px] text-slate-400">
-                                                    {req.victim_name && (
-                                                        <span className="flex items-center gap-1">
-                                                            <User className="w-3 h-3" /> {req.victim_name}
-                                                        </span>
-                                                    )}
-                                                    {req.victim_email && (
-                                                        <span className="flex items-center gap-1">
-                                                            <Mail className="w-3 h-3" /> {req.victim_email}
-                                                        </span>
-                                                    )}
-                                                    {req.created_at && (
-                                                        <span className="flex items-center gap-1">
-                                                            <Clock className="w-3 h-3" /> {new Date(req.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                                        </span>
-                                                    )}
-                                                    <span className="flex items-center gap-1">
-                                                        <MapPin className="w-3 h-3" /> {req.location_name || req.address_text || 'Nearby Zone'}
-                                                    </span>
-                                                </div>
                                             </div>
                                         </div>
-                                        <button
-                                            onClick={() => setSelectedRequest(req)}
-                                            className="px-3 py-1.5 rounded-xl bg-emerald-500 text-white text-[10px] font-black uppercase tracking-wider hover:bg-emerald-600 transition-colors shadow-lg shadow-emerald-500/20 shrink-0 ml-4"
-                                        >
-                                            Verify
-                                        </button>
+                                        <div className="flex items-center gap-2 shrink-0 ml-4">
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); setExpandedIds(prev => prev.includes(req.id) ? prev.filter((x: string) => x !== req.id) : [...prev, req.id]) }}
+                                                className={cn(
+                                                    "p-1.5 rounded-lg transition-colors",
+                                                    expandedIds.includes(req.id)
+                                                        ? "bg-blue-100 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400"
+                                                        : "text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5 hover:text-slate-600"
+                                                )}
+                                                title="Toggle victim details"
+                                            >
+                                                <Eye className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={() => setSelectedRequest(req)}
+                                                className="px-3 py-1.5 rounded-xl bg-emerald-500 text-white text-[10px] font-black uppercase tracking-wider hover:bg-emerald-600 transition-colors shadow-lg shadow-emerald-500/20"
+                                            >
+                                                Verify
+                                            </button>
+                                        </div>
                                     </div>
+
+                                    {/* Collapsible victim details */}
+                                    {expandedIds.includes(req.id) && (
+                                        <div className="mt-3 pt-3 border-t border-slate-100 dark:border-white/5">
+                                            <div className="flex items-center gap-4 flex-wrap text-[11px] text-slate-400">
+                                                {req.victim_name && (
+                                                    <span className="flex items-center gap-1">
+                                                        <User className="w-3 h-3" /> {req.victim_name}
+                                                    </span>
+                                                )}
+                                                {req.victim_email && (
+                                                    <span className="flex items-center gap-1">
+                                                        <Mail className="w-3 h-3" /> {req.victim_email}
+                                                    </span>
+                                                )}
+                                                {req.created_at && (
+                                                    <span className="flex items-center gap-1">
+                                                        <Clock className="w-3 h-3" /> {new Date(req.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                                    </span>
+                                                )}
+                                                <span className="flex items-center gap-1">
+                                                    <MapPin className="w-3 h-3" /> {req.location_name || req.address_text || 'Nearby Zone'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     <div className="mt-4 pt-3 border-t border-slate-100 dark:border-white/5 flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-tighter">
                                         <span className="flex items-center gap-1"><MapPin className="w-3 h-3" /> {req.location_name || 'Nearby Zone'}</span>
                                         <span className="text-amber-500">Unverified</span>

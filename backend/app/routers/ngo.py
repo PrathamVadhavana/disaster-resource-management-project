@@ -812,6 +812,7 @@ async def update_delivery_status(
             new_status=body.new_status,
             admin_id=ngo_id,
             admin_note=body.notes,
+            actor_role="ngo",
         )
 
         # Send delivery code to victim when delivered
@@ -911,6 +912,7 @@ async def update_fulfillment_status(
             new_status=body.status,
             admin_id=ngo_id,
             admin_note=body.notes,
+            actor_role="ngo",
         )
     except Exception as e:
         print(f"Error notifying victim: {e}")
