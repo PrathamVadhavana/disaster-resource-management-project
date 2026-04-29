@@ -137,8 +137,12 @@ export default function VolunteerDeliveriesPage() {
                     const isExpanded = expanded === req.id
                     return (
                         <div key={req.id} className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] overflow-hidden">
-                            <button onClick={() => setExpanded(isExpanded ? null : req.id)}
-                                className="w-full text-left p-5 flex items-center gap-4">
+                            <div
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => setExpanded(isExpanded ? null : req.id)}
+                                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(isExpanded ? null : req.id) } }}
+                                className="w-full text-left p-5 flex items-center gap-4 cursor-pointer">
                                 <span className="text-2xl shrink-0">{icon}</span>
                                 <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -171,7 +175,7 @@ export default function VolunteerDeliveriesPage() {
                                     )}
                                     {isExpanded ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
                                 </div>
-                            </button>
+                            </div>
 
                             {isExpanded && (
                                 <div className="px-5 pb-5 border-t border-slate-100 dark:border-white/5">

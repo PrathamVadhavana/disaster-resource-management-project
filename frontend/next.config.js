@@ -3,10 +3,7 @@ const path = require('path')
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
-  devIndicators: {
-    appIsrStatus: false,
-    buildActivity: false,
-  },
+  devIndicators: false,
   outputFileTracingRoot: path.join(__dirname),
   images: {
     remotePatterns: [
