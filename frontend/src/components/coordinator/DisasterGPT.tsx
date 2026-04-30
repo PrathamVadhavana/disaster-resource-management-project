@@ -391,7 +391,7 @@ export function DisasterGPT({ embedded = false, onClose }: DisasterGPTProps) {
     function handleFeedback(i: number, feedback: 'positive' | 'negative') { setMessages(prev => prev.map((m, j) => j === i ? { ...m, feedback: m.feedback === feedback ? null : feedback } : m)) }
     function exportChat() { const text = messages.map(m => `${m.role === 'user' ? 'You' : 'DisasterGPT'}: ${m.content}`).join('\n\n'); const blob = new Blob([text], { type: 'text/plain' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `chat-${new Date().toISOString().slice(0, 10)}.txt`; a.click(); URL.revokeObjectURL(url) }
 
-    function renderContent(content: string) {
+    function renderContent(content: string, role: string = 'assistant') {
         const lines = content.split('\n'); const elements: React.ReactNode[] = []; let inCode = false; let code = ''; let inTable = false; let table: string[][] = []
         const flushTable = () => { if (table.length) { elements.push(<div key={`t-${elements.length}`} className="overflow-x-auto my-3"><table className="min-w-full text-sm border border-slate-200 dark:border-slate-700 rounded-lg"><thead className="bg-slate-100 dark:bg-slate-800"><tr>{table[0].map((c, i) => <th key={i} className="px-3 py-2 text-left font-semibold border-b border-slate-200 dark:border-slate-600 text-slate-800 dark:text-slate-100">{c.trim()}</th>)}</tr></thead><tbody>{table.slice(1).map((r, ri) => <tr key={ri}>{r.map((c, ci) => <td key={ci} className="px-3 py-2 border-b border-slate-100 dark:border-slate-700 text-slate-700 dark:text-slate-300">{formatInline(c.trim())}</td>)}</tr>)}</tbody></table></div>); table = [] } inTable = false }
         function formatInline(text: string): React.ReactNode {
@@ -400,7 +400,7 @@ export function DisasterGPT({ embedded = false, onClose }: DisasterGPTProps) {
             let lastIndex = 0; let match
             while ((match = regex.exec(text)) !== null) {
                 if (match.index > lastIndex) parts.push(text.slice(lastIndex, match.index))
-                parts.push(<strong key={`b-${match.index}`} className="font-semibold text-slate-900 dark:text-white">{match[1]}</strong>)
+                parts.push(<strong key={`b-${match.index}`} className={`font-semibold ${role === 'user' ? 'text-white' : 'text-slate-900 dark:text-white'}`}>{match[1]}</strong>)
                 lastIndex = regex.lastIndex
             }
             if (lastIndex < text.length) parts.push(text.slice(lastIndex))
@@ -417,7 +417,7 @@ export function DisasterGPT({ embedded = false, onClose }: DisasterGPTProps) {
             if (line.trim().startsWith('- ')) { elements.push(<div key={i} className="flex items-start gap-2 mb-1 ml-2 text-sm text-slate-700 dark:text-slate-300"><span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-slate-500 shrink-0" /><span className="leading-relaxed">{formatInline(line.trim().slice(2))}</span></div>); return }
             if (line.trim() === '') { elements.push(<br key={i} />); return }
             if (line.startsWith('*') && line.endsWith('*') && !line.startsWith('**')) { elements.push(<p key={i} className="mb-2 text-xs text-slate-500 dark:text-slate-400 italic leading-relaxed">{line.slice(1, -1)}</p>); return }
-            elements.push(<p key={i} className="mb-2 text-sm text-slate-700 dark:text-slate-300 leading-relaxed">{formatInline(line)}</p>)
+            elements.push(<p key={i} className={`mb-2 text-sm leading-relaxed ${role === 'user' ? 'text-white' : 'text-slate-700 dark:text-slate-300'}`}>{formatInline(line)}</p>)
         })
         flushTable(); return elements
     }
@@ -457,7 +457,7 @@ export function DisasterGPT({ embedded = false, onClose }: DisasterGPTProps) {
                             <div className="group">
                                 <div className={`relative rounded-2xl px-4 py-3 shadow-sm ${msg.role === 'user' ? 'bg-gradient-to-br from-blue-600 to-blue-700 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100'}`}>
                                     {msg.role === 'assistant' && <div className="flex items-center gap-2 mb-2"><span className="text-xs font-semibold bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent">DisasterGPT</span><span className="text-xs text-slate-400">•</span><span className="text-xs text-slate-500"><Clock className="w-3 h-3 inline" /> {formatRelativeTime(msg.timestamp)}</span></div>}
-                                    <div className="text-sm whitespace-pre-wrap leading-relaxed">{renderContent(msg.content)}</div>
+                                    <div className="text-sm whitespace-pre-wrap leading-relaxed">{renderContent(msg.content, msg.role)}</div>
                                     {msg.role === 'assistant' && msg.context_data && <InlineChart contextData={msg.context_data} />}
                                     {msg.role === 'assistant' && msg.action_cards && msg.action_cards.length > 0 && <div className="mt-2">{msg.action_cards.map((card, ci) => <ActionCardComponent key={ci} card={card} sessionId={sessionId || ''} onActionComplete={() => {}} onSendChat={handleAutoSend} />)}</div>}
                                     {msg.role === 'assistant' && msg.follow_up_suggestions && msg.follow_up_suggestions.length > 0 && <FollowUpChips suggestions={msg.follow_up_suggestions} onSelect={handleFollowUpSelect} />}
