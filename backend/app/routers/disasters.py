@@ -37,6 +37,9 @@ async def get_disasters(
         # Fetch disasters without joins to avoid "schema cache" errors
         query = db.table("disasters").select("*")
 
+        # Flag to indicate we want to filter by is_simulated
+        filter_real = True
+
         if status:
             status_list = [s.strip() for s in status.split(",") if s.strip()]
             if len(status_list) == 1:
@@ -67,10 +70,22 @@ async def get_disasters(
             query = query.or_(
                 f"title.ilike.%{search_lower}%,location_name.ilike.%{search_lower}%,type.ilike.%{search_lower}%"
             )
-
         query = query.order("created_at", desc=True).range(offset, offset + limit - 1)
 
-        response = await query.async_execute()
+        if filter_real:
+            try:
+                # Clone query to avoid mutating original if we need fallback
+                real_query = query.eq("is_simulated", False)
+                response = await real_query.async_execute()
+            except Exception as e:
+                if "is_simulated" in str(e):
+                    logger.warning("is_simulated column missing, falling back to all disasters")
+                    response = await query.async_execute()
+                else:
+                    raise
+        else:
+            response = await query.async_execute()
+            
         base_disasters = response.data or []
 
         # Manual enrichment for locations
@@ -271,30 +286,47 @@ async def get_disaster_dropdown_options():
 
         thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
 
-        response = (
-            await db.table("disasters")
-            .select("id, title, type, severity, status, created_at")
+        query = (
+            db.table("disasters")
+            .select("id, title, type, severity, status, created_at, location_name, is_simulated")
             .or_(f"status.eq.active,created_at.gte.{thirty_days_ago}")
             .order("created_at", desc=True)
             .limit(50)
-            .async_execute()
         )
+        
+        try:
+            query = query.eq("is_simulated", False)
+            response = await query.async_execute()
+        except Exception as e:
+            if "is_simulated" in str(e):
+                logger.warning("is_simulated column missing in disasters table, falling back to all disasters")
+                # Fallback: remove the filter and retry
+                response = await db.table("disasters")\
+                    .select("id, title, type, severity, status, created_at, location_name")\
+                    .or_(f"status.eq.active,created_at.gte.{thirty_days_ago}")\
+                    .order("created_at", desc=True)\
+                    .limit(50)\
+                    .async_execute()
+            else:
+                raise
 
         disasters = response.data or []
 
         # Format for dropdown
         options = []
         for d in disasters:
-            status_badge = "🔴 Active" if d.get("status") == "active" else "✅ Resolved"
             options.append(
                 {
                     "id": d["id"],
-                    "label": f"{d['title']} ({d['type'].title()}) - {status_badge}",
                     "value": d["id"],
-                    "type": d["type"],
-                    "status": d["status"],
-                    "severity": d["severity"],
-                    "created_at": d["created_at"],
+                    "title": d.get("title"),
+                    "label": d.get("title") or d.get("type", "").title(),
+                    "type": d.get("type"),
+                    "status": d.get("status"),
+                    "severity": d.get("severity"),
+                    "location_name": d.get("location_name"),
+                    "created_at": d.get("created_at"),
+                    "is_simulated": d.get("is_simulated", False),
                 }
             )
 

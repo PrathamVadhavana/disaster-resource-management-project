@@ -83,12 +83,14 @@ export default function AdminCoordinatorPage() {
         timestamp: Date
     }>>([])
 
-    // Fetch disasters for filter dropdown
-    const { data: disasterList } = useQuery({
+    // Fetch disasters for filter dropdown (includes active + recent resolved)
+    const { data: disasterList, isLoading: disastersLoading } = useQuery({
         queryKey: ['disasters-for-filter'],
-        queryFn: () => api.getDisasters({ status: 'active', limit: 50 }),
+        queryFn: () => api.getDisasterDropdownOptions(),
         retry: false,
     })
+    
+    const [filterSearch, setFilterSearch] = useState('')
 
     // ── Hotspot queries ──────────────────────────────────────
     const { data: hotspots, isLoading: hotspotsLoading } = useQuery({
@@ -280,56 +282,112 @@ export default function AdminCoordinatorPage() {
                         {showDisasterFilter && (
                             <>
                                 <div className="fixed inset-0 z-10" onClick={() => setShowDisasterFilter(false)} />
-                                <div className="absolute right-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl shadow-xl z-20 py-1 min-w-[250px] max-h-[300px] overflow-y-auto">
-                                    <button
-                                        onClick={() => { setSelectedDisasterId(null); setShowDisasterFilter(false) }}
-                                        className={cn(
-                                            "flex items-center gap-2 w-full px-4 py-2 text-sm text-left transition-colors",
-                                            !selectedDisasterId
-                                                ? "bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400"
-                                                : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5"
-                                        )}
-                                    >
-                                        <Globe className="w-4 h-4" />
-                                        All Disasters
-                                    </button>
-                                    {Array.isArray(disasterList) && (() => {
-                                        // Group disasters by type for cleaner UI
-                                        const DISASTER_TYPE_EMOJI: Record<string, string> = {
-                                            earthquake: '🌍', wildfire: '🔥', fire: '🔥',
-                                            flood: '🌊', cyclone: '🌀', hurricane: '🌀',
-                                            tsunami: '🌊', drought: '☀️', landslide: '⛰️',
-                                            volcano: '🌋', storm: '⛈️', other: '⚠️',
-                                        }
-                                        return disasterList.map((d: any) => {
-                                            const dtype = (d.type || d.disaster_type || 'other').toLowerCase()
-                                            const emoji = DISASTER_TYPE_EMOJI[dtype] || DISASTER_TYPE_EMOJI.other
-                                            return (
-                                                <button
-                                                    key={d.id}
-                                                    onClick={() => { setSelectedDisasterId(d.id); setShowDisasterFilter(false) }}
-                                                    className={cn(
-                                                        "flex items-center gap-2 w-full px-4 py-2 text-sm text-left transition-colors",
-                                                        selectedDisasterId === d.id
-                                                            ? "bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400"
-                                                            : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5"
-                                                    )}
-                                                >
-                                                    <span className="text-base shrink-0">{emoji}</span>
-                                                    <div className={cn(
-                                                        "w-2 h-2 rounded-full shrink-0",
-                                                        d.severity === 'critical' ? 'bg-red-500' :
-                                                        d.severity === 'high' ? 'bg-orange-500' :
-                                                        d.severity === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
-                                                    )} />
-                                                    <div className="flex-1 min-w-0">
-                                                        <p className="font-medium truncate">{d.title || d.type}</p>
-                                                        <p className="text-xs text-slate-400 truncate capitalize">{dtype} · {d.location_name || d.locations?.name || 'Unknown location'}</p>
-                                                    </div>
-                                                </button>
+                                <div className="absolute right-0 top-full mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl shadow-xl z-20 py-1 min-w-[280px] max-h-[400px] overflow-hidden flex flex-col">
+                                    {/* Search Bar */}
+                                    <div className="p-2 border-b border-slate-100 dark:border-white/5">
+                                        <div className="relative">
+                                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                                            <input
+                                                type="text"
+                                                placeholder="Search disasters..."
+                                                value={filterSearch}
+                                                onChange={(e) => setFilterSearch(e.target.value)}
+                                                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg bg-slate-50 dark:bg-white/5 border-none focus:ring-1 focus:ring-purple-500 text-slate-900 dark:text-white"
+                                                onClick={(e) => e.stopPropagation()}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="overflow-y-auto">
+                                        <button
+                                            onClick={() => { setSelectedDisasterId(null); setShowDisasterFilter(false); setFilterSearch('') }}
+                                            className={cn(
+                                                "flex items-center gap-2 w-full px-4 py-2.5 text-sm text-left transition-colors",
+                                                !selectedDisasterId
+                                                    ? "bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400"
+                                                    : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5"
+                                            )}
+                                        >
+                                            <Globe className="w-4 h-4" />
+                                            <div className="flex-1">
+                                                <p className="font-semibold">All Disasters</p>
+                                                <p className="text-[10px] text-slate-400">Global operational view</p>
+                                            </div>
+                                        </button>
+
+                                        {Array.isArray(disasterList) && (() => {
+                                            const DISASTER_TYPE_EMOJI: Record<string, string> = {
+                                                earthquake: '🌍', wildfire: '🔥', fire: '🔥',
+                                                flood: '🌊', cyclone: '🌀', hurricane: '🌀',
+                                                tsunami: '🌊', drought: '☀️', landslide: '⛰️',
+                                                volcano: '🌋', storm: '⛈️', other: '⚠️',
+                                            }
+                                            
+                                            const filtered = disasterList.filter((d: any) => 
+                                                !filterSearch || 
+                                                (d.title || d.type || '').toLowerCase().includes(filterSearch.toLowerCase()) ||
+                                                (d.location_name || '').toLowerCase().includes(filterSearch.toLowerCase())
                                             )
-                                        })
-                                    })()}
+
+                                            if (filtered.length === 0) {
+                                                return <div className="px-4 py-8 text-center"><p className="text-xs text-slate-400">No matching disasters</p></div>
+                                            }
+
+                                            // Separate active and resolved
+                                            const active = filtered.filter((d: any) => d.status === 'active')
+                                            const resolved = filtered.filter((d: any) => d.status !== 'active')
+
+                                            const renderList = (items: any[], label: string) => {
+                                                if (items.length === 0) return null
+                                                return (
+                                                    <>
+                                                        <div className="px-4 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50/50 dark:bg-white/[0.02]">
+                                                            {label}
+                                                        </div>
+                                                        {items.map((d: any) => {
+                                                            const dtype = (d.type || d.disaster_type || 'other').toLowerCase()
+                                                            const emoji = DISASTER_TYPE_EMOJI[dtype] || DISASTER_TYPE_EMOJI.other
+                                                            return (
+                                                                <button
+                                                                    key={d.id}
+                                                                    onClick={() => { setSelectedDisasterId(d.id); setShowDisasterFilter(false); setFilterSearch('') }}
+                                                                    className={cn(
+                                                                        "flex items-center gap-3 w-full px-4 py-3 text-sm text-left transition-colors border-l-2",
+                                                                        selectedDisasterId === d.id
+                                                                            ? "bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500"
+                                                                            : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5 border-transparent"
+                                                                    )}
+                                                                >
+                                                                    <span className="text-xl shrink-0">{emoji}</span>
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <div className="flex items-center justify-between gap-2 mb-0.5">
+                                                                            <p className="font-bold truncate">{d.title || d.type}</p>
+                                                                            <div className={cn(
+                                                                                "w-1.5 h-1.5 rounded-full shrink-0",
+                                                                                d.severity === 'critical' ? 'bg-red-500' :
+                                                                                d.severity === 'high' ? 'bg-orange-500' :
+                                                                                d.severity === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
+                                                                            )} />
+                                                                        </div>
+                                                                        <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate capitalize">
+                                                                            {d.location_name || 'Global Area'} · {d.status === 'active' ? 'Ongoing' : 'Resolved'}
+                                                                        </p>
+                                                                    </div>
+                                                                </button>
+                                                            )
+                                                        })}
+                                                    </>
+                                                )
+                                            }
+
+                                            return (
+                                                <>
+                                                    {renderList(active, 'Active Disasters')}
+                                                    {renderList(resolved, 'Recently Resolved')}
+                                                </>
+                                            )
+                                        })()}
+                                    </div>
                                 </div>
                             </>
                         )}
@@ -1132,7 +1190,7 @@ export default function AdminCoordinatorPage() {
             {activeTab === 'spread' && (
                 <div className="space-y-4">
                     <ErrorBoundary>
-                        <PINNHeatmap />
+                        <PINNHeatmap disasterId={selectedDisasterId || undefined} />
                     </ErrorBoundary>
                 </div>
             )}

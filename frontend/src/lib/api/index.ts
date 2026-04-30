@@ -93,6 +93,9 @@ export const api = {
     deleteDisaster: (id: string) =>
         apiFetch(`/api/disasters/${id}`, { method: 'DELETE' }),
 
+    getDisasterDropdownOptions: () =>
+        apiFetch('/api/disasters/dropdown/options'),
+
     // ━━ Resources ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getResources: (params?: { status?: string; type?: string; limit?: number }) =>
         apiFetch(`/api/resources${qs(params)}`),
@@ -176,6 +179,9 @@ export const api = {
     resolveAnomaly: (alertId: string, status: string = 'resolved') =>
         apiFetch(`/api/ml/anomalies/${alertId}/resolve`, { method: 'PATCH', body: JSON.stringify({ status }) }),
 
+    clearStaleAnomalies: () =>
+        apiFetch('/api/ml/anomalies/stale', { method: 'DELETE' }),
+
     getAccuracySummary: () =>
         apiFetch('/api/ml/accuracy-summary'),
 
@@ -190,6 +196,9 @@ export const api = {
 
     generateEvaluationReport: (params?: { model_type?: string; period_days?: number }) =>
         apiFetch(`/api/ml/evaluation-reports/generate${qs(params)}`, { method: 'POST' }),
+
+    seedDemoOutcomes: () =>
+        apiFetch('/api/ml/outcomes/seed-demo', { method: 'POST' }),
 
     // ━━ Volunteer ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     getTriageRequests: (params?: { page?: number; page_size?: number }) =>

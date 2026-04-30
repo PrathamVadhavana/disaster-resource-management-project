@@ -288,6 +288,31 @@ class QueryBuilder:
 
         return query
 
+    def _is_missing_is_simulated_error(self, error: Exception) -> bool:
+        """Check if error is due to missing 'is_simulated' column."""
+        # Try the PGRST204 schema cache error extractor
+        missing_col = _extract_missing_column_from_error(error)
+        if missing_col == "is_simulated":
+            return True
+        # Check for raw PostgreSQL undefined_column error
+        msg = str(error).lower()
+        if "is_simulated" in msg and ("does not exist" in msg or "column" in msg):
+            return True
+        return False
+
+    def _strip_is_simulated(self):
+        """Remove all references to is_simulated from filters, negations, and select columns."""
+        # Remove filters on is_simulated
+        self._filters = [(c, o, v) for (c, o, v) in self._filters if c != "is_simulated"]
+        # Remove negations on is_simulated
+        self._negations = [(c, v) for (c, v) in self._negations if c != "is_simulated"]
+        # Remove is_simulated from select columns if explicit
+        if self._columns != "*":
+            cols = [c.strip() for c in self._columns.split(',')]
+            cols = [c for c in cols if c != "is_simulated"]
+            # If no columns left, select all (or could select "id" but "*" is safe)
+            self._columns = ','.join(cols) if cols else "*"
+
     # ── EXECUTE ───────────────────────────────────────────────────────────
 
     def execute(self) -> APIResponse:
@@ -296,24 +321,34 @@ class QueryBuilder:
         No global lock — the Supabase client is thread-safe and each query
         runs as an independent HTTP request through httpx connection pooling.
         """
-        try:
-            sb = _get_sb()
-            tbl = sb.table(self._table)
+        for attempt in range(2):
+            try:
+                sb = _get_sb()
+                tbl = sb.table(self._table)
 
-            if self._operation == "select":
-                return self._exec_select(tbl)
-            if self._operation == "insert":
-                return self._exec_insert(tbl)
-            if self._operation == "update":
-                return self._exec_update(tbl)
-            if self._operation == "upsert":
-                return self._exec_upsert(tbl)
-            if self._operation == "delete":
-                return self._exec_delete(tbl)
-            raise ValueError(f"Unknown operation: {self._operation}")
-        except Exception as e:
-            logger.error("DB query failed [%s on %s]: %s", self._operation, self._table, e)
-            raise
+                if self._operation == "select":
+                    return self._exec_select(tbl)
+                if self._operation == "insert":
+                    return self._exec_insert(tbl)
+                if self._operation == "update":
+                    return self._exec_update(tbl)
+                if self._operation == "upsert":
+                    return self._exec_upsert(tbl)
+                if self._operation == "delete":
+                    return self._exec_delete(tbl)
+                raise ValueError(f"Unknown operation: {self._operation}")
+            except Exception as e:
+                # On first failure, if the error is due to missing is_simulated column,
+                # strip all is_simulated references and retry once.
+                if attempt == 0 and self._is_missing_is_simulated_error(e):
+                    logger.warning(
+                        "is_simulated column not found – retrying query without is_simulated filter/select. "
+                        "Run database migration to add is_simulated columns."
+                    )
+                    self._strip_is_simulated()
+                    continue
+                logger.error("DB query failed [%s on %s]: %s", self._operation, self._table, e)
+                raise
 
     async def async_execute(self) -> APIResponse:
         """Execute the query in a thread pool to avoid blocking the event loop."""

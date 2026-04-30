@@ -1249,6 +1249,23 @@ RECOMMENDATIONS:
 
     # -- List & get reports --
 
+    async def get_disaster_reports(self, disaster_id: str, limit: int = 10) -> list[dict]:
+        try:
+            # First try direct filter on disaster_id
+            query = (
+                db_admin.table("situation_reports")
+                .select("id, report_date, report_type, title, summary, key_metrics, status, generation_time_ms, created_at")
+                .eq("disaster_id", disaster_id)
+                .order("report_date", desc=True)
+                .limit(limit)
+            )
+            resp = await query.async_execute()
+            return resp.data or []
+        except Exception as e:
+            # Fallback: if disaster_id column missing, try filtering by title/metadata or just return latest
+            logger.warning(f"Failed to get reports for disaster {disaster_id}, falling back: {e}")
+            return await self.list_reports(limit=limit)
+
     async def list_reports(self, report_type: str | None = None, limit: int = 20, offset: int = 0) -> list[dict]:
         try:
             query = (

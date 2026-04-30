@@ -587,6 +587,66 @@ class MLService:
         )
         return result
 
+    async def get_disaster_forecast(self, disaster_id: str, horizon_hours: int = 48) -> dict[str, Any]:
+        """Get severity forecast for a specific disaster by fetching its current state."""
+        try:
+            resp = await db_admin.table("disasters").select("*").eq("id", disaster_id).single().async_execute()
+            disaster = resp.data
+            if not disaster:
+                return {"error": "Disaster not found"}
+
+            # Map disaster record to features expected by predict_severity
+            features = {
+                "disaster_type": disaster.get("type", "other"),
+                "severity": disaster.get("severity", "medium"),
+                "affected_population": disaster.get("affected_population", 0),
+            }
+            # Merge metadata if present
+            meta = disaster.get("metadata") or {}
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except: meta = {}
+            features.update(meta)
+
+            return await self.predict_severity(features)
+        except Exception as e:
+            logger.error(f"Error in get_disaster_forecast for {disaster_id}: {e}")
+            return {"error": str(e)}
+
+    async def get_disaster_spread(self, disaster_id: str, time_hours: int = 24) -> dict[str, Any]:
+        """Get spread prediction for a specific disaster by fetching its current state."""
+        try:
+            resp = await db_admin.table("disasters").select("*").eq("id", disaster_id).single().async_execute()
+            disaster = resp.data
+            if not disaster:
+                return {"error": "Disaster not found"}
+
+            # Map disaster record to features expected by predict_spread
+            features = {
+                "disaster_type": disaster.get("type", "wildfire"),
+                "current_area": disaster.get("affected_area_km2", 0),
+                "days_active": 1, # Default
+            }
+            # Calculate days_active from start_date
+            start_date = disaster.get("start_date")
+            if start_date:
+                try:
+                    dt = datetime.fromisoformat(str(start_date).replace('Z', '+00:00'))
+                    features["days_active"] = max(1, (datetime.now(UTC) - dt).days)
+                except: pass
+
+            # Merge metadata if present
+            meta = disaster.get("metadata") or {}
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except: meta = {}
+            features.update(meta)
+
+            return await self.predict_spread(features)
+        except Exception as e:
+            logger.error(f"Error in get_disaster_spread for {disaster_id}: {e}")
+            return {"error": str(e)}
+
     async def predict_spread(self, features: dict[str, Any]) -> dict[str, Any]:
         """Predict disaster spread with confidence interval."""
         if not self.models_loaded:
@@ -667,6 +727,33 @@ class MLService:
         )
 
         return result
+
+    async def get_disaster_recommendations(self, disaster_id: str) -> list[str]:
+        """Get resource recommendations for a specific disaster."""
+        try:
+            resp = await db_admin.table("disasters").select("*").eq("id", disaster_id).single().async_execute()
+            disaster = resp.data
+            if not disaster:
+                return ["Error: Disaster not found"]
+
+            # Map disaster record to features expected by predict_impact
+            features = {
+                "disaster_type": disaster.get("type", "other"),
+                "severity_label": disaster.get("severity", "medium"),
+                "affected_population": disaster.get("affected_population", 0),
+            }
+            # Merge metadata if present
+            meta = disaster.get("metadata") or {}
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except: meta = {}
+            features.update(meta)
+
+            impact_res = await self.predict_impact(features)
+            return impact_res.get("recommendations", [])
+        except Exception as e:
+            logger.error(f"Error in get_disaster_recommendations for {disaster_id}: {e}")
+            return [f"Error: {str(e)}"]
 
     async def predict_impact(self, features: dict[str, Any]) -> dict[str, Any]:
         """Predict casualties and economic damage using the XGBoost multi-output model."""
@@ -1141,7 +1228,7 @@ class MLService:
         Label: actual severity (low=0, medium=1, high=2, critical=3)
         """
         try:
-            # Query disasters with non-null severity and not predicted
+            # Query disasters with non-null severity and not predicted, excluding simulated data
             disasters_resp = (
                 await db_admin.table("disasters")
                 .select(
@@ -1149,6 +1236,7 @@ class MLService:
                 )
                 .neq("status", "predicted")
                 .not_.is_("severity", None)
+                .eq("is_simulated", False)  # Only real disaster data
                 .execute()
             )
             disasters = disasters_resp.data or []
@@ -1304,6 +1392,7 @@ class MLService:
                     await db_admin.table("disasters")
                     .select("id, type, severity, metadata")
                     .in_("id", disaster_ids)
+                    .eq("is_simulated", False)  # Only real disasters
                     .execute()
                 )
                 for d in disasters_resp.data or []:
@@ -1328,10 +1417,11 @@ class MLService:
             severity_map = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
             for p in predictions:
-                if not p.get("disaster_id"):
+                did = p.get("disaster_id")
+                if not did or did not in disasters:
                     continue
 
-                disaster = disasters.get(p["disaster_id"], {})
+                disaster = disasters[did]
                 outcome = outcomes.get(p["id"], {})
 
                 # Extract features from metadata JSON
@@ -1428,6 +1518,7 @@ class MLService:
                     await db_admin.table("disasters")
                     .select("id, type, severity, affected_population, estimated_damage")
                     .in_("id", disaster_ids)
+                    .eq("is_simulated", False)  # Only real disasters
                     .execute()
                 )
                 for d in disasters_resp.data or []:
@@ -1452,10 +1543,11 @@ class MLService:
             severity_map = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
             for p in predictions:
-                if not p.get("disaster_id"):
+                did = p.get("disaster_id")
+                if not did or did not in disasters:
                     continue
 
-                disaster = disasters.get(p["disaster_id"], {})
+                disaster = disasters[did]
                 outcome = outcomes.get(p["id"], {})
 
                 # Get features
@@ -1529,10 +1621,11 @@ class MLService:
         Label: quantity_consumed_tomorrow (shift by 1 day)
         """
         try:
-            # Query resource consumption log
+            # Query resource consumption log (real only)
             resp = (
                 await db_admin.table("resource_consumption_log")
                 .select("id, resource_type, timestamp, quantity_consumed")
+                .eq("is_simulated", False)  # Exclude simulated consumption data
                 .order("timestamp", desc=False)
                 .execute()
             )

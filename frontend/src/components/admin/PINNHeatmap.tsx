@@ -195,11 +195,14 @@ export function PINNHeatmap({ latitude, longitude, disasterId }: PINNHeatmapProp
     const [currentTime, setCurrentTime] = useState(6)
     const [isExpanded, setIsExpanded] = useState(false)
     const [showContours, setShowContours] = useState(true)
-    const [selectedDisasterId, setSelectedDisasterId] = useState<string | null>(() => {
-        if (disasterId) return disasterId
-        if (typeof window !== 'undefined') return localStorage.getItem('spreadmap_disaster') || null
-        return null
-    })
+    const [selectedDisasterId, setSelectedDisasterId] = useState<string | null>(disasterId || null)
+
+    // Sync with prop changes
+    useEffect(() => {
+        if (disasterId !== undefined) {
+            setSelectedDisasterId(disasterId)
+        }
+    }, [disasterId])
     const [hoveredCell, setHoveredCell] = useState<{
         row: number; col: number; val: number; lat: number; lon: number; tti?: number | null;
     } | null>(null)

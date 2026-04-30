@@ -1211,6 +1211,26 @@ Response:"""
 
     # -- Query log retrieval --
 
+    async def get_disaster_query_history(
+        self, disaster_id: str, user_id: str | None = None, limit: int = 20
+    ) -> list[dict]:
+        try:
+            query = (
+                db_admin.table("nl_query_log")
+                .select("id, query_text, query_type, response_text, tools_called, latency_ms, feedback_rating, model_used, created_at")
+                .eq("disaster_id", disaster_id)
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            if user_id:
+                query = query.eq("user_id", user_id)
+            
+            resp = await query.async_execute()
+            return resp.data or []
+        except Exception as e:
+            logger.warning(f"Failed to get query history for disaster {disaster_id}, falling back: {e}")
+            return await self.get_query_history(user_id=user_id, limit=limit)
+
     async def get_query_history(
         self, user_id: str | None = None, session_id: str | None = None, limit: int = 20
     ) -> list[dict]:

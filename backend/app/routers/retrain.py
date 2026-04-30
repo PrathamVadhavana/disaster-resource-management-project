@@ -25,7 +25,7 @@ MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 
 
 class RetrainRequest(BaseModel):
-    regenerate_data: bool = False
+    regenerate_data: bool = False  # Deprecated: synthetic data generation disabled - only real victim data used
     random_state: int = 42
 
 
@@ -155,18 +155,17 @@ def _run_training(
     try:
         _training_in_progress = True
         logger.info("Background model retraining started")
+
+        # Deprecated: regenerate_data is ignored - only real victim data is used
+        if regenerate_data:
+            logger.warning("regenerate_data=True ignored: synthetic data generation is disabled. Using only real victim data.")
+
         backup_path = _create_models_backup()
         baseline_metrics = _capture_baseline_metrics(ml_service)
         promotion_reasons: list[str] = ["Accepted: no candidate metrics available for guardrail check"]
         should_promote = True
 
-        if regenerate_data:
-            logger.info("Regenerating synthetic training data …")
-            from scripts.generate_training_data import main as gen_data
-
-            gen_data()
-
-        # Use Supabase-based training (primary method)
+        # Use Supabase-based training (primary method) - no synthetic fallback
         import asyncio
 
         loop = asyncio.new_event_loop()
@@ -179,14 +178,20 @@ def _run_training(
             should_promote, promotion_reasons = _should_promote_candidate(baseline_metrics, candidate_metrics)
             logger.info("Retrain guardrail decision: promote=%s reasons=%s", should_promote, promotion_reasons)
 
-            # If all models skipped (insufficient data), fall back to CSV-based training
             all_skipped = all(r.get("skipped") for r in results.values())
             if all_skipped:
-                logger.warning("All Supabase models skipped due to insufficient data, falling back to CSV-based training")
-                from app.services.training.train_all import train_all
-
-                manifest = train_all(model_dir=MODEL_DIR)
-                logger.info(f"CSV-based fallback training complete — version {manifest['version']}")
+                logger.error("All models skipped due to insufficient real Supabase data - no training performed. "
+                            "Real victim data requirement not met.")
+                should_promote = False
+            else:
+                # Extract version from results for logging
+                version = None
+                for r in results.values():
+                    if r.get("version"):
+                        version = r["version"]
+                        break
+                if version:
+                    logger.info(f"Trained models version: {version}")
 
             if not should_promote:
                 logger.warning("Retrain guardrail rejected candidate models; restoring previous model snapshot")
@@ -265,8 +270,8 @@ async def retrain_models_sync(
 ):
     """
     Trigger model retraining synchronously (blocks until done).
-    Uses Supabase-based training as primary method, falls back to CSV-based
-    training if insufficient Supabase data.
+    Uses Supabase-based training with real disaster data only.
+    Fails with 400 if insufficient data for training.
     Useful for CI / scripted pipelines.
     """
     global _training_in_progress
@@ -281,30 +286,28 @@ async def retrain_models_sync(
         promoted = True
 
         if body.regenerate_data:
-            from scripts.generate_training_data import main as gen_data
-
-            gen_data()
+            logger.warning("regenerate_data=True ignored: synthetic data generation is disabled. Using only real victim data.")
 
         # Use Supabase-based training (primary method)
         results = await ml_service.build_training_data_from_supabase()
         candidate_metrics = _extract_candidate_metrics(results)
         promoted, promotion_reasons = _should_promote_candidate(baseline_metrics, candidate_metrics)
 
-        # If all models skipped (insufficient data), fall back to CSV-based training
+        # If all models skipped (insufficient data), fail - no synthetic fallback
         all_skipped = all(r.get("skipped") for r in results.values())
-        version = None
         if all_skipped:
-            logger.warning("All Supabase models skipped due to insufficient data, falling back to CSV-based training")
-            from app.services.training.train_all import train_all
+            logger.error("All models skipped due to insufficient real Supabase data - training aborted.")
+            raise HTTPException(
+                status_code=400,
+                detail="Insufficient real disaster data to train any model. Need at least 10 records per model type."
+            )
 
-            manifest = train_all(model_dir=MODEL_DIR)
-            version = manifest.get("version")
-        else:
-            # Extract version from results
-            for r in results.values():
-                if r.get("version"):
-                    version = r["version"]
-                    break
+        # Extract version from results
+        version = None
+        for r in results.values():
+            if r.get("version"):
+                version = r["version"]
+                break
 
         if not promoted:
             _restore_models_backup(backup_path)
@@ -463,8 +466,41 @@ async def resolve_anomaly(alert_id: str, status: str = "resolved", admin: dict =
     from app.services.anomaly_service import AnomalyDetectionService
 
     svc = AnomalyDetectionService()
-    result = await svc.resolve_alert(alert_id, status=status)
+    result = await svc.resolve_alert(alert_id, status=status, user_id=admin.get("id"))
     return result
+
+
+@router.delete("/anomalies/stale")
+async def cleanup_stale_anomalies():
+    """
+    Archive stale anomaly alerts (older than 3 days).
+    FIX 2: Endpoint to manually trigger cleanup of zombie alerts.
+    This prevents old "critical" alerts from lingering indefinitely.
+    """
+    try:
+        from app.services.anomaly_service import AnomalyDetectionService
+
+        svc = AnomalyDetectionService()
+        result = await svc.cleanup_stale_alerts()
+        cleaned_count = result.get('cleaned', 0)
+        error = result.get('error')
+        
+        logger.info(f"Stale alert cleanup triggered: cleaned={cleaned_count}, error={error}")
+        
+        return {
+            "message": f"Cleaned up {cleaned_count} stale anomaly alerts",
+            "cleaned": cleaned_count,
+            "error": error,
+            "success": True
+        }
+    except Exception as e:
+        logger.error(f"Stale alert cleanup endpoint failed: {e}", exc_info=True)
+        return {
+            "message": "Failed to clean up stale alerts",
+            "cleaned": 0,
+            "error": str(e),
+            "success": False
+        }
 
 
 # ── Outcome Tracking & Accuracy Endpoints ────────────────────────────────────
@@ -491,12 +527,13 @@ async def get_outcomes(
     from app.services.outcome_service import OutcomeTrackingService
 
     svc = OutcomeTrackingService()
-    return await svc.get_outcomes(
+    outcomes = await svc.get_outcomes(
         disaster_id=disaster_id,
         prediction_type=prediction_type,
         limit=limit,
         offset=offset,
     )
+    return {"outcomes": outcomes, "total": len(outcomes)}
 
 
 @router.get("/evaluation-reports")
@@ -509,7 +546,8 @@ async def get_evaluation_reports(
     from app.services.outcome_service import OutcomeTrackingService
 
     svc = OutcomeTrackingService()
-    return await svc.get_evaluation_reports(model_type=model_type, limit=limit)
+    reports = await svc.get_evaluation_reports(model_type=model_type, limit=limit)
+    return {"reports": reports, "total": len(reports)}
 
 
 @router.post("/outcomes/auto-capture")
@@ -523,12 +561,15 @@ async def auto_capture_outcomes(admin: dict = Depends(require_admin)):
 
 
 @router.post("/evaluation-reports/generate")
-async def generate_evaluation_report_endpoint(admin: dict = Depends(require_admin)):
-    """Generate model evaluation reports."""
+async def generate_evaluation_report_endpoint(
+    period_days: int = 30,
+    admin: dict = Depends(require_admin),
+):
+    """Generate model evaluation reports. Falls back to all-time data when the window is empty."""
     from app.services.outcome_service import OutcomeTrackingService
 
     svc = OutcomeTrackingService()
-    reports = await svc.generate_evaluation_report()
+    reports = await svc.generate_evaluation_report(period_days=period_days)
     return {"reports": reports}
 
 
@@ -575,7 +616,6 @@ async def auto_retrain_trigger(admin: dict = Depends(require_admin)):
         # Trigger background training for all models
 
         from app.services.ml_service import MLService
-        from app.services.training.train_all import train_all
 
         # Get ML service for hot-reload
         ml_service = MLService()
@@ -597,8 +637,30 @@ async def auto_retrain_trigger(admin: dict = Depends(require_admin)):
                 baseline_metrics = _capture_baseline_metrics(ml_service)
                 loop.close()
 
-                # Train all models
-                manifest = train_all(model_dir=MODEL_DIR)
+                # Train all models using Supabase real data only (no synthetic fallback)
+                loop2 = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop2)
+                try:
+                    results = loop2.run_until_complete(ml_service.build_training_data_from_supabase())
+                    logger.info(f"Supabase training results: {results}")
+
+                    candidate_metrics = _extract_candidate_metrics(results)
+                    promoted, promotion_reasons = _should_promote_candidate(baseline_metrics, candidate_metrics)
+                    logger.info("Auto-retrain guardrail decision: promote=%s reasons=%s", promoted, promotion_reasons)
+
+                    all_skipped = all(r.get("skipped") for r in results.values())
+                    if all_skipped:
+                        logger.error("All models skipped - insufficient real data. No models updated.")
+                        promoted = False
+
+                    # Extract version from results if any model trained
+                    version = None
+                    for r in results.values():
+                        if r.get("version"):
+                            version = r["version"]
+                            break
+                finally:
+                    loop2.close()
 
                 # Hot-reload models
                 loop = asyncio.new_event_loop()
@@ -614,7 +676,7 @@ async def auto_retrain_trigger(admin: dict = Depends(require_admin)):
                     loop.run_until_complete(ml_service.load_models())
                     loop.close()
 
-                logger.info(f"Auto-retrain complete — version {manifest['version']}")
+                logger.info(f"Auto-retrain complete — version {version or 'no-change'}")
             except Exception:
                 logger.exception("Auto-retrain failed")
                 _restore_models_backup(backup_path)
@@ -677,7 +739,8 @@ async def get_disaster_outcomes(
     from app.services.outcome_service import OutcomeTrackingService
 
     svc = OutcomeTrackingService()
-    return await svc.get_disaster_outcomes(disaster_id=disaster_id, limit=limit)
+    outcomes = await svc.get_outcomes(disaster_id=disaster_id, limit=limit)
+    return {"outcomes": outcomes, "total": len(outcomes)}
 
 
 @router.get("/sitreps/disaster/{disaster_id}")
@@ -894,64 +957,21 @@ async def train_moe_endpoint(
     try:
         # Fetch training data from Supabase
         from app.database import db_admin
-        
+
         resp = await db_admin.table("disasters").select("*").limit(1000).async_execute()
         disasters = resp.data or []
-        
-        # Prepare training data
+
+        # Require real data - do NOT generate synthetic samples
+        if len(disasters) < 30:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient real disaster data for training: got {len(disasters)} disasters, need at least 30. Cannot train without real victim data."
+            )
+
         train_data = []
         val_data = []
-        
-        # If insufficient data, generate synthetic samples with logical correlations
-        if len(disasters) < 30:
-            logger.info("Insufficient real data for high-accuracy training. Generating 100 calibrated synthetic samples.")
-            from ml.moe_disaster_model import DISASTER_TYPES
-            import random
-            
-            # Helper to generate consistent outcome based on type and severity
-            def generate_calibrated_sample(d_type=None, s_level=None):
-                d_type = d_type or random.choice(DISASTER_TYPES)
-                s_level = s_level or random.choice(["low", "medium", "high", "critical"])
-                
-                # Base multipliers
-                sev_mult = {"low": 1, "medium": 5, "high": 20, "critical": 100}[s_level]
-                
-                # Casuality logic
-                base_casualties = random.randint(0, 10)
-                if d_type in ["earthquake", "flood", "tsunami"]:
-                    base_casualties *= 2
-                casualties = int(base_casualties * sev_mult * random.uniform(0.5, 1.5))
-                
-                # Spread logic (Wildfires and Floods spread more)
-                base_area = random.uniform(0.1, 5.0)
-                if d_type in ["wildfire", "flood", "cyclone"]:
-                    base_area *= 10
-                area = base_area * sev_mult * random.uniform(0.8, 1.2)
-                
-                return {
-                    "disaster_type": d_type,
-                    "severity": s_level,
-                    "latitude": random.uniform(-90, 90),
-                    "longitude": random.uniform(-180, 180),
-                    "affected_population": random.randint(100, 1000) * sev_mult,
-                    "temperature": 35 if d_type == "wildfire" else 25,
-                    "humidity": 20 if d_type == "wildfire" else 80 if d_type == "flood" else 50,
-                    "wind_speed": random.uniform(20, 100) if d_type in ["cyclone", "hurricane"] else 10,
-                    "pressure": 1013,
-                    "precipitation": random.uniform(50, 200) if d_type == "flood" else 0,
-                    "population_density": random.uniform(50, 2000),
-                    "current_area": area,
-                    "casualties": casualties,
-                    "damage_usd": area * 10000,
-                }
 
-            # Generate training and validation sets
-            for _ in range(80):
-                train_data.append(generate_calibrated_sample())
-            for _ in range(20):
-                val_data.append(generate_calibrated_sample())
-        else:
-            for i, disaster in enumerate(disasters):
+        for i, disaster in enumerate(disasters):
                 features = {
                     "disaster_type": disaster.get("type", "other"),
                     "severity": disaster.get("severity", "medium"),
