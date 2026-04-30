@@ -114,11 +114,18 @@ function VictimMarkerItem({ marker, isActive, onToggle, onClose, isDark }: { mar
     const descColor = isDark ? '#cbd5e1' : '#475569'
     const metaColor = isDark ? '#94a3b8' : '#64748b'
 
+    // Add a tiny pseudo-random jitter to prevent perfect overlapping of markers
+    // created from the exact same GPS coordinates (e.g. testing from the same browser).
+    const jitterStr = marker.id.substring(0, 4)
+    const jitterVal = parseInt(jitterStr, 16) / 65535 // 0.0 to 1.0
+    const latJitter = (jitterVal - 0.5) * 0.0008 // approx ±40 meters
+    const lonJitter = ((marker.id.charCodeAt(marker.id.length - 1) % 100) / 100 - 0.5) * 0.0008
+    
     return (
         <>
             <Marker
-                longitude={marker.longitude}
-                latitude={marker.latitude}
+                longitude={marker.longitude + lonJitter}
+                latitude={marker.latitude + latJitter}
                 anchor="bottom"
                 onClick={e => {
                     e.originalEvent.stopPropagation()

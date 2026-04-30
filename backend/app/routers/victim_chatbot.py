@@ -237,7 +237,7 @@ async def submit_request(
         if body.address_text:
             insert_data["address_text"] = body.address_text
         if body.people_count > 1:
-            insert_data["people_count"] = body.people_count
+            insert_data["head_count"] = body.people_count
         if body.has_medical_needs:
             insert_data["has_medical_needs"] = True
             insert_data["medical_details"] = body.medical_details or ""

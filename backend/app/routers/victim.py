@@ -405,12 +405,21 @@ async def create_resource_request(
 
         # ── Auto-link to nearest active disaster ─────────
         try:
-            link_result = await auto_link_request(row)
-            if link_result:
-                row["linked_disaster_id"] = link_result.get("disaster_id")
-                print(
-                    f"🌍 Auto-linked to disaster: {link_result.get('disaster_name')} ({link_result.get('distance_km')}km)"
+            lat_val = float(row.get("latitude", 0.0)) if row.get("latitude") else None
+            lon_val = float(row.get("longitude", 0.0)) if row.get("longitude") else None
+            
+            if lat_val is not None and lon_val is not None:
+                link_result = await auto_link_request(
+                    request_id=row.get("id"),
+                    lat=lat_val,
+                    lon=lon_val,
+                    created_at=row.get("created_at")
                 )
+                if link_result:
+                    row["linked_disaster_id"] = link_result.get("disaster_id")
+                    print(
+                        f"🌍 Auto-linked to disaster: {link_result.get('disaster_title', link_result.get('disaster_name'))} ({link_result.get('distance_km')}km)"
+                    )
         except Exception as le:
             print(f"⚠️  Disaster auto-link failed (non-blocking): {le}")
 

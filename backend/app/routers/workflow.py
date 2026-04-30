@@ -1468,20 +1468,19 @@ async def get_spread_heatmap(
     try:
         from app.database import db_admin
         query = db_admin.table("resource_requests").select(
-            "id, latitude, longitude, status, priority, resource_type, description, created_at, disaster_id, head_count, address_text"
+            "id, latitude, longitude, status, priority, resource_type, description, created_at, disaster_id, linked_disaster_id, head_count, address_text"
         )
         
         # If no disaster, find the latest top 1000 requests globally to see active zones
-        # If no disaster, find the latest top 1000 requests globally to see active zones
         if disaster_id:
-            query = query.eq("disaster_id", disaster_id)
+            query = query.or_(f"disaster_id.eq.{disaster_id},linked_disaster_id.eq.{disaster_id}")
         else:
             query = query.order("created_at", desc=True).limit(1000)
 
         # Apply resource categorization filter
         resource_type = body.get("resource_type") or body.get("resourceType")
         if resource_type:
-            query = query.eq("resource_type", resource_type)
+            query = query.ilike("resource_type", resource_type)
             
         query = query.in_("status", ["pending", "in_progress"])
             
