@@ -560,6 +560,76 @@ async def auto_capture_outcomes(admin: dict = Depends(require_admin)):
     return {"captured": len(results), "outcomes": results}
 
 
+# ── [IMPROVEMENT #7] Coordinator correction feedback endpoint ────────────────
+
+class CorrectionRequest(BaseModel):
+    prediction_id: str
+    corrected_severity: str
+    original_severity: str | None = None
+    disaster_id: str | None = None
+    notes: str | None = None
+
+
+@router.post("/outcomes/correction")
+async def submit_severity_correction(
+    body: CorrectionRequest,
+    admin: dict = Depends(require_admin),
+):
+    """
+    [#7] Record a coordinator's manual severity override as high-confidence ground truth.
+
+    When a coordinator disagrees with a model prediction and changes the severity label,
+    that correction is written back to outcome_tracking with correction_confidence=1.0.
+    This makes it count more heavily in accuracy scoring and feeds directly into the
+    next retraining cycle as authoritative labelled data.
+    """
+    from app.services.outcome_service import OutcomeTrackingService
+
+    svc = OutcomeTrackingService()
+    result = await svc.write_correction(
+        prediction_id=body.prediction_id,
+        corrected_severity=body.corrected_severity,
+        original_severity=body.original_severity,
+        disaster_id=body.disaster_id,
+        corrected_by=admin.get("id", "admin"),
+        notes=body.notes,
+    )
+    return {
+        "recorded": True,
+        "outcome_id": result.get("id"),
+        "message": (
+            f"Correction recorded: '{body.original_severity}' → '{body.corrected_severity}'. "
+            "This will be used as ground truth in the next model evaluation."
+        ),
+    }
+
+
+# ── [IMPROVEMENT #8] Recheck stale outcomes endpoint ────────────────────────
+
+@router.post("/outcomes/recheck-stale")
+async def recheck_stale_outcomes_endpoint(admin: dict = Depends(require_admin)):
+    """
+    [#8] Re-evaluate outcomes for still-active disasters whose recheck_after has passed.
+
+    Ongoing disasters keep updating (more casualties, expanding area). Outcomes captured
+    at T+0 become stale. This endpoint refreshes all outcome records whose recheck_after
+    timestamp has elapsed, pulling current values from the live disaster record.
+    Records for resolved disasters are finalised; active ones get a new recheck window.
+    """
+    from app.services.outcome_service import OutcomeTrackingService
+
+    svc = OutcomeTrackingService()
+    rechecked = await svc.recheck_stale_outcomes()
+    return {
+        "refreshed": len(rechecked),
+        "outcomes": rechecked,
+        "message": (
+            f"Re-evaluated {len(rechecked)} outcome record(s) for ongoing disasters. "
+            "Active disasters will be rechecked again in 24 hours."
+        ),
+    }
+
+
 @router.post("/evaluation-reports/generate")
 async def generate_evaluation_report_endpoint(
     period_days: int = 30,

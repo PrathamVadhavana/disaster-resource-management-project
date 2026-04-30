@@ -4,17 +4,45 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useState } from 'react'
 import {
-  Target, TrendingUp, CheckCircle2, AlertTriangle,
+  Target, TrendingUp, TrendingDown, CheckCircle2, AlertTriangle,
   XCircle, RefreshCw, Loader2, BarChart3, ArrowRight,
   ServerCrash, Info, ThumbsUp, ThumbsDown, Minus,
-  RotateCcw, Zap, ClipboardList
+  RotateCcw, Zap, ClipboardList, Activity, Settings2,
+  ChevronDown, ChevronUp, Layers
 } from 'lucide-react'
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface PerClassAccuracy {
+  [cls: string]: number  // e.g. { low: 0.95, medium: 0.80, high: 0.70, critical: 0.55 }
+}
+
+interface PerDisasterTypeAccuracy {
+  [type: string]: number  // e.g. { flood: 0.90, earthquake: 0.60 }
+}
+
+interface ModelAccuracyData {
+  status: string
+  accuracy?: number | null
+  mae?: number | null
+  rmse?: number | null
+  mape?: number | null
+  total_predictions?: number
+  retrain_triggered?: boolean
+  // NEW fields from improved backend
+  last_retrain_date?: string | null       // #11 – retrain status badge
+  accuracy_trend?: number[]              // #10 – 7-day sparkline (0..1 per day)
+  trend_direction?: 'improving' | 'declining' | 'stable'  // #10/#5
+  per_class_accuracy?: PerClassAccuracy  // #12 – confusion matrix per class
+  per_disaster_type?: PerDisasterTypeAccuracy // #2 – per type breakdown
+  business_impact?: {
+    estimated_resources_saved: number
+    over_allocation_prevented_pct: number
+  }
+}
 
 // ─── Plain-English helpers ────────────────────────────────────────────────────
 
-/**
- * Converts a raw accuracy (0-1) into a traffic-light colour + label.
- */
 function accuracyHealth(acc: number | null | undefined): {
   color: string; label: string; textColor: string; bg: string
 } {
@@ -25,9 +53,6 @@ function accuracyHealth(acc: number | null | undefined): {
   return              { color: 'bg-red-500',    label: 'Poor',        textColor: 'text-red-600 dark:text-red-400',    bg: 'bg-red-50 dark:bg-red-500/5' }
 }
 
-/**
- * Converts MAPE to a plain English interpretation.
- */
 function mapeToEnglish(mape: number | null | undefined): string {
   if (mape == null) return 'No data available yet.'
   if (mape <= 5)  return `The model's estimates are very close to reality — off by only ${mape.toFixed(1)}% on average.`
@@ -36,9 +61,15 @@ function mapeToEnglish(mape: number | null | undefined): string {
   return `Estimates are frequently wrong — ${mape.toFixed(1)}% average error. Retraining recommended soon.`
 }
 
-/**
- * Friendly model-type labels for the admin.
- */
+function maeContext(type: string, mae: number | null | undefined): string {
+  if (mae == null) return ''
+  const n = Number(mae)
+  if (type === 'severity') return `(the model's confidence score is off by ${n.toFixed(1)} points on average)`
+  if (type === 'spread')   return `(area estimates are off by ~${n.toFixed(0)} km² on average)`
+  if (type === 'impact')   return `(casualty estimates differ by ~${n.toFixed(0)} from actual reports)`
+  return ''
+}
+
 const MODEL_LABELS: Record<string, { title: string; desc: string; icon: React.ReactNode }> = {
   severity: {
     title: 'Disaster Severity Prediction',
@@ -57,16 +88,20 @@ const MODEL_LABELS: Record<string, { title: string; desc: string; icon: React.Re
   },
 }
 
-/**
- * Plain-English explanation of what "MAE" actually means per model type.
- */
-function maeContext(type: string, mae: number | null | undefined): string {
-  if (mae == null) return ''
-  const n = Number(mae)
-  if (type === 'severity') return `(the model's confidence score is off by ${n.toFixed(1)} points on average)`
-  if (type === 'spread')   return `(area estimates are off by ~${n.toFixed(0)} km² on average)`
-  if (type === 'impact')   return `(casualty estimates differ by ~${n.toFixed(0)} from actual reports)`
-  return ''
+// Colour band for each severity class in the confusion matrix
+const CLASS_COLORS: Record<string, { bg: string; text: string; bar: string }> = {
+  low:      { bg: 'bg-green-50 dark:bg-green-500/5',   text: 'text-green-700 dark:text-green-400',   bar: 'bg-green-500' },
+  medium:   { bg: 'bg-amber-50 dark:bg-amber-500/5',   text: 'text-amber-700 dark:text-amber-400',   bar: 'bg-amber-500' },
+  high:     { bg: 'bg-orange-50 dark:bg-orange-500/5', text: 'text-orange-700 dark:text-orange-400', bar: 'bg-orange-500' },
+  critical: { bg: 'bg-red-50 dark:bg-red-500/5',       text: 'text-red-700 dark:text-red-400',       bar: 'bg-red-500' },
+}
+
+function formatRetrainDate(isoDate: string): string {
+  try {
+    return new Date(isoDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  } catch {
+    return isoDate
+  }
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -94,6 +129,197 @@ function HealthBadge({ acc }: { acc: number | null | undefined }) {
     <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full font-semibold ${h.bg} ${h.textColor}`}>
       {h.label}
     </span>
+  )
+}
+
+/**
+ * #10 — Accuracy Trend Sparkline
+ * Renders a tiny SVG polyline from a 0..1 array.
+ */
+function AccuracySparkline({ trend, direction }: { trend: number[]; direction?: string }) {
+  if (!trend || trend.length < 2) return null
+
+  const W = 96, H = 32, PAD = 2
+  const min = Math.max(0, Math.min(...trend) - 0.05)
+  const max = Math.min(1, Math.max(...trend) + 0.05)
+  const range = max - min || 0.1
+
+  const pts = trend.map((v, i) => {
+    const x = PAD + (i / (trend.length - 1)) * (W - PAD * 2)
+    const y = PAD + (1 - (v - min) / range) * (H - PAD * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+
+  const isGood = direction === 'improving'
+  const isBad  = direction === 'declining'
+  const stroke = isGood ? '#22c55e' : isBad ? '#ef4444' : '#94a3b8'
+  const TrendIcon = isGood ? TrendingUp : isBad ? TrendingDown : Activity
+
+  return (
+    <div className="flex items-center gap-1.5" title={`7-day trend: ${direction || 'stable'}`}>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="overflow-visible">
+        <polyline
+          points={pts}
+          fill="none"
+          stroke={stroke}
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          opacity={0.8}
+        />
+        {/* Dot at the last point */}
+        {(() => {
+          const last = pts.split(' ').pop()!
+          const [lx, ly] = last.split(',')
+          return <circle cx={lx} cy={ly} r={2.5} fill={stroke} />
+        })()}
+      </svg>
+      <TrendIcon className="w-3 h-3 shrink-0" style={{ color: stroke }} />
+    </div>
+  )
+}
+
+/**
+ * #11 — Retrain status badge with date
+ */
+function RetrainBadge({ date, triggered }: { date?: string | null; triggered?: boolean }) {
+  if (!triggered && !date) return null
+  const label = date ? `Retrain queued · ${formatRetrainDate(date)}` : 'Retrain queued'
+  return (
+    <span
+      title="The system automatically queued a retraining job based on accuracy drop"
+      className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400 font-semibold shrink-0"
+    >
+      <Settings2 className="w-3 h-3" />
+      {label}
+    </span>
+  )
+}
+
+/**
+ * #12 — Per-class accuracy breakdown from the confusion matrix
+ */
+function PerClassAccuracyPanel({ perClass }: { perClass: PerClassAccuracy }) {
+  const entries = Object.entries(perClass).sort(([, a], [, b]) => b - a)
+  if (entries.length === 0) return null
+
+  return (
+    <div className="rounded-lg border border-slate-100 dark:border-white/5 p-3 space-y-2">
+      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+        <Layers className="w-3 h-3" /> Per-class accuracy
+      </p>
+      <div className="space-y-1.5">
+        {entries.map(([cls, acc]) => {
+          const pct = Math.min(100, Math.max(0, acc * 100))
+          const colors = CLASS_COLORS[cls.toLowerCase()] ?? {
+            bg: 'bg-slate-50 dark:bg-white/5',
+            text: 'text-slate-700 dark:text-slate-300',
+            bar: 'bg-slate-400',
+          }
+          return (
+            <div key={cls} className="flex items-center gap-2">
+              <span className={`text-[10px] font-semibold uppercase tracking-wide w-14 shrink-0 ${colors.text}`}>
+                {cls}
+              </span>
+              <div className="flex-1 h-1.5 bg-slate-100 dark:bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-700 ${colors.bar}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <span className={`text-[11px] font-bold w-9 text-right shrink-0 ${colors.text}`}>
+                {pct.toFixed(0)}%
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      {/* Flag the weakest class */}
+      {(() => {
+        const [weakClass, weakAcc] = entries.reduce((a, b) => b[1] < a[1] ? b : a)
+        if (weakAcc < 0.70) {
+          return (
+            <p className="text-[10px] text-amber-600 dark:text-amber-400 flex items-center gap-1 mt-1">
+              <AlertTriangle className="w-3 h-3 shrink-0" />
+              <span>
+                <span className="font-semibold capitalize">{weakClass}</span> predictions are only {(weakAcc * 100).toFixed(0)}% accurate — this class may need more training data.
+              </span>
+            </p>
+          )
+        }
+        return null
+      })()}
+    </div>
+  )
+}
+
+/**
+ * #2 — Per-disaster-type accuracy breakdown
+ */
+function PerDisasterTypePanel({ perType }: { perType: PerDisasterTypeAccuracy }) {
+  const [expanded, setExpanded] = useState(false)
+  const entries = Object.entries(perType).sort(([, a], [, b]) => b - a)
+  if (entries.length === 0) return null
+
+  const shown = expanded ? entries : entries.slice(0, 3)
+
+  return (
+    <div className="rounded-lg border border-slate-100 dark:border-white/5 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+          <BarChart3 className="w-3 h-3" /> Accuracy by disaster type
+        </p>
+        {entries.length > 3 && (
+          <button
+            onClick={() => setExpanded(e => !e)}
+            className="flex items-center gap-0.5 text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+          >
+            {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            {expanded ? 'Less' : `+${entries.length - 3} more`}
+          </button>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        {shown.map(([type, acc]) => {
+          const pct = Math.min(100, Math.max(0, acc * 100))
+          const h = accuracyHealth(acc)
+          return (
+            <div key={type} className="flex items-center gap-2">
+              <span className="text-[10px] font-medium text-slate-600 dark:text-slate-400 w-20 shrink-0 capitalize truncate" title={type}>
+                {type}
+              </span>
+              <div className="flex-1 h-1.5 bg-slate-100 dark:bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all duration-700 ${h.color}`}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <span className={`text-[11px] font-bold w-9 text-right shrink-0 ${h.textColor}`}>
+                {pct.toFixed(0)}%
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      {/* Highlight worst type if it diverges significantly */}
+      {(() => {
+        const [bestType, bestAcc] = entries[0]
+        const [worstType, worstAcc] = entries[entries.length - 1]
+        if (entries.length > 1 && bestAcc - worstAcc >= 0.20) {
+          return (
+            <p className="text-[10px] text-orange-600 dark:text-orange-400 flex items-start gap-1 mt-1">
+              <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+              <span>
+                <span className="font-semibold capitalize">{worstType}</span> ({(worstAcc * 100).toFixed(0)}%) trails{' '}
+                <span className="font-semibold capitalize">{bestType}</span> ({(bestAcc * 100).toFixed(0)}%) by{' '}
+                {((bestAcc - worstAcc) * 100).toFixed(0)} points — consider selective retraining.
+              </span>
+            </p>
+          )
+        }
+        return null
+      })()}
+    </div>
   )
 }
 
@@ -272,7 +498,7 @@ export default function OutcomeTrackingPanel({
           ) : accuracyData ? (
             <div className="space-y-3">
               {(['severity', 'spread', 'impact'] as const).map(ptype => {
-                const d = accuracyData[ptype]
+                const d = accuracyData[ptype] as ModelAccuracyData | undefined
                 const hasData = d && d.status !== 'no_data'
                 const meta = MODEL_LABELS[ptype]
                 const health = accuracyHealth(hasData ? d.accuracy : null)
@@ -303,13 +529,33 @@ export default function OutcomeTrackingPanel({
                         </div>
                       </div>
 
-                      {d?.retrain_triggered && (
-                        <span className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400 font-semibold shrink-0">
-                          <RotateCcw className="w-3 h-3" />
-                          Auto-retraining
-                        </span>
-                      )}
+                      {/* #10 sparkline + #11 retrain badge in the same corner */}
+                      <div className="flex flex-col items-end gap-1.5 shrink-0">
+                        {hasData && d.accuracy_trend && d.accuracy_trend.length >= 2 && (
+                          <AccuracySparkline trend={d.accuracy_trend} direction={d.trend_direction} />
+                        )}
+                        {/* #11 — retrain badge */}
+                        {(d?.retrain_triggered || d?.last_retrain_date) && (
+                          <RetrainBadge date={d.last_retrain_date} triggered={d.retrain_triggered} />
+                        )}
+                      </div>
                     </div>
+
+                    {/* #10 — trend narrative (only when there's a clear direction) */}
+                    {hasData && d.trend_direction && d.trend_direction !== 'stable' && d.accuracy_trend && (
+                      <div className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg ${
+                        d.trend_direction === 'improving'
+                          ? 'bg-green-50 dark:bg-green-500/5 text-green-700 dark:text-green-400'
+                          : 'bg-red-50 dark:bg-red-500/5 text-red-700 dark:text-red-400'
+                      }`}>
+                        {d.trend_direction === 'improving'
+                          ? <TrendingUp className="w-3 h-3 shrink-0" />
+                          : <TrendingDown className="w-3 h-3 shrink-0" />}
+                        {d.trend_direction === 'improving'
+                          ? `Accuracy has been improving over the last ${d.accuracy_trend.length} days — model is learning well.`
+                          : `Accuracy has been declining over the last ${d.accuracy_trend.length} days — retraining may be needed soon.`}
+                      </div>
+                    )}
 
                     {hasData ? (
                       <div className="space-y-3">
@@ -331,6 +577,16 @@ export default function OutcomeTrackingPanel({
                                 : `❌ Too many wrong predictions (${((1 - d.accuracy) * 100).toFixed(0)} out of 100). Retraining is recommended.`}
                             </p>
                           </div>
+                        )}
+
+                        {/* #12 — Per-class confusion matrix breakdown (severity model only, but generic) */}
+                        {d.per_class_accuracy && Object.keys(d.per_class_accuracy).length > 0 && (
+                          <PerClassAccuracyPanel perClass={d.per_class_accuracy} />
+                        )}
+
+                        {/* #2 — Per-disaster-type breakdown */}
+                        {d.per_disaster_type && Object.keys(d.per_disaster_type).length > 0 && (
+                          <PerDisasterTypePanel perType={d.per_disaster_type} />
                         )}
 
                         {/* MAPE in plain English */}
@@ -356,17 +612,17 @@ export default function OutcomeTrackingPanel({
                             {
                               label: 'Avg. Error (MAE)',
                               val: d.mae != null ? d.mae.toFixed(2) : '—',
-                              tip: 'Mean Absolute Error — lower is better. Shown as "—" for classification models like Severity (no numeric error).',
+                              tip: 'Mean Absolute Error — lower is better. Shown as "—" for classification models like Severity.',
                             },
                             {
                               label: 'Error Spread (RMSE)',
                               val: d.rmse != null ? d.rmse.toFixed(2) : '—',
-                              tip: 'Root Mean Squared Error — lower is better. Shown as "—" for classification models.',
+                              tip: 'Root Mean Squared Error — lower is better. High values mean occasional catastrophic errors.',
                             },
                             {
                               label: '% Error (MAPE)',
                               val: d.mape != null ? `${d.mape.toFixed(1)}%` : '—',
-                              tip: 'Mean Absolute Percentage Error — lower is better. Shown as "—" for classification models.',
+                              tip: 'Mean Absolute Percentage Error — lower is better.',
                             },
                           ].map(s => (
                             <div
@@ -384,7 +640,7 @@ export default function OutcomeTrackingPanel({
                             </div>
                           ))}
                         </div>
-                        
+
                         {/* Business Impact KPIs */}
                         {d.business_impact && (d.business_impact.estimated_resources_saved > 0 || d.business_impact.over_allocation_prevented_pct > 0) && (
                           <div className="grid grid-cols-2 gap-2">
@@ -564,7 +820,6 @@ export default function OutcomeTrackingPanel({
                   <tbody className="divide-y divide-slate-100 dark:divide-white/5">
                     {(outcomesData?.outcomes || []).map((o: any) => {
                       const errPct = o.casualty_error_pct ?? o.area_error_pct ?? null
-                      const isClose = errPct != null && Math.abs(errPct) <= 15
                       const label = MODEL_LABELS[o.prediction_type] || { title: o.prediction_type, icon: null }
                       return (
                         <tr key={o.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02]">
@@ -670,13 +925,11 @@ export default function OutcomeTrackingPanel({
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
                       <HealthBadge acc={report.accuracy} />
-                      {report.retrain_triggered && (
-                        <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400 font-semibold">
-                          <RotateCcw className="w-3 h-3" />
-                          Retraining triggered
-                        </span>
+                      {/* #11 — retrain badge on evaluation reports too */}
+                      {(report.retrain_triggered || report.last_retrain_date) && (
+                        <RetrainBadge date={report.last_retrain_date} triggered={report.retrain_triggered} />
                       )}
                     </div>
                   </div>
@@ -694,11 +947,18 @@ export default function OutcomeTrackingPanel({
                     </div>
                   )}
 
+                  {/* #12 — per-class accuracy on evaluation reports */}
+                  {report.per_class_accuracy && Object.keys(report.per_class_accuracy).length > 0 && (
+                    <div className="mb-3">
+                      <PerClassAccuracyPanel perClass={report.per_class_accuracy} />
+                    </div>
+                  )}
+
                   {/* Stats grid */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
                     {[
                       { label: 'Avg. Error', val: report.mae != null ? report.mae.toFixed(2) : '—', tip: 'Mean Absolute Error' },
-                      { label: 'Error Spread', val: report.rmse != null ? report.rmse.toFixed(2) : '—', tip: 'Root Mean Squared Error' },
+                      { label: 'Error Spread', val: report.rmse != null ? report.rmse.toFixed(2) : '—', tip: 'Root Mean Squared Error — high values flag occasional catastrophic misses' },
                       { label: '% Error', val: report.mape != null ? `${report.mape.toFixed(1)}%` : '—', tip: 'Mean Absolute % Error' },
                       { label: 'Predictions', val: String(report.total_predictions || 0), tip: 'Total predictions evaluated' },
                     ].map(s => (

@@ -415,17 +415,17 @@ export default function MLDashboard() {
                                 ))}
                             </div>
 
-                            <button
-                                onClick={triggerInference}
-                                disabled={sandboxMutation.isPending}
-                                className={cn(
-                                    "w-full mt-6 h-16 rounded-2xl bg-linear-to-r from-blue-600 via-indigo-600 to-indigo-700 text-white font-black uppercase tracking-widest text-sm flex items-center justify-center gap-3 transition-all hover:opacity-90 active:scale-[0.98] shadow-2xl shadow-blue-500/20 disabled:opacity-50",
-                                    sandboxMutation.isPending && "animate-pulse"
-                                )}
-                            >
-                                {sandboxMutation.isPending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-                                Initiate Machine Inference
-                            </button>
+                             <button
+                                 onClick={() => triggerInference()}
+                                 disabled={sandboxMutation.isPending}
+                                 className={cn(
+                                     "w-full mt-6 h-16 rounded-2xl bg-linear-to-r from-blue-600 via-indigo-600 to-indigo-700 text-white font-black uppercase tracking-widest text-sm flex items-center justify-center gap-3 transition-all hover:opacity-90 active:scale-[0.98] shadow-2xl shadow-blue-500/20 disabled:opacity-50",
+                                     sandboxMutation.isPending && "animate-pulse"
+                                 )}
+                             >
+                                 {sandboxMutation.isPending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+                                 Initiate Machine Inference
+                             </button>
                         </div>
 
                         {/* Recommendation Cards */}
