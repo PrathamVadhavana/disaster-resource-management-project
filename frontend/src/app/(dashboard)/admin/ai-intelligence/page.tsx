@@ -218,6 +218,10 @@ export default function AdminCoordinatorPage() {
         { id: 'history', label: 'Query History', icon: Clock },
     ] as const
 
+    // Tabs where the disaster filter is relevant
+    const FILTER_TABS = ['sitrep', 'anomalies', 'outcomes', 'query', 'history', 'hotspots', 'forecast', 'spread']
+    const showDisasterFilterButton = FILTER_TABS.includes(activeTab)
+
     const [isRefreshing, setIsRefreshing] = useState(false)
     const visibleTabs = tabs.slice(0, 6)
     const hiddenTabs = tabs.slice(6)
@@ -249,8 +253,8 @@ export default function AdminCoordinatorPage() {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
-                    {/* Disaster Filter Dropdown */}
-                    <div className="relative">
+                    {/* Disaster Filter Dropdown — only for tabs that use it */}
+                    {showDisasterFilterButton && <div className="relative">
                         <button
                             onClick={() => setShowDisasterFilter(!showDisasterFilter)}
                             className={cn(
@@ -261,7 +265,16 @@ export default function AdminCoordinatorPage() {
                             )}
                         >
                             {selectedDisasterId ? <Filter className="w-4 h-4" /> : <Globe className="w-4 h-4" />}
-                            <span className="hidden sm:inline">{selectedDisasterId ? 'Filtered' : 'All Disasters'}</span>
+                            <span className="hidden sm:inline">{selectedDisasterId
+                                ? (() => {
+                                    const d = Array.isArray(disasterList) ? disasterList.find((x: any) => x.id === selectedDisasterId) : null
+                                    if (!d) return 'Filtered'
+                                    const dtype = (d.type || d.disaster_type || '').toLowerCase()
+                                    const DISASTER_TYPE_EMOJI: Record<string, string> = { earthquake: '🌍', wildfire: '🔥', fire: '🔥', flood: '🌊', cyclone: '🌀', hurricane: '🌀', tsunami: '🌊', drought: '☀️', landslide: '⛰️', volcano: '🌋', storm: '⛈️', other: '⚠️' }
+                                    const emoji = DISASTER_TYPE_EMOJI[dtype] || '⚠️'
+                                    return `${emoji} ${d.title || dtype || 'Filtered'}`
+                                })()
+                                : 'All Disasters'}</span>
                             <ChevronDown className={cn("w-3 h-3 transition-transform", showDisasterFilter && "rotate-180")} />
                         </button>
                         {showDisasterFilter && (
@@ -280,33 +293,47 @@ export default function AdminCoordinatorPage() {
                                         <Globe className="w-4 h-4" />
                                         All Disasters
                                     </button>
-                                    {Array.isArray(disasterList) && disasterList.map((d: any) => (
-                                        <button
-                                            key={d.id}
-                                            onClick={() => { setSelectedDisasterId(d.id); setShowDisasterFilter(false) }}
-                                            className={cn(
-                                                "flex items-center gap-2 w-full px-4 py-2 text-sm text-left transition-colors",
-                                                selectedDisasterId === d.id
-                                                    ? "bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400"
-                                                    : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5"
-                                            )}
-                                        >
-                                            <div className={cn(
-                                                "w-2 h-2 rounded-full shrink-0",
-                                                d.severity === 'critical' ? 'bg-red-500' :
-                                                d.severity === 'high' ? 'bg-orange-500' :
-                                                d.severity === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
-                                            )} />
-                                            <div className="flex-1 min-w-0">
-                                                <p className="font-medium truncate">{d.title || d.type}</p>
-                                                <p className="text-xs text-slate-400 truncate">{d.location_name || 'Unknown location'}</p>
-                                            </div>
-                                        </button>
-                                    ))}
+                                    {Array.isArray(disasterList) && (() => {
+                                        // Group disasters by type for cleaner UI
+                                        const DISASTER_TYPE_EMOJI: Record<string, string> = {
+                                            earthquake: '🌍', wildfire: '🔥', fire: '🔥',
+                                            flood: '🌊', cyclone: '🌀', hurricane: '🌀',
+                                            tsunami: '🌊', drought: '☀️', landslide: '⛰️',
+                                            volcano: '🌋', storm: '⛈️', other: '⚠️',
+                                        }
+                                        return disasterList.map((d: any) => {
+                                            const dtype = (d.type || d.disaster_type || 'other').toLowerCase()
+                                            const emoji = DISASTER_TYPE_EMOJI[dtype] || DISASTER_TYPE_EMOJI.other
+                                            return (
+                                                <button
+                                                    key={d.id}
+                                                    onClick={() => { setSelectedDisasterId(d.id); setShowDisasterFilter(false) }}
+                                                    className={cn(
+                                                        "flex items-center gap-2 w-full px-4 py-2 text-sm text-left transition-colors",
+                                                        selectedDisasterId === d.id
+                                                            ? "bg-purple-50 dark:bg-purple-500/10 text-purple-700 dark:text-purple-400"
+                                                            : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5"
+                                                    )}
+                                                >
+                                                    <span className="text-base shrink-0">{emoji}</span>
+                                                    <div className={cn(
+                                                        "w-2 h-2 rounded-full shrink-0",
+                                                        d.severity === 'critical' ? 'bg-red-500' :
+                                                        d.severity === 'high' ? 'bg-orange-500' :
+                                                        d.severity === 'medium' ? 'bg-yellow-500' : 'bg-green-500'
+                                                    )} />
+                                                    <div className="flex-1 min-w-0">
+                                                        <p className="font-medium truncate">{d.title || d.type}</p>
+                                                        <p className="text-xs text-slate-400 truncate capitalize">{dtype} · {d.location_name || d.locations?.name || 'Unknown location'}</p>
+                                                    </div>
+                                                </button>
+                                            )
+                                        })
+                                    })()}
                                 </div>
                             </>
                         )}
-                    </div>
+                    </div>}
                     <button
                         onClick={() => setShowGeneratePanel(true)}
                         disabled={generateMutation.isPending || isRefreshing}
@@ -879,7 +906,7 @@ export default function AdminCoordinatorPage() {
             {activeTab === 'outcomes' && (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
                     <ErrorBoundary>
-                        <OutcomeTrackingPanel />
+                        <OutcomeTrackingPanel selectedDisasterId={selectedDisasterId} />
                     </ErrorBoundary>
                 </div>
             )}
@@ -897,7 +924,7 @@ export default function AdminCoordinatorPage() {
             {activeTab === 'anomalies' && (
                 <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-6">
                     <ErrorBoundary>
-                        <AnomalyAlertPanel />
+                        <AnomalyAlertPanel selectedDisasterId={selectedDisasterId} />
                     </ErrorBoundary>
                 </div>
             )}
@@ -1096,7 +1123,7 @@ export default function AdminCoordinatorPage() {
             {activeTab === 'forecast' && (
                 <div className="space-y-4">
                     <ErrorBoundary>
-                        <TFTForecastWidget />
+                        <TFTForecastWidget selectedDisasterId={selectedDisasterId} />
                     </ErrorBoundary>
                 </div>
             )}

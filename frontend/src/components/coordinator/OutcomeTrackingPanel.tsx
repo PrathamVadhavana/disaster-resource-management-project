@@ -4,30 +4,42 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useState } from 'react'
 import {
-  Target, TrendingUp, TrendingDown, CheckCircle2,
-  XCircle, RefreshCw, Loader2, BarChart3, ArrowRight
+  Target, TrendingUp, CheckCircle2,
+  XCircle, RefreshCw, Loader2, BarChart3, ArrowRight, ServerCrash
 } from 'lucide-react'
 
-export default function OutcomeTrackingPanel() {
+export default function OutcomeTrackingPanel({ selectedDisasterId }: { selectedDisasterId?: string | null }) {
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useState<'outcomes' | 'evaluations' | 'accuracy'>('accuracy')
 
-  const { data: accuracyData, isLoading: accuracyLoading } = useQuery({
-    queryKey: ['accuracy-summary'],
+  const { data: accuracyData, isLoading: accuracyLoading, error: accuracyError, refetch: refetchAccuracy } = useQuery({
+    queryKey: ['accuracy-summary', selectedDisasterId],
     queryFn: () => api.getAccuracySummary(),
     refetchInterval: 120_000,
+    retry: 1,
   })
 
-  const { data: outcomesData, isLoading: outcomesLoading } = useQuery({
-    queryKey: ['outcomes'],
-    queryFn: () => api.getOutcomes({ limit: 20 }),
+  const { data: outcomesData, isLoading: outcomesLoading, error: outcomesError } = useQuery({
+    queryKey: ['outcomes', selectedDisasterId],
+    queryFn: async () => {
+      if (selectedDisasterId) {
+        try {
+          return await api.getDisasterOutcomes(selectedDisasterId)
+        } catch {
+          return api.getOutcomes({ limit: 20 })
+        }
+      }
+      return api.getOutcomes({ limit: 20 })
+    },
     enabled: activeTab === 'outcomes',
+    retry: 1,
   })
 
-  const { data: evaluationsData, isLoading: evaluationsLoading } = useQuery({
+  const { data: evaluationsData, isLoading: evaluationsLoading, error: evaluationsError } = useQuery({
     queryKey: ['evaluation-reports'],
     queryFn: () => api.getEvaluationReports({ limit: 10 }),
     enabled: activeTab === 'evaluations',
+    retry: 1,
   })
 
   const autoCaptureMutation = useMutation({
@@ -52,6 +64,31 @@ export default function OutcomeTrackingPanel() {
     { id: 'evaluations' as const, label: 'Evaluations', icon: TrendingUp },
   ]
 
+  const ErrorState = ({ message, onRetry }: { message?: string; onRetry?: () => void }) => (
+    <div className="rounded-xl border border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/5 p-6 text-center">
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-500/10 flex items-center justify-center">
+          <ServerCrash className="w-5 h-5 text-red-500" />
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-red-700 dark:text-red-400">Service Unavailable</p>
+          <p className="text-xs text-red-500/80 dark:text-red-400/70 mt-1">
+            {message || 'Could not load outcome data. Ensure the ML backend is running.'}
+          </p>
+        </div>
+        {onRetry && (
+          <button
+            onClick={onRetry}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-100 dark:bg-red-500/10 text-red-700 dark:text-red-400 text-xs font-medium hover:bg-red-200 dark:hover:bg-red-500/20 transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Retry
+          </button>
+        )}
+      </div>
+    </div>
+  )
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -60,6 +97,11 @@ export default function OutcomeTrackingPanel() {
           <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
             <Target className="w-5 h-5 text-emerald-500" />
             Outcome Tracking & Feedback Loop
+            {selectedDisasterId && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-medium">
+                Filtered
+              </span>
+            )}
           </h2>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
             Actual vs. predicted outcomes drive self-improving model accuracy
@@ -112,6 +154,11 @@ export default function OutcomeTrackingPanel() {
             <div className="flex items-center justify-center h-32">
               <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
             </div>
+          ) : accuracyError ? (
+            <ErrorState
+              message={(accuracyError as Error)?.message}
+              onRetry={() => refetchAccuracy()}
+            />
           ) : accuracyData ? (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {(['severity', 'spread', 'impact'] as const).map(ptype => {
@@ -138,9 +185,9 @@ export default function OutcomeTrackingPanel() {
                       <div className="space-y-2">
                         {data.accuracy !== null && data.accuracy !== undefined && (
                           <div className="flex items-center justify-between">
-                            <span className="text-xs text-slate-500">Accuracy</span>
-                            <span className={`text-sm font-bold ${data.accuracy >= 0.8 ? 'text-green-600' :
-                              data.accuracy >= 0.6 ? 'text-amber-600' : 'text-red-600'
+                            <span className="text-xs text-slate-500 dark:text-slate-400">Accuracy</span>
+                            <span className={`text-sm font-bold ${data.accuracy >= 0.8 ? 'text-green-600 dark:text-green-400' :
+                              data.accuracy >= 0.6 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'
                               }`}>
                               {(data.accuracy * 100).toFixed(1)}%
                             </span>
@@ -148,7 +195,7 @@ export default function OutcomeTrackingPanel() {
                         )}
                         {data.mae !== null && data.mae !== undefined && (
                           <div className="flex items-center justify-between">
-                            <span className="text-xs text-slate-500">MAE</span>
+                            <span className="text-xs text-slate-500 dark:text-slate-400">MAE</span>
                             <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
                               {data.mae.toFixed(2)}
                             </span>
@@ -156,7 +203,7 @@ export default function OutcomeTrackingPanel() {
                         )}
                         {data.rmse !== null && data.rmse !== undefined && (
                           <div className="flex items-center justify-between">
-                            <span className="text-xs text-slate-500">RMSE</span>
+                            <span className="text-xs text-slate-500 dark:text-slate-400">RMSE</span>
                             <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
                               {data.rmse.toFixed(2)}
                             </span>
@@ -164,7 +211,7 @@ export default function OutcomeTrackingPanel() {
                         )}
                         {data.mape !== null && data.mape !== undefined && (
                           <div className="flex items-center justify-between">
-                            <span className="text-xs text-slate-500">MAPE</span>
+                            <span className="text-xs text-slate-500 dark:text-slate-400">MAPE</span>
                             <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
                               {data.mape.toFixed(1)}%
                             </span>
@@ -190,7 +237,7 @@ export default function OutcomeTrackingPanel() {
 
           {/* Feedback loop diagram */}
           <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/[0.01] p-4">
-            <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
+            <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
               Self-Improving Feedback Loop
             </h3>
             <div className="flex items-center justify-center gap-2 flex-wrap text-xs">
@@ -222,16 +269,20 @@ export default function OutcomeTrackingPanel() {
             <div className="flex items-center justify-center h-32">
               <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
             </div>
+          ) : outcomesError ? (
+            <div className="p-6">
+              <ErrorState message={(outcomesError as Error)?.message} />
+            </div>
           ) : (outcomesData?.outcomes || []).length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-slate-100 dark:border-white/5">
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Type</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Predicted</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Actual</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Error</th>
-                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Match</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500 dark:text-slate-400">Type</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500 dark:text-slate-400">Predicted</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500 dark:text-slate-400">Actual</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500 dark:text-slate-400">Error</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500 dark:text-slate-400">Match</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-white/5">
@@ -253,7 +304,7 @@ export default function OutcomeTrackingPanel() {
                           <span className={o.area_error_pct > 0 ? 'text-red-500' : 'text-green-500'}>
                             {o.area_error_pct > 0 ? '+' : ''}{o.area_error_pct.toFixed(1)}%
                           </span>
-                        ) : '—'}
+                        ) : <span className="text-slate-400 dark:text-slate-500">—</span>}
                       </td>
                       <td className="px-4 py-2">
                         {o.severity_match === true ? (
@@ -284,6 +335,8 @@ export default function OutcomeTrackingPanel() {
             <div className="flex items-center justify-center h-32">
               <Loader2 className="w-5 h-5 text-slate-400 animate-spin" />
             </div>
+          ) : evaluationsError ? (
+            <ErrorState message={(evaluationsError as Error)?.message} />
           ) : (evaluationsData?.reports || []).length > 0 ? (
             (evaluationsData?.reports || []).map((report: any) => (
               <div
@@ -303,24 +356,24 @@ export default function OutcomeTrackingPanel() {
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                   {report.accuracy !== null && (
                     <div>
-                      <span className="text-slate-400">Accuracy</span>
+                      <span className="text-slate-400 dark:text-slate-500">Accuracy</span>
                       <p className="font-bold text-slate-700 dark:text-slate-300">{(report.accuracy * 100).toFixed(1)}%</p>
                     </div>
                   )}
                   {report.mae !== null && (
                     <div>
-                      <span className="text-slate-400">MAE</span>
+                      <span className="text-slate-400 dark:text-slate-500">MAE</span>
                       <p className="font-bold text-slate-700 dark:text-slate-300">{report.mae?.toFixed(2)}</p>
                     </div>
                   )}
                   {report.rmse !== null && (
                     <div>
-                      <span className="text-slate-400">RMSE</span>
+                      <span className="text-slate-400 dark:text-slate-500">RMSE</span>
                       <p className="font-bold text-slate-700 dark:text-slate-300">{report.rmse?.toFixed(2)}</p>
                     </div>
                   )}
                   <div>
-                    <span className="text-slate-400">Predictions</span>
+                    <span className="text-slate-400 dark:text-slate-500">Predictions</span>
                     <p className="font-bold text-slate-700 dark:text-slate-300">{report.total_predictions}</p>
                   </div>
                 </div>

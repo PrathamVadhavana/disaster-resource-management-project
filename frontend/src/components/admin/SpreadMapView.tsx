@@ -55,6 +55,28 @@ const RESOURCE_ICONS: Record<string, string> = {
     other: '📦',
 }
 
+// ─── Map tile styles ──────────────────────────────────────────────────────────
+const MAP_STYLE_DARK = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'
+const MAP_STYLE_LIGHT = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
+
+// ─── Hook: detect theme ───────────────────────────────────────────────────────
+function useIsDarkMode() {
+    const [isDark, setIsDark] = useState(() => {
+        if (typeof window === 'undefined') return true
+        return document.documentElement.classList.contains('dark')
+    })
+
+    useEffect(() => {
+        const observer = new MutationObserver(() => {
+            setIsDark(document.documentElement.classList.contains('dark'))
+        })
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+        return () => observer.disconnect()
+    }, [])
+
+    return isDark
+}
+
 // ─── Epicenter SVG ─────────────────────────────────────────────────────────
 const EpicenterMarker = memo(function EpicenterMarker() {
     return (
@@ -81,9 +103,16 @@ const EpicenterMarker = memo(function EpicenterMarker() {
 })
 
 // ─── Victim Marker Component (Interactive) ───────────────────────────────────
-function VictimMarkerItem({ marker, isActive, onToggle, onClose }: { marker: VictimMarkerData, isActive: boolean, onToggle: () => void, onClose: () => void }) {
+function VictimMarkerItem({ marker, isActive, onToggle, onClose, isDark }: { marker: VictimMarkerData, isActive: boolean, onToggle: () => void, onClose: () => void, isDark: boolean }) {
     const priorityColor = PRIORITY_COLORS[marker.priority] || PRIORITY_COLORS.medium
     const resourceIcon = RESOURCE_ICONS[marker.resource_type] || RESOURCE_ICONS.other
+
+    // Popup background & text adapt to theme
+    const popupBg = isDark ? 'rgba(15, 23, 42, 0.85)' : 'rgba(255, 255, 255, 0.95)'
+    const popupBorder = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'
+    const titleColor = isDark ? '#f8fafc' : '#0f172a'
+    const descColor = isDark ? '#cbd5e1' : '#475569'
+    const metaColor = isDark ? '#94a3b8' : '#64748b'
 
     return (
         <>
@@ -129,7 +158,7 @@ function VictimMarkerItem({ marker, isActive, onToggle, onClose }: { marker: Vic
                     longitude={marker.longitude}
                     latitude={marker.latitude}
                     anchor="bottom"
-                    offset={[0, -42]}
+                    offset={[0, -42] as any}
                     onClose={onClose}
                     closeButton={false}
                     closeOnClick={true}
@@ -142,22 +171,30 @@ function VictimMarkerItem({ marker, isActive, onToggle, onClose }: { marker: Vic
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, scale: 0.95 }}
                         transition={{ duration: 0.2, ease: "easeOut" }}
-                        className="bg-slate-900/80 backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)] rounded-xl"
-                        style={{ fontFamily: 'Inter, system-ui, sans-serif', padding: '12px' }}
+                        style={{
+                            background: popupBg,
+                            backdropFilter: 'blur(16px)',
+                            WebkitBackdropFilter: 'blur(16px)',
+                            border: `1px solid ${popupBorder}`,
+                            boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+                            borderRadius: '12px',
+                            fontFamily: 'Inter, system-ui, sans-serif',
+                            padding: '12px',
+                        }}
                     >
                         <div style={{
                             display: 'flex',
                             alignItems: 'center',
                             gap: '10px',
-                            borderBottom: '1px solid rgba(255,255,255,0.1)',
+                            borderBottom: `1px solid ${popupBorder}`,
                             paddingBottom: '8px',
                             marginBottom: '8px',
                         }}>
-                            <div className="flex items-center justify-center w-8 h-8 rounded-full bg-white/10 text-lg shadow-inner">
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 32, height: 32, borderRadius: '50%', background: isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)', fontSize: 18 }}>
                                 {resourceIcon}
                             </div>
                             <div>
-                                <div style={{ fontWeight: 600, textTransform: 'capitalize', fontSize: '14px', color: '#f8fafc' }}>
+                                <div style={{ fontWeight: 600, textTransform: 'capitalize', fontSize: '14px', color: titleColor }}>
                                     {marker.resource_type}
                                 </div>
                                 <div style={{
@@ -172,21 +209,27 @@ function VictimMarkerItem({ marker, isActive, onToggle, onClose }: { marker: Vic
                             </div>
                         </div>
                         {marker.description && (
-                            <p style={{ color: '#cbd5e1', margin: '0 0 8px 0', fontSize: '12px', lineHeight: 1.4 }}>
+                            <p style={{ color: descColor, margin: '0 0 8px 0', fontSize: '12px', lineHeight: 1.4 }}>
                                 {marker.description}
                             </p>
                         )}
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
-                            <span style={{ color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <span style={{ color: metaColor, display: 'flex', alignItems: 'center', gap: '4px' }}>
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                                 {marker.head_count} {marker.head_count > 1 ? 'people' : 'person'}
                             </span>
                             <span style={{
                                 padding: '2px 8px',
                                 borderRadius: '6px',
-                                background: marker.status === 'pending' ? 'rgba(245, 158, 11, 0.2)' : 'rgba(34, 197, 94, 0.2)',
-                                color: marker.status === 'pending' ? '#fcd34d' : '#86efac',
-                                border: `1px solid ${marker.status === 'pending' ? 'rgba(245,158,11,0.3)' : 'rgba(34,197,94,0.3)'}`,
+                                background: marker.status === 'pending'
+                                    ? (isDark ? 'rgba(245, 158, 11, 0.2)' : 'rgba(245, 158, 11, 0.15)')
+                                    : (isDark ? 'rgba(34, 197, 94, 0.2)' : 'rgba(34, 197, 94, 0.15)'),
+                                color: marker.status === 'pending'
+                                    ? (isDark ? '#fcd34d' : '#b45309')
+                                    : (isDark ? '#86efac' : '#166534'),
+                                border: `1px solid ${marker.status === 'pending'
+                                    ? (isDark ? 'rgba(245,158,11,0.3)' : 'rgba(245,158,11,0.4)')
+                                    : (isDark ? 'rgba(34,197,94,0.3)' : 'rgba(34,197,94,0.4)')}`,
                                 fontWeight: 600,
                                 textTransform: 'capitalize',
                             }}>
@@ -201,8 +244,6 @@ function VictimMarkerItem({ marker, isActive, onToggle, onClose }: { marker: Vic
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-// 3D GeoJSON Feature Extractor. We drop tiny intensities to save geometry & render time.
 function gridToGeoJSON(grid: number[][], bounds: SpreadMapViewProps['bounds']) {
     const features: any[] = []
     if (!grid?.length) return { type: 'FeatureCollection' as const, features }
@@ -218,7 +259,6 @@ function gridToGeoJSON(grid: number[][], bounds: SpreadMapViewProps['bounds']) {
     const dLat = (maxLat - minLat) / (rows - 1)
     const dLon = (maxLon - minLon) / (cols - 1)
 
-    // Higher threshold: Only render cells > 0.15 intensity for performance
     const THRESHOLD = 0.25 
 
     for (let r = 0; r < rows; r++) {
@@ -226,7 +266,7 @@ function gridToGeoJSON(grid: number[][], bounds: SpreadMapViewProps['bounds']) {
             const val = grid[r][c]
             if (val < THRESHOLD) continue 
 
-            const lat = minLat + r * dLat // Row 0 is South
+            const lat = minLat + r * dLat
             const btmLat = lat - (dLat / 2)
             const topLat = lat + (dLat / 2)
             const leftLon = minLon + c * dLon - (dLon / 2)
@@ -260,7 +300,20 @@ const HEATMAP_COLORS = [
     1.0, '#fcffa4'
 ]
 
-const glassPopupStyles = `
+// Light-mode friendly heatmap palette (more vivid to stand out on light tiles)
+const HEATMAP_COLORS_LIGHT = [
+    'interpolate',
+    ['linear'],
+    ['get', 'val'],
+    0.0, 'rgba(255,200,0,0)',
+    0.2, 'rgba(200,50,180,0.7)',
+    0.5, 'rgba(220,40,40,0.85)',
+    0.8, 'rgba(255,120,0,0.9)',
+    1.0, 'rgba(255,220,0,0.95)'
+]
+
+function getGlassPopupStyles(isDark: boolean) {
+    return `
 .custom-glass-popup .maplibregl-popup-content {
     background: transparent !important;
     box-shadow: none !important;
@@ -268,9 +321,10 @@ const glassPopupStyles = `
     border-radius: 0 !important;
 }
 .custom-glass-popup .maplibregl-popup-tip {
-    border-top-color: rgba(15, 23, 42, 0.8) !important;
+    border-top-color: ${isDark ? 'rgba(15, 23, 42, 0.85)' : 'rgba(255, 255, 255, 0.95)'} !important;
 }
 `
+}
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 function SpreadMapView({
@@ -286,18 +340,19 @@ function SpreadMapView({
     smoothImage,
 }: SpreadMapViewProps) {
     const mapRef = useRef<MapRef | null>(null)
+    const isDark = useIsDarkMode()
+
     const [viewState, setViewState] = useState({
         longitude: center[1],
         latitude: center[0],
         zoom: 10,
-        pitch: 60, // Pitched by default to show 3D mountains
+        pitch: 60,
         bearing: 0
     })
 
     const [is3D, setIs3D] = useState(true)
     const [activePopupId, setActivePopupId] = useState<string | null>(null)
 
-    // Reset center on demand if it drastically moved. Usually controlled by user though.
     useEffect(() => {
         setViewState(prev => ({
             ...prev,
@@ -318,15 +373,13 @@ function SpreadMapView({
 
     const [geoJsonData, setGeoJsonData] = useState<any>({ type: 'FeatureCollection', features: [] })
     
-    // Throttled update – prevents lagging on every mini-step
     useEffect(() => {
         const timeout = setTimeout(() => {
             setGeoJsonData(gridToGeoJSON(grid, bounds))
-        }, 150) // Reduced lag: update every 150ms instead of every 80ms
+        }, 150)
         return () => clearTimeout(timeout)
     }, [grid, bounds])
 
-    // Interaction handler to replace mapMouseTracker
     const handleMouseMove = useCallback((e: any) => {
         if (!onCellHover || !grid?.length) return
         
@@ -344,7 +397,6 @@ function SpreadMapView({
         const rows = grid.length
         const cols = grid[0]?.length || 0
 
-        // Correct Mapping: Bottom-up
         const row = Math.floor(((lat - bounds.yRange[0]) / (bounds.yRange[1] - bounds.yRange[0])) * rows)
         const col = Math.floor(((lng - bounds.xRange[0]) / (bounds.xRange[1] - bounds.xRange[0])) * cols)
 
@@ -359,14 +411,12 @@ function SpreadMapView({
         if (onCellLeave) onCellLeave()
     }, [onCellLeave])
 
-    // Compute paint height expression
     const extrusionHeight = useMemo(() => {
         return is3D 
-            ? ['*', ['*', ['get', 'val'], ['get', 'val']], 15000] // Slightly higher peaks for better 3D effect
+            ? ['*', ['*', ['get', 'val'], ['get', 'val']], 15000]
             : 0
     }, [is3D])
 
-    // Image source coordinates [TL, TR, BR, BL]
     const imageCoordinates = useMemo(() => {
         return [
             [bounds.xRange[0], bounds.yRange[1]],
@@ -376,14 +426,24 @@ function SpreadMapView({
         ] as [[number, number], [number, number], [number, number], [number, number]]
     }, [bounds])
 
+    // Theme-aware colors
+    const bgColor = isDark ? '#1a1a1a' : '#f8fafc'
+    const badgeBg = isDark ? 'rgba(15,23,42,0.7)' : 'rgba(255,255,255,0.92)'
+    const badgeBorder = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.12)'
+    const badgeText = isDark ? '#fff' : '#0f172a'
+    const dotColor = isDark ? '#f87171' : '#ef4444'
+    const toggleBg = isDark ? 'rgba(15,23,42,0.7)' : 'rgba(255,255,255,0.92)'
+    const toggleText = isDark ? '#fff' : '#1e293b'
+
+    const heatmapColors = isDark ? HEATMAP_COLORS : HEATMAP_COLORS_LIGHT
+
     return (
-        <div style={{ height, width: '100%' }} className="relative bg-[#1a1a1a]">
-            {/* MapLibre 3D Canvas */}
+        <div style={{ height, width: '100%', backgroundColor: bgColor }} className="relative">
             <Map
                 ref={mapRef}
                 {...viewState}
                 onMove={evt => setViewState(evt.viewState)}
-                mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+                mapStyle={isDark ? MAP_STYLE_DARK : MAP_STYLE_LIGHT}
                 onMouseMove={handleMouseMove}
                 onMouseOut={handleMouseLeave}
                 maxPitch={85}
@@ -391,37 +451,34 @@ function SpreadMapView({
             >
                 <NavigationControl position="bottom-right" visualizePitch={true} />
 
-                {/* Smooth Raster Heatmap Base */}
                 {smoothImage && (
                     <Source id="smooth-heatmap-source" type="image" url={smoothImage} coordinates={imageCoordinates}>
                         <Layer
                             id="smooth-heatmap-layer"
                             type="raster"
                             paint={{
-                                'raster-opacity': is3D ? 0.6 : 0.85,
+                                'raster-opacity': is3D ? (isDark ? 0.6 : 0.5) : (isDark ? 0.85 : 0.7),
                                 'raster-fade-duration': 300
                             }}
                         />
                     </Source>
                 )}
 
-                {/* 3D Heatmap Peaks (slightly more transparent to see smooth base) */}
                 <Source id="heatmap-data" type="geojson" data={geoJsonData}>
                     <Layer
                         id="heatmap-extrusion-layer"
                         type="fill-extrusion"
                         paint={{
-                            'fill-extrusion-color': HEATMAP_COLORS as any,
+                            'fill-extrusion-color': heatmapColors as any,
                             'fill-extrusion-height': extrusionHeight as any,
                             'fill-extrusion-base': 0,
-                            'fill-extrusion-opacity': is3D ? 0.5 : 0, // Lower opacity if 3D to see the smooth raster underneath
+                            'fill-extrusion-opacity': is3D ? (isDark ? 0.5 : 0.65) : 0,
                             'fill-extrusion-height-transition': { duration: 400 } as any,
                             'fill-extrusion-color-transition': { duration: 400 } as any
                         }}
                     />
                 </Source>
 
-                {/* Epicenter markers */}
                 {epicenters.length > 0 ? (
                     epicenters.map((ep, idx) => (
                         <Marker key={`ep-${idx}`} longitude={ep.lon} latitude={ep.lat} anchor="center" style={{ pointerEvents: 'none' }}>
@@ -434,7 +491,6 @@ function SpreadMapView({
                     </Marker>
                 )}
 
-                {/* Victim request markers */}
                 {showMarkers && victimMarkers.map((marker) => (
                     <VictimMarkerItem 
                         key={marker.id} 
@@ -442,37 +498,43 @@ function SpreadMapView({
                         isActive={activePopupId === marker.id}
                         onToggle={() => setActivePopupId(activePopupId === marker.id ? null : marker.id)}
                         onClose={() => setActivePopupId(null)}
+                        isDark={isDark}
                     />
                 ))}
             </Map>
 
-            {/* Context styles for Popup */}
-            <style dangerouslySetInnerHTML={{ __html: glassPopupStyles }} />
+            <style dangerouslySetInnerHTML={{ __html: getGlassPopupStyles(isDark) }} />
 
-            {/* Subtle vignette overlay for premium look */}
+            {/* Vignette overlay */}
             <div
                 className="absolute inset-0 pointer-events-none z-[400]"
                 style={{
-                    boxShadow: 'inset 0 0 60px rgba(0,0,0,0.15)',
+                    boxShadow: 'inset 0 0 60px rgba(0,0,0,0.10)',
                     borderRadius: 'inherit',
                 }}
             />
 
-            {/* Victim markers count badge */}
+            {/* Active requests badge */}
             <AnimatePresence>
                 {showMarkers && victimMarkers.length > 0 && (
                     <motion.div 
                         initial={{ opacity: 0, y: -20, scale: 0.9 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: -20, scale: 0.9 }}
-                        className="absolute top-4 left-4 z-[1000] bg-slate-900/60 backdrop-blur-md rounded-xl px-4 py-3 border border-white/10 shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
+                        className="absolute top-4 left-4 z-[1000] rounded-xl px-4 py-3 border shadow-lg"
+                        style={{
+                            background: badgeBg,
+                            borderColor: badgeBorder,
+                            backdropFilter: 'blur(12px)',
+                            WebkitBackdropFilter: 'blur(12px)',
+                        }}
                     >
                         <div className="flex items-center gap-3">
                             <span className="relative flex h-3 w-3">
                                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
                                 <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"></span>
                             </span>
-                            <span className="text-xs font-bold text-white tracking-widest uppercase">
+                            <span className="text-xs font-bold tracking-widest uppercase" style={{ color: badgeText }}>
                                 {victimMarkers.length} Active {victimMarkers.length === 1 ? 'Request' : 'Requests'}
                             </span>
                         </div>
@@ -480,7 +542,7 @@ function SpreadMapView({
                 )}
             </AnimatePresence>
             
-            {/* 2D/3D Toggle Button */}
+            {/* 2D/3D Toggle */}
             <motion.div 
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -488,10 +550,17 @@ function SpreadMapView({
             >
                 <button
                     onClick={toggle3D}
-                    className="bg-slate-900/60 hover:bg-slate-800/80 backdrop-blur-md rounded-xl px-4 py-3 border border-white/10 shadow-[0_4px_24px_rgba(0,0,0,0.4)] transition-all flex items-center gap-3 group cursor-pointer"
+                    className="rounded-xl px-4 py-3 border transition-all flex items-center gap-3 group cursor-pointer"
+                    style={{
+                        background: toggleBg,
+                        borderColor: badgeBorder,
+                        backdropFilter: 'blur(12px)',
+                        WebkitBackdropFilter: 'blur(12px)',
+                        boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
+                    }}
                 >
                     <div className={cn("w-2.5 h-2.5 rounded-full transition-all duration-300", is3D ? "bg-orange-500 shadow-[0_0_12px_rgba(249,115,22,0.9)]" : "bg-blue-400 shadow-[0_0_12px_rgba(96,165,250,0.9)]")} />
-                    <span className="text-xs font-bold text-white uppercase tracking-widest group-hover:text-orange-200 transition-colors">
+                    <span className="text-xs font-bold uppercase tracking-widest" style={{ color: toggleText }}>
                         {is3D ? '3D Extrusion' : '2D Heatmap'}
                     </span>
                 </button>
