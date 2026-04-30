@@ -162,6 +162,8 @@ RESOURCE RULES: resource_types is an array — include ALL implied types.
 "hungry" → Food. "no clean water" → Water. "roof collapsed" → Shelter.
 "hurt/bleeding" → Medical.
 
+LOCATION RULES: Relative or vague locations like "my house", "here", "ghar main", or "room" are INVALID. If a specific address, street, or GPS coordinate is not explicitly provided, you MUST set "location": null and add "location" to "missing_info".
+
 LANGUAGE RULE: response_to_user MUST be in the same language as the input.
 
 STRICT: Return ONLY the JSON object. No preamble, no markdown fences.
