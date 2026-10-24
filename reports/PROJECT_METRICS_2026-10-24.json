@@ -1,0 +1,84 @@
+{
+  "generated_at_utc": "2026-10-24T12:04:07.847599+00:00",
+  "scope": "local reproducible benchmarks and repository measurements",
+  "environment": {
+    "os": "Windows",
+    "python": "3.11.14",
+    "frontend_framework": "Next.js 16.1.6"
+  },
+  "repository_scope": {
+    "documented_api_endpoints": 57,
+    "frontend_pages": 52,
+    "backend_router_modules": 27,
+    "backend_service_modules": 39,
+    "backend_test_files": 2
+  },
+  "nlp_benchmark": {
+    "benchmark_type": "deterministic local throughput",
+    "input_cases": 8,
+    "iterations_per_case": 1000,
+    "total_classifications": 8000,
+    "elapsed_seconds": 1.652641,
+    "classifications_per_second": 4840.74,
+    "milliseconds_per_classification": 0.2066,
+    "note": "This is throughput, not classification accuracy. Accuracy requires a labeled ground-truth dataset."
+  },
+  "allocation_benchmark": {
+    "benchmark_type": "deterministic local MILP scenario",
+    "resources": 8,
+    "needs": 4,
+    "iterations": 100,
+    "solver_status": "Optimal",
+    "coverage_percent": 100.0,
+    "allocated_count": 4,
+    "unmet_count": 0,
+    "estimated_delivery_km": 6.12,
+    "optimization_score": 1.0,
+    "median_solve_time_ms": 29.6615,
+    "p95_solve_time_ms": 36.9758,
+    "min_solve_time_ms": 17.0741,
+    "max_solve_time_ms": 48.5302,
+    "baseline_comparison": {
+      "baseline": "nearest eligible resource greedy assignment",
+      "baseline_coverage_percent": 100.0,
+      "baseline_delivery_km": 6.12,
+      "coverage_point_change": 0.0,
+      "delivery_distance_reduction_percent": 0.0,
+      "note": "This scenario does not demonstrate an improvement over the baseline."
+    }
+  },
+  "validation": {
+    "nlp_targeted_tests": {
+      "passed": 30,
+      "failed": 0,
+      "coverage_percent": 35.0,
+      "command": "cd backend; $env:PYTHONPATH='.'; uv run pytest tests\\unit\\test_nlp_service.py --cov=app.services.nlp_service --cov-report=term-missing"
+    },
+    "full_backend_tests": {
+      "collected": 33,
+      "passed": 30,
+      "failed": 3,
+      "failure": "tests/unit/test_dependencies.py patches app.dependencies.db, but that module has no db attribute",
+      "command": "cd backend; $env:PYTHONPATH='.'; uv run pytest --cov=app tests\\ --cov-report=term-missing"
+    },
+    "frontend_build": {
+      "compiled": true,
+      "typecheck": false,
+      "failure": "src/components/coordinator/MLDashboard.tsx:419:33: triggerInference is not assignable to MouseEventHandler<HTMLButtonElement>",
+      "command": "cd frontend; npm run build"
+    }
+  },
+  "resume_safe_metrics": [
+    "Measured 4,840.74 local NLP classifications per second (0.2066 ms per classification) across 8 deterministic request cases.",
+    "Solved a 4-request, 8-resource MILP allocation scenario with 100% coverage; median solve time was 29.66 ms and p95 was 36.98 ms across 100 runs.",
+    "Validated 30 NLP unit tests with 100% pass rate; targeted NLP service line coverage was 35%.",
+    "Delivered a repository scope of 52 frontend pages, 27 backend router modules, 39 backend service modules, and 57 documented API endpoints."
+  ],
+  "not_claimed_without_further_data": [
+    "NLP accuracy, precision, recall, or F1",
+    "Production API latency or throughput",
+    "External data-ingestion success rate",
+    "Anomaly-detection precision or recall",
+    "Real-world operational time or cost reduction"
+  ]
+}
