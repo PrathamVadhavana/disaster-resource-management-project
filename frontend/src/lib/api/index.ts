@@ -522,9 +522,6 @@ export const api = {
     applyFairnessPlan: (data: { plan_index: number; disaster_id?: string }) =>
         apiFetch('/api/admin/fairness-frontier/apply', { method: 'POST', body: JSON.stringify(data) }),
 
-    getDisasterDropdownOptions: () =>
-        apiFetch('/api/disasters/dropdown/options'),
-
     getFairnessAudits: (params?: { disaster_id?: string; limit?: number }) =>
         apiFetch(`/api/admin/fairness-audit${qs(params)}`),
 
